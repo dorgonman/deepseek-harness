@@ -5,6 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, {
+  TOOL_RUNTIME_SCHEDULER,
   defineContentToolFixture,
   type ToolDefinition,
   type ToolExecutionInput,
@@ -25,6 +26,20 @@ function exec(name: string, args: unknown): ToolExecutionInput {
 }
 
 describe('ToolRuntime.executionMode', () => {
+  it('shares the scheduler key with independently loaded tool runtimes', async () => {
+    const ctx = await setup()
+    const schedulerKey = Symbol.for('@deepseek-ai/dsh-tools.scheduler')
+    ctx.tools.register(defineContentToolFixture({
+      name: 'noop', description: 'noop', parameters: {},
+      async execute() { return [] },
+    }))
+
+    expect(TOOL_RUNTIME_SCHEDULER).toBe(schedulerKey)
+    expect(Object.getOwnPropertySymbols(ctx.tools)).toContain(schedulerKey)
+    const prepared = await ctx.tools[TOOL_RUNTIME_SCHEDULER].prepare(exec('noop', {}))
+    expect(prepared.kind).toBe('dispatch')
+  })
+
   it('returns parallel only for an explicit true classifier', async () => {
     const ctx = await setup()
     ctx.tools.register(defineContentToolFixture({
