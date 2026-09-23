@@ -29,7 +29,18 @@ Feature plugins use this package to store and edit their preferences without re-
 
 ### Configuration forms
 
-`ctx.configForms.developerTools` owns the Coding Tools switch and the shared Web and desktop preference `ui-settings.enabled`, defaulting to `true`. Its `enabled` observable publishes accepted choices and `setEnabled` uses the same ordered settings writes. Desktop and loopback Web persist to the Host document; remote Web keeps this choice in one browser-local observable until reload without issuing Host writes. This controls presentation and HTML preview permissions, not Host authorization or Session recording. Host-backed clients keep developer features disabled until the first accepted schema-resolved value arrives; missing or failed initial responses do not enable them. Later refreshes retain the last accepted choice.
+`ctx.configForms.developerTools` owns the Coding Tools switch and the shared Web and desktop preference `ui-settings.enabled`, defaulting to `true`. Its `enabled` observable publishes accepted choices and `setEnabled` uses the same ordered settings writes. Desktop and loopback Web persist to the Host document; remote Web keeps this choice in one browser-local observable until reload without issuing Host writes by default, but can use Host persistence after the trusted-origin opt-in below. This controls presentation and HTML preview permissions, not Host authorization or Session recording. Host-backed clients keep developer features disabled until the first accepted schema-resolved value arrives; missing or failed initial responses do not enable them. Later refreshes retain the last accepted choice.
+
+### Trusted remote Web origins
+
+Non-loopback Web origins use memory-only settings by default. If the Models page reports that settings are unavailable, choose **Enable Host settings on this browser** there to opt in for this browser origin and reload. Alternatively, open that origin's DevTools console and run:
+
+```js
+localStorage.setItem('dsh.settings.allowRemotePersistence', 'true')
+location.reload()
+```
+
+The opt-in is stored in that origin's `localStorage` and lets its page read and write the Host settings document through the authenticated settings API. Enable it only for a trusted origin, such as your own Tailscale URL. Other browsers and origins remain memory-only. If browser storage is blocked, the Models page reports that consent could not be saved. To opt out, run `localStorage.removeItem('dsh.settings.allowRemotePersistence')` in that origin's console and reload.
 
 Feature adapters use `ctx.configForms.get(entryId)` to obtain accepted values and a write queue shared by every editor of that Host entry. Snapshots contain resolved `value`, inherited `base`, raw `user`, revision, writability, and persistence mode. `set` and `unset` submit one operation; `mutate` submits one atomic operation list. Staged editors pass the revision read before editing; conflicts preserve their drafts. Unsetting removes the override and restores inheritance.
 
@@ -59,7 +70,7 @@ The package realizes one ownership rule: the browser keeps one shared mirror of 
 
 ### The describe mirror
 
-The Host Config of the `ui-settings` entry declares the default-on `enabled` preference. The Client plugin injects `remote` with its `settings` namespace, resolves Host persistence once from the fixed `remote.$host` facts, and owns the one `settings.describe` reader in the browser: a shared mirror refreshed on every forwarded `settings/document-updated` event and on `connection/reset` (the first connection included, closing the window where a commit lands between the eager read and the SSE subscription). Cross-namespace surfaces read it through `ctx.configForms.describe()`, a read/fold face (`getSnapshot`/`subscribe`/`ensure`, plus `acceptView` folding a write answer in).
+The Host Config of the `ui-settings` entry declares the default-on `enabled` preference. The Client plugin injects `remote` with its `settings` namespace, resolves Host persistence once from the fixed `remote.$host` facts and the origin's explicit browser opt-in, and owns the one `settings.describe` reader in the browser: a shared mirror refreshed on every forwarded `settings/document-updated` event and on `connection/reset` (the first connection included, closing the window where a commit lands between the eager read and the SSE subscription). Cross-namespace surfaces read it through `ctx.configForms.describe()`, a read/fold face (`getSnapshot`/`subscribe`/`ensure`, plus `acceptView` folding a write answer in).
 
 ### Shared entry writes
 
@@ -103,7 +114,7 @@ None; this package neither assembles nor sends a provider request.
 
 These limits define where the settings transport cannot reach; they are current package constraints.
 
-- **Non-loopback pages get no durable settings** — this Client keeps Host persistence disabled there, so a form starts `unavailable` and never crosses the wire; form writes are inert even though Connection authentication covers the API. The shared Coding Tools preference instead provides browser-local changes.
+- **Non-loopback pages default to memory-only settings** — without the browser-origin opt-in, forms start `unavailable` and do not read or write the Host document even though Connection authentication covers the API. A trusted origin can opt in as described above; the shared Coding Tools preference stays browser-local while memory-only mode is active.
 
 <a id="dev-note"></a>
 ### Dev Note

@@ -283,10 +283,13 @@ function cardSeatCalls(
     ])
 }
 
-async function mountFace(scripted: ReturnType<typeof scriptedFace>) {
+async function mountFace(
+  scripted: ReturnType<typeof scriptedFace>,
+  remoteConsent?: () => boolean,
+) {
   const { face, update, mutate, set, unset } = scripted
   const ctx = ctxWith(face)
-  const mirror = new SettingsDescribeMirror(ctx)
+  const mirror = new SettingsDescribeMirror(ctx, remoteConsent === undefined ? 'host' : 'memory')
   const controller = new ModelsSettingsStore(ctx, settingsSchema, mirror)
   await controller.load()
   const renderSlot = stubRenderSlot()
@@ -296,6 +299,7 @@ async function mountFace(scripted: ReturnType<typeof scriptedFace>) {
     operations: operationsWith(face),
     schema: settingsSchema,
     t,
+    ...remoteConsent === undefined ? {} : { enableRemotePersistence: remoteConsent },
     renderSlot: renderSlot as unknown as ModelsSectionProps['renderSlot'],
   }
   const view = render(<ModelsSection {...injected} />)
@@ -331,6 +335,19 @@ async function mountDeepSeekCard(overrides: Parameters<typeof scriptedFace>[0] =
 }
 
 describe('ModelsSection', () => {
+  it('keeps remote Models locked until the user chooses to enable settings in this browser', async () => {
+    const enableRemotePersistence = vi.fn(() => false)
+    const scripted = scriptedFace()
+    await mountFace(scripted, enableRemotePersistence)
+
+    expect(screen.getByText(/settings are unavailable in this browser/)).toBeTruthy()
+    expect(enableRemotePersistence).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Enable Host settings on this browser' }))
+    expect(enableRemotePersistence).toHaveBeenCalledOnce()
+    expect(screen.getByRole('alert').textContent).toContain('Browser storage is unavailable')
+    expect(scripted.face.settings.describe).not.toHaveBeenCalled()
+  })
+
   it('hides the add action when no settings namespace can open an editor', async () => {
     const scripted = scriptedFace()
     scripted.face.settings.describe.mockResolvedValue(remoteOk({ writable: true, hasDocument: false, namespaces: [] }))

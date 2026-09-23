@@ -95,6 +95,13 @@ export function apply(ctx: ClientContext): void {
     hooks: { snapshot: controller.store },
     operations,
     schema,
+    ...ctx.configForms.describe().getSnapshot().status === 'unavailable'
+      ? { enableRemotePersistence: () => {
+        if (!ctx.configForms.enableRemotePersistence()) return false
+        globalThis.location.reload()
+        return true
+      } }
+      : {},
     t,
   })
   const deepSeekOnboardingInjected = (): DeepSeekOnboardingInjected => ({

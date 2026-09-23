@@ -30,13 +30,26 @@ export type {
  */
 export const inject = ['remote', 'remote.settings']
 
+/** Read the explicit opt-in flag a non-loopback developer can set in DevTools. */
+function readRemotePersistenceOverride(): boolean {
+  try {
+    return globalThis.localStorage?.getItem('dsh.settings.allowRemotePersistence') === 'true'
+  } catch (_storageUnavailable) {
+    return false
+  }
+}
+
 /** Provide shared forms and refresh them on document changes and reconnects.
  * @param ctx Client provider context.
  */
 export function apply(ctx: Context): void {
   const schema = new SettingsSchemaService(ctx)
   // Every form uses the persistence mode resolved from the connected Host.
-  const persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'
+  // Loopback pages get durable Host settings. Non-loopback pages normally stay
+  // process-local; a developer can opt in via the browser's DevTools console
+  // (localStorage 'dsh.settings.allowRemotePersistence' = 'true') for trusted
+  // tunnels such as Tailscale Serve. The override is opt-in and never the default.
+  const persistence = ctx.remote.$host.isLoopback || readRemotePersistenceOverride() ? 'host' : 'memory'
   const mirror = new SettingsDescribeMirror(ctx, persistence)
   ctx.effect(() => {
     const disposers = [
