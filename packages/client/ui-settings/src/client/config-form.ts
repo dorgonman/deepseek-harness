@@ -286,6 +286,21 @@ export class ConfigForms extends Service {
     return this.mirror
   }
 
+  /**
+   * Record the user's consent for Host settings on this browser origin.
+   * The current mirror stays memory-only; reload the page after success.
+   * @returns whether browser storage accepted the opt-in.
+   */
+  enableRemotePersistence(): boolean {
+    if (this.persistence !== 'memory') return false
+    try {
+      globalThis.localStorage.setItem('dsh.settings.allowRemotePersistence', 'true')
+      return true
+    } catch (_storageUnavailable) {
+      return false
+    }
+  }
+
   /** Get the shared form values and write queue for one Host plugin entry.
    * @param entryId Unique Host plugin entry id.
    * @returns The entry's form, owned by this provider.
