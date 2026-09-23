@@ -48,6 +48,8 @@ export interface ModelsSectionInjected {
   operations: ModelsOperations
   /** Settings schema and immutable path callbacks. */
   schema: SettingsSchemaOperations
+  /** User-triggered consent for Host settings on this remote browser origin. */
+  enableRemotePersistence?: () => boolean
   /** Section copy. */
   t: (key: keyof typeof en) => string
 }
@@ -220,17 +222,21 @@ export function providerCopy(template: string, target: ProviderIdentity): string
  * @returns the section, or null while the shell has not injected yet.
  */
 export function ModelsSection(props: ModelsSectionProps): ReactNode {
-  const { controller, useSnapshot, operations, schema, t, renderSlot } = props
+  const { controller, useSnapshot, operations, schema, t, renderSlot, enableRemotePersistence } = props
   if (
     controller === undefined || useSnapshot === undefined || operations === undefined
     || schema === undefined || t === undefined
   ) return null
-  return <Loaded injected={{ controller, useSnapshot, operations, schema, t }} renderSlot={renderSlot} />
+  const injected = enableRemotePersistence === undefined
+    ? { controller, useSnapshot, operations, schema, t }
+    : { controller, useSnapshot, operations, schema, t, enableRemotePersistence }
+  return <Loaded injected={injected} renderSlot={renderSlot} />
 }
 
 function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderSlot: ModelsRenderSlot }): ReactNode {
-  const { controller, operations, schema, t } = injected
+  const { controller, operations, schema, t, enableRemotePersistence } = injected
   const state = injected.useSnapshot(snapshot => snapshot)
+  const [storageError, setStorageError] = useState(false)
   const [editing, setEditing] = useState<EditorTarget | undefined>(undefined)
   const [addOpen, setAddOpen] = useState(false)
   const [addMode, setAddMode] = useState<AddMode>('catalog')
@@ -314,9 +320,15 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
     return (
       <div className={styles['section']}>
         <p className={styles['error']}>{`${t('loadFailed')}: ${errorText}`}</p>
-        <button type="button" className={styles['secondaryButton']} onClick={() => { void controller.load() }}>
-          {t('retry')}
-        </button>
+        {enableRemotePersistence === undefined
+          ? <button type="button" className={styles['secondaryButton']} onClick={() => { void controller.load() }}>{t('retry')}</button>
+          : <>
+            <p className={styles['advancedHint']}>{t('remotePersistenceHint')}</p>
+            <Button variant="primary" onClick={() => { if (!enableRemotePersistence()) setStorageError(true) }}>
+              {t('enableRemotePersistence')}
+            </Button>
+            {storageError ? <p role="alert" className={styles['error']}>{t('remotePersistenceBlocked')}</p> : null}
+          </>}
       </div>
     )
   }

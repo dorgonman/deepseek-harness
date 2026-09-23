@@ -29,6 +29,8 @@ Open the Models page from the Settings navigation to see every configured provid
 
 A provider with a stored catalog error remains visible with its diagnostic and edit/delete actions. Add actions are offered only for registered settings namespaces, so an unavailable namespace cannot leave a button that opens no editor. A rejected save leaves the editor open and displays the Host diagnostic.
 
+On a non-loopback page without Host settings consent, the Models error state offers **Enable Host settings on this browser** instead of an ineffective Retry. Only a deliberate click saves consent for that browser origin and reloads the page; blocked browser storage reports a local error instead. See [ui-settings](../ui-settings/README.md#use-this-package) for the scope and opt-out procedure.
+
 Host configuration `credentialOnboarding` defaults to `true`. Electron’s preload marker suppresses the credential step automatically; other native shells can set it to `false` in the plugin row; the Models settings page and welcome notice remain available. The Host publishes this public boolean through `webserver/index-inject`, and the Client validates it before registering its dialogs. It is page initialization data, not a persisted completion flag.
 
 ### API keys
@@ -75,7 +77,7 @@ Each settings write carries the card's current `revision`, so a concurrent write
 
 ### Onboarding coordinator
 
-The notice step owns its exact copy in `src/client/locales.ts` and its acknowledgement version in `src/onboarding-copy.ts`; on loopback it compares and writes `ui-settings-general.welcomeNoticeVersion` through the shared configuration form, and only an explicit Continue records the current version. A non-loopback browser cannot use that Host-only namespace, so acknowledgement is process-local and the notice returns after reload. The DeepSeek step targets `deepseek-official` in `llm-deepseek` and renders the existing `ProviderEditor` in credential-only mode inside the shared onboarding modal; `credentials.set` stays the only secret write, and no provider settings are changed.
+The notice step owns its exact copy in `src/client/locales.ts` and its acknowledgement version in `src/onboarding-copy.ts`; a Host-backed browser compares and writes `ui-settings-general.welcomeNoticeVersion` through the shared configuration form, and only an explicit Continue records the current version. A non-loopback browser in memory-only mode keeps acknowledgement process-local, so the notice returns after reload. The DeepSeek step targets `deepseek-official` in `llm-deepseek` and renders the existing `ProviderEditor` in credential-only mode inside the shared onboarding modal; `credentials.set` stays the only secret write, and no provider settings are changed.
 
 </details>
 

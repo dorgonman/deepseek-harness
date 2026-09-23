@@ -104,6 +104,8 @@ This section explains how the package realizes the behavior above; the observabl
 
 The registry holds typed `ToolDefinition`s in scoped layers and projects them onto the model-facing `ToolSchema` set at request time — `output`, `execute`, `finalizeContent`, `timeoutMs`, and presentation callbacks never leak onto the wire. Every call runs a fixed pipeline: `tools/pre-execute` (extensible allow/deny/ask) → registered monotonic guards → `tools/execute` (around-dispatch wrappers) → `tools/post-execute` (inspect/replace, attach context) → definition-owned `finalizeContent` → the observe-only `tools/result` event. Only the `tools/execute` view may replace the required signal, and the registry re-fuses the caller signal before the body.
 
+The agent loop reaches the private staged scheduler through a process-wide symbol, so a tool service loaded from a built bundle and a consumer loaded from source use the same scheduler key.
+
 ### Source map
 
 | File | Role |
