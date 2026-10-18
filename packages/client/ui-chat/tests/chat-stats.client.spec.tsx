@@ -106,7 +106,7 @@ describe('deriveStats', () => {
     expect(stats.toolMs).toBe(3_000)
   })
 
-  it('sums ttft per recorded step and decode throughput inputs per usage-carrying step', () => {
+  it('sums ttft per recorded step and model-phase rate inputs per usage-carrying step', () => {
     const sampled: AssistantMessageNode = {
       ...assistant(1, 1, { outputTokens: 40 }),
       timing: { stepStartTime: 1_000, firstTokenTime: 1_800, completedTime: 4_800 },
@@ -118,9 +118,42 @@ describe('deriveStats', () => {
     const stats = deriveStats([sampled, ttftOnly, assistant(3, 2)])
     expect(stats.ttftMs).toBe(1_200)
     expect(stats.ttftSteps).toBe(2)
-    // The usage-less step contributes no decode share, keeping the ratio honest.
-    expect(stats.decodeMs).toBe(3_000)
+    // The usage-less step contributes neither tokens nor model-phase time.
+    expect(stats.decodeMs).toBe(3_800)
     expect(stats.decodeTokens).toBe(40)
+  })
+
+  it('weights eligible model phases together while excluding invalid timing and tool waits', () => {
+    const first: AssistantMessageNode = {
+      ...assistant(1, 1, { outputTokens: 40 }),
+      timing: { stepStartTime: 1_000, firstTokenTime: 1_800, completedTime: 4_800 },
+    }
+    const tool: ToolResultNode = {
+      kind: 'tool-result', seq: 2, time: 20_000, callId: 'c', call: null, callTime: 4_800, content: [],
+      name: '', args: PartialArguments.EMPTY,
+      isError: false, subCalls: [],
+    }
+    const withoutDelta: AssistantMessageNode = {
+      ...assistant(3, 1, { outputTokens: 60 }),
+      timing: { stepStartTime: 20_000, firstTokenTime: null, completedTime: 21_200 },
+    }
+    const zeroSpan: AssistantMessageNode = {
+      ...assistant(4, 1, { outputTokens: 351 }),
+      timing: { stepStartTime: 30_000, firstTokenTime: 30_000, completedTime: 30_000 },
+    }
+    const reversed: AssistantMessageNode = {
+      ...assistant(5, 1, { outputTokens: 351 }),
+      timing: { stepStartTime: 40_000, firstTokenTime: 39_000, completedTime: 39_000 },
+    }
+    const withoutStart: AssistantMessageNode = {
+      ...assistant(6, 1, { outputTokens: 351 }),
+      timing: { stepStartTime: null, firstTokenTime: 50_000, completedTime: 50_002 },
+    }
+    const stats = deriveStats([first, tool, withoutDelta, zeroSpan, reversed, withoutStart, assistant(7, 1, { outputTokens: 351 })])
+    expect(stats.decodeMs).toBe(5_000)
+    expect(stats.decodeTokens).toBe(100)
+    expect(stats.toolMs).toBe(15_200)
+    expect(stats.decodeTokens / (stats.decodeMs / 1_000)).toBe(20)
   })
 })
 
@@ -165,7 +198,7 @@ describe('composer stats pills', () => {
     return { uncachedInputTokens, outputTokens: 1, cacheReadTokens, cacheWriteTokens: 0 }
   }
 
-  /** A step whose timing yields 3.8s LLM, 0.8s TTFT, and 20 tok/s over 60 tokens. */
+  /** A step whose timing yields 3.8s LLM, 0.8s TTFT, and 16 tok/s over 60 tokens. */
   const timedStep = (): AssistantMessageNode => ({
     ...assistant(1, 1, { outputTokens: 60 }),
     timing: { stepStartTime: 1_000, firstTokenTime: 1_800, completedTime: 4_800 },
@@ -174,9 +207,9 @@ describe('composer stats pills', () => {
   it('compact keeps only speed and cache hit, with no interactive statistics', () => {
     const { source } = makeSource({ nodes: [timedStep()] })
     const view = render(<StatsPills {...props(source)} usePerformanceUsage={selector => selector('compact')} />)
-    expect(view.container.textContent).toBe('20 tok/sCache hit 90%')
+    expect(view.container.textContent).toBe('16 tok/sCache hit 90%')
     expect(view.queryByRole('button')).toBeNull()
-    fireEvent.mouseOver(view.getByText('20 tok/s'))
+    fireEvent.mouseOver(view.getByText('16 tok/s'))
     expect(view.queryByRole('dialog')).toBeNull()
     view.rerender(<StatsPills {...props(source)} />)
     expect(view.getAllByRole('button')).toHaveLength(2)
@@ -235,12 +268,38 @@ describe('composer stats pills', () => {
     expect(view.getAllByRole('button')[0]!.textContent).toContain(expected)
   })
 
-  it('exposes output speed on the counts pill when decode timing exists', () => {
+  it('exposes output speed on the counts pill over the whole model phase', () => {
     const { source } = makeSource({ nodes: [timedStep()] })
     const view = render(<StatsPills {...props(source)} />)
     const timePill = view.getAllByRole('button')[0]!
-    expect(timePill.textContent).toBe('1 turns 1 steps·20 tok/s')
-    expect(timePill.getAttribute('aria-label')).toBe('1 turns 1 steps · 20 tok/s')
+    expect(timePill.textContent).toBe('1 turns 1 steps·16 tok/s')
+    expect(timePill.getAttribute('aria-label')).toBe('1 turns 1 steps · 16 tok/s')
+  })
+
+  it('shows buffered output over model-phase time when chunks arrive just before completion', () => {
+    const buffered: AssistantMessageNode = {
+      ...assistant(1, 1, { outputTokens: 351 }),
+      timing: { stepStartTime: 1_000, firstTokenTime: 36_000, completedTime: 36_002 },
+    }
+    const { source } = makeSource({ nodes: [buffered] })
+    const view = render(<StatsPills {...props(source)} />)
+    const timePill = view.getAllByRole('button')[0]!
+    expect(timePill.textContent).toBe('1 turns 1 steps·10 tok/s')
+    fireEvent.click(timePill)
+    expect(view.getByRole('dialog').textContent).toContain('Avg time to first token (TTFT)35s')
+    expect(view.getByRole('dialog').textContent).toContain('Tokens per second (TPS)10 tok/s')
+  })
+
+  it.each([
+    { stepStartTime: null, firstTokenTime: 36_000, completedTime: 36_002 },
+    { stepStartTime: 36_002, firstTokenTime: 36_002, completedTime: 36_002 },
+    { stepStartTime: 36_002, firstTokenTime: 36_000, completedTime: 36_000 },
+  ])('omits output speed without a positive model-phase duration: $stepStartTime → $completedTime', (timing) => {
+    const node: AssistantMessageNode = { ...assistant(1, 1, { outputTokens: 351 }), timing }
+    const { source } = makeSource({ nodes: [node] })
+    const view = render(<StatsPills {...props(source)} />)
+    expect(view.container.textContent).toContain('1 turns 1 steps')
+    expect(view.container.textContent).not.toContain('tok/s')
   })
 
   it('marks each pill with its dock entry id', () => {
@@ -248,7 +307,7 @@ describe('composer stats pills', () => {
     const view = render(<StatsPills {...props(source)} />)
     const pills = [...view.container.querySelectorAll('[data-composer-stat]')]
     expect(pills.map(pill => [pill.getAttribute('data-composer-stat'), pill.textContent])).toEqual([
-      ['activity', '1 turns 1 steps·20 tok/s'],
+      ['activity', '1 turns 1 steps·16 tok/s'],
       ['usage', '105 tok·Cache hit 90%'],
     ])
   })
@@ -275,7 +334,7 @@ describe('composer stats pills', () => {
     // No tool call in this session: the row is absent, not zeroed.
     expect(details.textContent).not.toContain('Tool time')
     expect(details.textContent).toContain('Avg time to first token (TTFT)0.8s')
-    expect(details.textContent).toContain('Tokens per second (TPS)20 tok/s')
+    expect(details.textContent).toContain('Tokens per second (TPS)16 tok/s')
     // Token accounting lives on the usage pill's own dialog, not here.
     expect(dialog.textContent).not.toContain('Token usage')
   })
@@ -359,7 +418,7 @@ describe('composer stats pills', () => {
     const { source } = makeSource({ nodes: [timedStep()] })
     const view = render(<StatsPills {...props(source, { tokenUsage: tokenUsage(9_995, 5) })} t={t} />)
     const [timePill, usagePill] = [...view.getAllByRole('button')] as [HTMLElement, HTMLElement]
-    expect(timePill.textContent).toBe('1 轮 1 步·20 tok/s')
+    expect(timePill.textContent).toBe('1 轮 1 步·16 tok/s')
     // Whole-log total 9995 + 5 + 1 compacts to 10K.
     expect(usagePill.textContent).toBe('10K tok·缓存命中 99.95%')
     fireEvent.click(timePill)
@@ -367,7 +426,7 @@ describe('composer stats pills', () => {
     expect(timeDialog.getAttribute('aria-label')).toBe('会话统计')
     expect(timeDialog.textContent).toContain('模型用时3.8秒')
     expect(timeDialog.textContent).toContain('首 token 平均（TTFT）0.8秒')
-    expect(timeDialog.textContent).toContain('输出速度（TPS）20 tok/s')
+    expect(timeDialog.textContent).toContain('输出速度（TPS）16 tok/s')
     fireEvent.keyDown(document, { key: 'Escape' })
     fireEvent.click(usagePill)
     const usageDialog = view.getByRole('dialog')

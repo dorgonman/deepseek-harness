@@ -23,13 +23,23 @@ const assistant = ({ seq, turn, step, timing, usage }: StepSpec): AssistantMessa
 })
 
 describe('assistantStepReading', () => {
-  it('derives ttft, decode time, and output tokens from a fully recorded step', () => {
+  it('includes ttft in the model-phase duration used for output rate', () => {
     const reading = assistantStepReading(assistant({
       seq: 2, turn: 1, step: 1,
       timing: { stepStartTime: 1_000, firstTokenTime: 1_800, completedTime: 6_800 },
       usage: { outputTokens: 200 },
     }))
-    expect(reading).toEqual({ ttftMs: 800, decodeMs: 5_000, outputTokens: 200 })
+    expect(reading).toEqual({ ttftMs: 800, decodeMs: 5_800, outputTokens: 200 })
+  })
+
+  it('measures a buffered response over the complete model phase', () => {
+    const reading = assistantStepReading(assistant({
+      seq: 2, turn: 1, step: 1,
+      timing: { stepStartTime: 1_000, firstTokenTime: 36_000, completedTime: 36_002 },
+      usage: { outputTokens: 351 },
+    }))
+    expect(reading).toEqual({ ttftMs: 35_000, decodeMs: 35_002, outputTokens: 351 })
+    expect(formatTokensPerSecond(reading.outputTokens! / (reading.decodeMs! / 1_000))).toBe('10')
   })
 
   it('returns nulls when timing is absent', () => {
@@ -37,19 +47,35 @@ describe('assistantStepReading', () => {
     expect(reading).toEqual({ ttftMs: null, decodeMs: null, outputTokens: 5 })
   })
 
-  it('needs both boundaries for ttft and clamps negative spans to zero', () => {
+  it('requires the model start for output rate and reads ttft independently', () => {
     expect(assistantStepReading(assistant({
       seq: 2, turn: 1, step: 1,
       timing: { stepStartTime: null, firstTokenTime: 1_800, completedTime: 6_800 },
-    }))).toEqual({ ttftMs: null, decodeMs: 5_000, outputTokens: null })
-    expect(assistantStepReading(assistant({
-      seq: 2, turn: 1, step: 1,
-      timing: { stepStartTime: 1_000, firstTokenTime: null, completedTime: 6_800 },
     }))).toEqual({ ttftMs: null, decodeMs: null, outputTokens: null })
     expect(assistantStepReading(assistant({
       seq: 2, turn: 1, step: 1,
+      timing: { stepStartTime: 1_000, firstTokenTime: null, completedTime: 6_800 },
+    }))).toEqual({ ttftMs: null, decodeMs: 5_800, outputTokens: null })
+    expect(assistantStepReading(assistant({
+      seq: 2, turn: 1, step: 1,
       timing: { stepStartTime: 2_000, firstTokenTime: 1_500, completedTime: 1_200 },
-    }))).toEqual({ ttftMs: 0, decodeMs: 0, outputTokens: null })
+    }))).toEqual({ ttftMs: 0, decodeMs: null, outputTokens: null })
+  })
+
+  it.each([
+    { stepStartTime: 1_000, completedTime: 1_000 },
+    { stepStartTime: 2_000, completedTime: 1_000 },
+    { stepStartTime: Number.NaN, completedTime: 2_000 },
+    { stepStartTime: 1_000, completedTime: Number.POSITIVE_INFINITY },
+    { stepStartTime: Number.NEGATIVE_INFINITY, completedTime: 2_000 },
+    { stepStartTime: -Number.MAX_VALUE, completedTime: Number.MAX_VALUE },
+  ])('omits a nonpositive or non-finite model-phase duration: $stepStartTime → $completedTime', (timing) => {
+    const reading = assistantStepReading(assistant({
+      seq: 2, turn: 1, step: 1,
+      timing: { ...timing, firstTokenTime: null },
+      usage: { outputTokens: 351 },
+    }))
+    expect(reading).toEqual({ ttftMs: null, decodeMs: null, outputTokens: 351 })
   })
 
   it('rejects non-object, missing, and non-finite usage token counts', () => {

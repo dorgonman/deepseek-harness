@@ -32,9 +32,12 @@ export interface SessionStatsProjection {
   ttftMs: number
   /** Steps carrying a recorded first token. */
   ttftSteps: number
-  /** Summed decode wall time (first token → `assistant/message`) over steps that also report output tokens. */
+  /**
+   * Summed model wall time (`step/start` → `assistant/message`), including first-token
+   * latency, over steps with valid output usage and positive finite duration.
+   */
   decodeMs: number
-  /** Summed provider output tokens over the same decode-timed steps. */
+  /** Summed provider output tokens over the same timed steps. */
   decodeTokens: number
 }
 
