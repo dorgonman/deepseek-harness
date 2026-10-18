@@ -1369,9 +1369,10 @@ function spreadMigratedSeedStream(
  * Parse a committed web seed fixture through the replay reader.
  * Embedded streams retain their recorded timing; V0/V1 chunk streams receive positive relative intervals.
  * @param fixtureText - session JSONL fixture contents.
+ * @param options - recorded timing requires complete event envelopes and preserves migrated stream times.
  * @returns the current header line, parsed header, and logical events.
  */
-export function parseSeedFixture(fixtureText: string): {
+export function parseSeedFixture(fixtureText: string, options: { readonly timing?: 'recorded' } = {}): {
   headerLine: string
   header: Record<string, unknown>
   events: SessionEvent[]
@@ -1380,12 +1381,21 @@ export function parseSeedFixture(fixtureText: string): {
   if (sourceHeaderLine === undefined) throw new Error('seed fixture has no session header')
   const sourceHeader = JSON.parse(sourceHeaderLine) as { version?: unknown }
   const current = prepareSessionSnapshotFixtureForComparison(fixtureText)
+  if (options.timing === 'recorded') {
+    for (const line of fixtureText.split(/\r?\n/).filter(line => line.trim().length > 0).slice(1)) {
+      const row = JSON.parse(line) as Record<string, unknown>
+      const packed = ['text-chunks', 'reasoning-chunks', 'tool-call-chunks'].includes(String(row.type))
+      if (!Object.hasOwn(row, packed ? 'seq0' : 'seq') || !Object.hasOwn(row, packed ? 'time0' : 'time')) {
+        throw new Error('recorded seed timing requires complete event envelopes')
+      }
+    }
+  }
   const headerLine = current.split(/\r?\n/).find(line => line.trim().length > 0)
   if (headerLine === undefined) throw new Error('seed fixture has no session header')
   const header = JSON.parse(headerLine) as Record<string, unknown>
   if (header.type !== 'session') throw new Error('seed fixture must start with a session header')
   const events = parseSessionLog(current).map((event) => {
-    if (sourceHeader.version !== 0 && sourceHeader.version !== 1) return event
+    if (options.timing === 'recorded' || (sourceHeader.version !== 0 && sourceHeader.version !== 1)) return event
     if (event.type === 'assistant/message') {
       return { ...event, data: { ...event.data, stream: spreadMigratedSeedStream(event.data.stream) } }
     }
@@ -1449,7 +1459,8 @@ function seedStreamEnd(
  * @param fixtureText - raw recorded session.jsonl contents.
  * @param id - the seeded session id.
  * @param agentPreset - preset recorded by scenarios that assert resumed composition.
- * @param options - deterministic metadata overrides for ordering-sensitive scenarios.
+ * @param options - deterministic metadata overrides; `timing: 'recorded'` preserves complete event and stream timestamps
+ * instead of compressing event gaps.
  * @returns the seeded id.
  */
 export async function seedSession(
@@ -1457,9 +1468,9 @@ export async function seedSession(
   fixtureText: string,
   id: string,
   agentPreset?: string,
-  options: { readonly createdAt?: number } = {},
+  options: { readonly createdAt?: number; readonly timing?: 'recorded' } = {},
 ): Promise<SessionId> {
-  const decoded = parseSeedFixture(realizeSeedFixture(scaffold, fixtureText, id))
+  const decoded = parseSeedFixture(realizeSeedFixture(scaffold, fixtureText, id), options)
   const events = decoded.events
   if (events.length === 0) throw new Error('seed fixture has no events')
   const last = events[events.length - 1]!
@@ -1482,7 +1493,7 @@ export async function seedSession(
   }
   const timeAnchor = fixtureCreatedAt === 0 ? createdAt : fixtureCreatedAt
   let nextTime = timeAnchor
-  const materializedEvents: SessionEvent[] = events.map((event) => {
+  const materializedEvents: SessionEvent[] = options.timing === 'recorded' ? events : events.map((event) => {
     const time = nextTime
     if (event.type === 'assistant/message') {
       const stream = rebaseSeedStream(event.data.stream, time)
@@ -1571,10 +1582,17 @@ export async function readPersistedEvents(scaffold: WebScaffold, id: SessionId):
 const ARIA_AGE =
   /(?:now|\d+min|\d+h|\d+d|\d+mo|\d+y|刚刚|\d+分钟|\d+小时|\d+天|\d+个月|\d+年)(?=")/g
 
-function normalizeAria(snapshot: string, workspaceCwd: string, age: boolean): string {
+/**
+ * Normalize one captured aria tree across fixture paths, identities, and runtime readings.
+ * @param snapshot - captured aria tree.
+ * @param workspaceCwd - platform-native workspace path.
+ * @param age - whether relative-age labels belong to this capture's normalization.
+ * @returns stable aria text for golden comparison.
+ */
+export function normalizeAria(snapshot: string, workspaceCwd: string, age: boolean): string {
   // The session heading renders the workspace's basename, not the full
   // path, so both spellings must collapse to the token.
-  const base = workspaceCwd.split('/').pop()!
+  const base = workspaceCwd.split(/[\\/]/u).pop()!
   return (age ? snapshot.replace(ARIA_AGE, '{{age}}') : snapshot)
     .split(workspaceCwd).join('{{cwd}}')
     .split(base).join('{{workspace}}')

@@ -7,6 +7,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, {
   TOOL_RUNTIME_SCHEDULER,
   defineContentToolFixture,
+  type ToolRuntimeScheduler,
   type ToolDefinition,
   type ToolExecutionInput,
   type ToolExecutionMode,
@@ -26,7 +27,7 @@ function exec(name: string, args: unknown): ToolExecutionInput {
 }
 
 describe('ToolRuntime.executionMode', () => {
-  it('shares the scheduler key with independently loaded tool runtimes', async () => {
+  it('exposes a callable scheduler through an independently resolved global key', async () => {
     const ctx = await setup()
     const schedulerKey = Symbol.for('@deepseek-ai/dsh-tools.scheduler')
     ctx.tools.register(defineContentToolFixture({
@@ -36,7 +37,8 @@ describe('ToolRuntime.executionMode', () => {
 
     expect(TOOL_RUNTIME_SCHEDULER).toBe(schedulerKey)
     expect(Object.getOwnPropertySymbols(ctx.tools)).toContain(schedulerKey)
-    const prepared = await ctx.tools[TOOL_RUNTIME_SCHEDULER].prepare(exec('noop', {}))
+    const scheduler = Reflect.get(ctx.tools, schedulerKey) as ToolRuntimeScheduler
+    const prepared = await scheduler.prepare(exec('noop', {}))
     expect(prepared.kind).toBe('dispatch')
   })
 

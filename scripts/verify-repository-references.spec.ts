@@ -72,6 +72,37 @@ describe('unique object-name prefix search', () => {
 })
 
 describe('maintained repository reference policy', () => {
+  it.each(['pnpm-lock.yaml', 'python/sdk/uv.lock'])(
+    'allows numeric artifact sizes and immutable dependency pins in the generated lockfile %s',
+    (file) => {
+      const size = String(6_344_383)
+      const revision = 'a'.repeat(40)
+      const source = `size = ${size}\nsource = { git = "https://example.invalid/dependency#${revision}" }`
+      expect(findRepositoryReferences(file, source, new Set([size, revision]))).toEqual([])
+    },
+  )
+
+  it.each(['docs/locks.md', 'other/uv.lock', 'nested/pnpm-lock.yaml'])(
+    'rejects matching commit identifiers outside the exact generated lockfile paths in %s',
+    (file) => {
+      const size = String(6_344_383)
+      const revision = 'a'.repeat(40)
+      expect(findRepositoryReferences(file, `${size}\n${revision}`, new Set([size, revision])))
+        .toEqual([
+          { file, line: 1, kind: 'commit-hash' },
+          { file, line: 2, kind: 'commit-hash' },
+        ])
+    },
+  )
+
+  it.each(['pnpm-lock.yaml', 'python/sdk/uv.lock'])(
+    'still rejects the disallowed organization URL in the generated lockfile %s',
+    (file) => {
+      expect(findRepositoryReferences(file, organizationUrl, new Set()))
+        .toEqual([{ file, line: 1, kind: 'organization-url' }])
+    },
+  )
+
   it('permits only the independent kit repository and its source URLs', () => {
     for (const suffix of ['', '.git', '/tree/main/packages/entry']) {
       expect(findRepositoryReferences('package.json', `${organizationUrl}/libreoffice-kit${suffix}`, new Set())).toEqual([])
