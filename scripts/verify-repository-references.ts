@@ -1,4 +1,7 @@
-/** Reject maintained references to repository commits and the disallowed organization URL. */
+/**
+ * Reject maintained commit references except in exact generated dependency lockfiles.
+ * Disallowed organization URLs remain prohibited in every maintained file.
+ */
 
 import { execFileSync } from 'node:child_process'
 import { lstatSync, readFileSync, readlinkSync } from 'node:fs'
@@ -14,6 +17,7 @@ const kitRepositoryUrl = new RegExp(`\\bgithub\\.com/${organization}/libreoffice
 // Decimal-only tokens collide with sizes, counts, and version components; see docs/AGENTS.md#repository-references.
 const commitCandidate = /(?<![a-z0-9])(?=[\da-f]{0,39}[a-f])[\da-f]{7,40}(?![a-z0-9])/gi
 const excludedPrefixes = ['vendor/', '.agents/notes/archived/']
+const generatedLockFiles = new Set(['pnpm-lock.yaml', 'python/sdk/uv.lock'])
 const gitOutputLimit = 64 * 1024 * 1024
 // One 41-byte line per object; 1.2 million objects produce about 49 MiB.
 const objectListingLimit = 1024 * 1024 * 1024
@@ -37,8 +41,8 @@ function isMaintained(file: string): boolean {
  * @param file - Repository-relative path used in diagnostics and exclusions.
  * @param source - File text or a symlink's stored target.
  * @param commits - Lowercase, unambiguous full or abbreviated commit identifiers.
- * @returns One finding per line and reference kind; digests and other Git object types are accepted.
- * Decimal-only tokens are ignored, including actual commit identifiers.
+ * @returns One finding per line and reference kind; exact generated lockfiles omit commit checks,
+ *   while decimal-only tokens, digests, and other Git object types are accepted.
  */
 export function findRepositoryReferences(
   file: string,
@@ -51,7 +55,8 @@ export function findRepositoryReferences(
     if (organizationUrl.test(canonicalReferenceText(line).replace(kitRepositoryUrl, ''))) {
       references.push({ file, line: index + 1, kind: 'organization-url' })
     }
-    if ([...line.matchAll(commitCandidate)].some(match => commits.has(match[0].toLowerCase()))) {
+    if (!generatedLockFiles.has(file)
+      && [...line.matchAll(commitCandidate)].some(match => commits.has(match[0].toLowerCase()))) {
       references.push({ file, line: index + 1, kind: 'commit-hash' })
     }
   }
@@ -136,7 +141,8 @@ export function repositoryCommits(repoRoot: string, sources: Iterable<string>): 
 /**
  * Scan tracked and nonignored new files using only the local Git object database.
  * @param repoRoot - Working tree whose files and Git objects are inspected.
- * @returns Prohibited references outside vendor and frozen Agent Notes; absent shallow-history objects cannot match.
+ * @returns Prohibited references outside vendor and frozen Agent Notes. Exact generated
+ *   lockfiles omit commit checks; absent shallow-history objects cannot match.
  */
 export function scanRepositoryReferences(repoRoot: string): RepositoryReference[] {
   const sources = readMaintainedFiles(repoRoot)

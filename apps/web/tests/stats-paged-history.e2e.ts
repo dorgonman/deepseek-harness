@@ -14,7 +14,7 @@ import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import {
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden,
-  launchWebScaffold, seedSession, watchConsole, webSnapshotMode, type WebScaffold,
+  launchWebScaffold, readPersistedEvents, seedSession, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
 import { newEnglishPage, saveFailureShot } from './support.ts'
 
@@ -99,7 +99,13 @@ describe('web e2e: whole-session stats survive history paging', () => {
   beforeAll(async () => {
     if (MODE === 'record') throw new Error('stats-paged-history is a keyless assembled snapshot')
     scaffold = await launchWebScaffold({})
-    await seedSession(scaffold, buildSeed(TURNS), SEED_ID)
+    const seededId = await seedSession(scaffold, buildSeed(TURNS), SEED_ID, undefined, { timing: 'recorded' })
+    const persisted = await readPersistedEvents(scaffold, seededId)
+    const start = persisted.find(event => event.type === 'step/start' && event.data.turn === 1)
+    const message = persisted.find(event => event.type === 'assistant/message' && event.data.turn === 1)
+    if (start?.type !== 'step/start' || message?.type !== 'assistant/message') throw new Error('buffered seed is missing its first model phase')
+    expect(message.time - start.time).toBe(35_002)
+    expect(message.data.stream[0]).toMatchObject({ time0: start.time + 35_000 })
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
     tripwire = watchConsole(page)
@@ -127,7 +133,8 @@ describe('web e2e: whole-session stats survive history paging', () => {
     // the sessionStats projection, not the window fold.
     expect(await page.getByText('m1', { exact: true }).count()).toBe(0)
     await expect.poll(() => page.getByText(FULL_COUNTS, { exact: false }).count(), { timeout: 10_000 }).toBe(1)
-    await expect.poll(() => page.locator('[data-composer-stat="activity"]').innerText()).toContain('10 tok/s')
+    await expect.poll(async () => (await page.locator('[data-composer-stat="activity"]').innerText())
+      .match(/\d+(?:\.\d+)? tok\/s/u)?.[0]).toBe('10 tok/s')
     const strip = page.getByText(FULL_COUNTS, { exact: false }).locator('..')
     const stripBeforePaging = await strip.textContent()
 
@@ -153,7 +160,8 @@ describe('web e2e: whole-session stats survive history paging', () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-stats-paged-reload'))
     await page.reload({ waitUntil: 'load' })
     await expect.poll(() => page.getByText(`r${TURNS}`, { exact: true }).count(), { timeout: 15_000 }).toBe(1)
-    await expect.poll(() => page.locator('[data-composer-stat="activity"]').innerText()).toContain('10 tok/s')
+    await expect.poll(async () => (await page.locator('[data-composer-stat="activity"]').innerText())
+      .match(/\d+(?:\.\d+)? tok\/s/u)?.[0]).toBe('10 tok/s')
   })
 
   it('issued zero model calls and stayed clean', async () => {
