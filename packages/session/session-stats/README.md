@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-This package gives clients whole-session turn and step counts plus LLM, tool, first-token, and decode wall times through the public `sessionStats` value. The figures come from the complete durable log, so paging and compaction do not change them. Use it when a client must display consistent conversation statistics across reloads and reduced history. When whole-session statistics are unavailable, clients can use window-scoped counting instead.
+This package gives clients whole-session turn and step counts, model and tool wall times, first-token latency, and output-throughput totals through the public `sessionStats` value. The figures come from the complete durable log, so paging and compaction do not change them. Use it when a client must display consistent conversation statistics across reloads and reduced history. When whole-session statistics are unavailable, clients can use window-scoped counting instead.
 
 ## Table of Contents
 
@@ -44,9 +44,11 @@ Mount the plugin beside the session store and the projection registry when clien
 | `llmMs` | Summed model wall time over steps that assembled a message |
 | `toolMs` | Summed matched `tool/call` → `tool/result` wall time |
 | `ttftMs` / `ttftSteps` | Summed first-token latency and the steps carrying it |
-| `decodeMs` / `decodeTokens` | Summed decode wall time and provider output tokens over usage-reporting steps |
+| `decodeMs` / `decodeTokens` | Summed full model-phase wall time and provider output tokens over usage-reporting steps with positive finite duration |
 
 Every field is 0 until its first contributing event; the composed registry always serves the key, so clients read the value rather than key presence. Clients render whole-log figures through the projection seam's snapshot and change feed; the reference consumer is the web chat stats strip, whose window fold mirrors these field names as its no-unit fallback.
+
+Average output throughput is `decodeTokens / (decodeMs / 1_000)`. Its model phase runs from `step/start` to `assistant/message`, includes first-token latency, and excludes tool execution. Buffered chunks cannot reveal the provider's internal decoder speed. A step without a recorded token delta still contributes when it reports valid output usage and has a positive finite model-phase duration; an invalid duration contributes neither output tokens nor throughput time.
 
 ### Failures and recovery
 
@@ -82,7 +84,7 @@ The fold state holds the eight totals plus in-flight boundaries: `lastTurn` (tur
 
 - Uninteresting events return the same state reference; the registry's `Object.is` gate keeps the change feed quiet.
 - First-token latency records the first non-empty delta chunk and survives an in-step `llm/retry`.
-- Decode time and tokens accrue only over steps carrying both a first token and a valid provider usage report; malformed usage is ignored like the window fold guards node usage.
+- Output tokens and full model-phase duration accrue together only for valid provider usage and positive finite duration, independently of first-token timing; malformed usage is ignored like the window fold guards node usage.
 - Tool time pairs `tool/call` → `tool/result` by callId; unresolved calls are dropped at `turn/end` because results land within their turn, and a callId colliding with an `Object` prototype name reads as unmatched.
 
 </details>
