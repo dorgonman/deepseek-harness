@@ -64,7 +64,7 @@ export function formatRunDuration(ms: number, t: RunDurationTranslate): RunDurat
 }
 
 /**
- * Decode-throughput figure: whole tokens from ten up, one decimal below.
+ * Output-throughput figure: whole tokens from ten up, one decimal below.
  * @param tps - Tokens per second.
  * @returns Display number without unit.
  */

@@ -14,11 +14,11 @@
  * (`deriveStats` in dsh-client-ui-conversation, that fold's whole-window
  * fallback role): model time is `step/start` → `assistant/message`, first
  * token is the first non-empty delta chunk and survives an in-step
- * `llm/retry`, decode spans first token → assembled message on steps that
- * also report output tokens, and tool time pairs `tool/call` → `tool/result`
- * by callId. A cancelled step assembles no message, so its partial stream
- * time stays uncounted in every time figure — matching the window, which
- * renders it as an untimed interrupted node.
+ * `llm/retry`, output throughput uses the full model phase including first-token
+ * latency on steps that report output tokens, and tool time pairs
+ * `tool/call` → `tool/result` by callId. A cancelled step assembles no message,
+ * so its partial stream time stays uncounted in every time figure — matching
+ * the window, which renders it as an untimed interrupted node.
  *
  * @module @deepseek-ai/dsh-session-stats/projection
  */
@@ -42,7 +42,7 @@ interface SessionStatsTotals {
   ttftMs: number
   /** Steps carrying a recorded first token. */
   ttftSteps: number
-  /** Summed decode wall time over usage-reporting steps, ms. */
+  /** Full model-phase wall time over usage-reporting steps with positive finite duration, ms. */
   decodeMs: number
   /** Summed provider output tokens over the same steps. */
   decodeTokens: number
@@ -112,7 +112,7 @@ function usageOutputTokens(usage: unknown): number | null {
 /** The `sessionStats` unit registered on `ctx.sessionProjections` (exported for the unit spec). */
 export const sessionStatsProjectionDefinition = {
   key: 'sessionStats',
-  stateVersion: 1,
+  stateVersion: 2,
   stateSchema: sessionStatsStateSchema,
   init: () => ({
     turns: 0,
@@ -146,21 +146,23 @@ export const sessionStatsProjectionDefinition = {
         const open = state.openStep
         if (open === null || open.turn !== event.data.turn || open.step !== event.data.step) return state
         const firstToken = open.firstTokenTime ?? assistantStreamFirstTokenTime(event.data.stream) ?? null
+        const elapsedMs = event.time - open.startTime
+        const modelMs = Number.isFinite(elapsedMs) && elapsedMs > 0 ? elapsedMs : 0
         // One assembled message per step: closing the boundary means a
         // defensive duplicate cannot accrue twice.
         const next: SessionStatsState = {
           ...state,
-          llmMs: state.llmMs + Math.max(0, event.time - open.startTime),
+          llmMs: state.llmMs + modelMs,
           openStep: null,
+        }
+        const outputTokens = usageOutputTokens(event.data.usage)
+        if (outputTokens !== null && modelMs > 0) {
+          next.decodeMs += modelMs
+          next.decodeTokens += outputTokens
         }
         if (firstToken !== null) {
           next.ttftMs += Math.max(0, firstToken - open.startTime)
           next.ttftSteps += 1
-          const outputTokens = usageOutputTokens(event.data.usage)
-          if (outputTokens !== null) {
-            next.decodeMs += Math.max(0, event.time - firstToken)
-            next.decodeTokens += outputTokens
-          }
         }
         return next
       }

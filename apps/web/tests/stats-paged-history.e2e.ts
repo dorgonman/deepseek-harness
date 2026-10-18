@@ -46,6 +46,7 @@ function buildSeed(turns: number): string {
   }
   for (let turn = 1; turn <= turns; turn++) {
     at({ type: 'turn/start', data: { turn } })
+    const stepStartTime = time
     at({ type: 'step/start', data: { turn, step: 1 } })
     if (turn === 1) {
       at({
@@ -64,10 +65,14 @@ function buildSeed(turns: number): string {
       },
       surfaceOp: 'append',
     })
+    if (turn === 1) time = stepStartTime + 35_002
     at({
       type: 'assistant/message',
       data: {
-        stream: [],
+        stream: turn === 1
+          ? [{ type: 'text-chunks', time0: stepStartTime + 35_000, index: 0, dt: [], texts: [`r${turn}`] }]
+          : [],
+        ...(turn === 1 ? { usage: { inputTokens: 0, outputTokens: 351 } } : {}),
         turn,
         step: 1,
         message: {
@@ -122,6 +127,7 @@ describe('web e2e: whole-session stats survive history paging', () => {
     // the sessionStats projection, not the window fold.
     expect(await page.getByText('m1', { exact: true }).count()).toBe(0)
     await expect.poll(() => page.getByText(FULL_COUNTS, { exact: false }).count(), { timeout: 10_000 }).toBe(1)
+    await expect.poll(() => page.locator('[data-composer-stat="activity"]').innerText()).toContain('10 tok/s')
     const strip = page.getByText(FULL_COUNTS, { exact: false }).locator('..')
     const stripBeforePaging = await strip.textContent()
 
@@ -141,6 +147,13 @@ describe('web e2e: whole-session stats survive history paging', () => {
     const snapshot = (await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd))
       .split(SEED_ID).join('{{seededId}}')
     await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
+  })
+
+  it('keeps the buffered response rate after reload', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-stats-paged-reload'))
+    await page.reload({ waitUntil: 'load' })
+    await expect.poll(() => page.getByText(`r${TURNS}`, { exact: true }).count(), { timeout: 15_000 }).toBe(1)
+    await expect.poll(() => page.locator('[data-composer-stat="activity"]').innerText()).toContain('10 tok/s')
   })
 
   it('issued zero model calls and stayed clean', async () => {
