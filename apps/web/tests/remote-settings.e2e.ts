@@ -16,6 +16,23 @@ import { openSettings, ZH_BROWSER_LOCALE } from './support.ts'
 const MODE = webSnapshotMode()
 
 /**
+ * Settle the reads that activate onboarding before opening a settings panel.
+ * The workspace picker can paint before the first Session list does; that
+ * later arrival mounts the acknowledged onboarding step and closes an open panel.
+ * @param page - browser page loading the application.
+ * @param navigate - navigation whose startup reads this helper observes.
+ * @returns settlement after the startup reads and their rendered effects.
+ */
+async function loadSettingsBrowser(page: Page, navigate: () => Promise<unknown>): Promise<void> {
+  const reads = ['session/list', 'settings/describe'].map(endpoint => page.waitForResponse(response =>
+    new URL(response.url()).pathname === `/api/${endpoint}`))
+  await Promise.all([...reads.map(async response => (await response).finished()), navigate()])
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => { requestAnimationFrame(() => { resolve() }) })
+  }))
+}
+
+/**
  * A loading welcome store hides the notice, so absence is conclusive only
  * after the shared settings read has enabled the Models view.
  * @param page - the loaded page.
@@ -49,7 +66,7 @@ describe.skipIf(MODE === 'record')('web e2e: trusted remote host preferences', (
       locale: ZH_BROWSER_LOCALE,
     })
     tripwire = watchConsole(page)
-    await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
+    await loadSettingsBrowser(page, () => page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' }))
     await page.waitForSelector('#root', { timeout: 30_000 })
   }, 120_000)
 
@@ -61,7 +78,7 @@ describe.skipIf(MODE === 'record')('web e2e: trusted remote host preferences', (
   /** Reload the page and absorb the one expected reload-time connection loss. */
   async function reloadPage(): Promise<void> {
     const warnings = tripwire.warnings.length
-    await page.reload({ waitUntil: 'load' })
+    await loadSettingsBrowser(page, () => page.reload({ waitUntil: 'load' }))
     acknowledgeReloadConnectionLoss(tripwire, warnings)
   }
 
@@ -113,7 +130,7 @@ describe.skipIf(MODE === 'record')('web e2e: trusted remote host preferences', (
     try {
       const freshPage = await context.newPage()
       const freshTripwire = watchConsole(freshPage)
-      await freshPage.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
+      await loadSettingsBrowser(freshPage, () => freshPage.goto(scaffold.authenticatedUrl, { waitUntil: 'load' }))
       const freshDialog = await expectOnboardingSettled(freshPage)
       await freshDialog.getByRole('button', { name: '编辑 minimax-cn', exact: true }).waitFor({ timeout: 15_000 })
       await expect.poll(
