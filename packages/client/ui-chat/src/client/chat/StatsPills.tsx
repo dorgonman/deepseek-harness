@@ -32,7 +32,7 @@ interface WindowStats {
   ttftMs: number
   /** Steps carrying a recorded TTFT. */
   ttftSteps: number
-  /** Summed decode wall time over steps that also report output tokens. */
+  /** Summed positive model-phase wall time, including TTFT, over steps that also report output tokens. */
   decodeMs: number
   /** Summed output tokens over the same decode-timed steps. */
   decodeTokens: number

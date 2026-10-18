@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as SessionStatsPlugin from '@deepseek-ai/dsh-session-stats'
@@ -187,17 +187,18 @@ describe('sessionStats wall-time fold (controlled timestamps)', () => {
     time: number,
     chunks: readonly { readonly time: number; readonly chunk: StreamChunk }[] = [],
     usage?: TokenUsage,
+    step = 1,
   ): SessionEvent {
     return at(time, 'assistant/message', {
       turn: 1,
-      step: 1,
+      step,
       message,
       stream: chunks.map(member => ({ type: 'chunk', ...member })),
       ...usage === undefined ? {} : { usage },
     })
   }
 
-  it('accrues model, first-token, and decode time from one fully recorded step', () => {
+  it('includes first-token latency in the model phase used for output throughput', () => {
     expect(fold([
       at(1_000, 'step/start', { turn: 1, step: 1 }),
       messageAt(4_800, [{
@@ -205,8 +206,94 @@ describe('sessionStats wall-time fold (controlled timestamps)', () => {
       }], { inputTokens: 10, outputTokens: 60 }),
       at(4_900, 'step/end', { turn: 1, step: 1 }),
     ])).toEqual(totals({
-      turns: 1, steps: 1, llmMs: 3_800, ttftMs: 800, ttftSteps: 1, decodeMs: 3_000, decodeTokens: 60,
+      turns: 1, steps: 1, llmMs: 3_800, ttftMs: 800, ttftSteps: 1, decodeMs: 3_800, decodeTokens: 60,
     }))
+  })
+
+  it('measures a buffered output burst over its full model phase', () => {
+    const stats = fold([
+      at(0, 'step/start', { turn: 1, step: 1 }),
+      messageAt(35_002, [{
+        time: 35_000, chunk: { type: 'text-delta', index: 0, text: 'buffered answer' },
+      }], { inputTokens: 10, outputTokens: 351 }),
+      at(35_003, 'step/end', { turn: 1, step: 1 }),
+    ])
+    expect(stats).toEqual(totals({
+      turns: 1, steps: 1, llmMs: 35_002, ttftMs: 35_000, ttftSteps: 1, decodeMs: 35_002, decodeTokens: 351,
+    }))
+    expect(stats.decodeTokens / (stats.decodeMs / 1_000)).toBeCloseTo(10.03, 2)
+  })
+
+  it('records output throughput without a first-token delta', () => {
+    expect(fold([
+      at(1_000, 'step/start', { turn: 1, step: 1 }),
+      messageAt(2_000, [], { inputTokens: 10, outputTokens: 60 }),
+      at(2_100, 'step/end', { turn: 1, step: 1 }),
+    ])).toEqual(totals({ turns: 1, steps: 1, llmMs: 1_000, decodeMs: 1_000, decodeTokens: 60 }))
+  })
+
+  it.each([1_000, 500, Number.POSITIVE_INFINITY, Number.NaN])(
+    'excludes both output tokens and duration when the model phase ends at %s',
+    (completedTime) => {
+      expect(fold([
+        at(1_000, 'step/start', { turn: 1, step: 1 }),
+        messageAt(completedTime, [], { inputTokens: 10, outputTokens: 351 }),
+        at(2_100, 'step/end', { turn: 1, step: 1 }),
+        at(3_000, 'step/start', { turn: 1, step: 2 }),
+        messageAt(4_000, [], { inputTokens: 10, outputTokens: 60 }, 2),
+        at(4_100, 'step/end', { turn: 1, step: 2 }),
+      ])).toEqual(totals({ turns: 1, steps: 2, llmMs: 1_000, decodeMs: 1_000, decodeTokens: 60 }))
+    },
+  )
+
+  it('excludes tool execution after the model phase from output throughput', () => {
+    expect(fold([
+      at(1_000, 'step/start', { turn: 1, step: 1 }),
+      messageAt(5_000, [{
+        time: 4_999,
+        chunk: { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), name: 'read', argumentsDelta: '{}' },
+      }], { inputTokens: 10, outputTokens: 40 }),
+      at(5_001, 'tool/call', { turn: 1, step: 1, callId: 'call-1', name: 'read', arguments: '{}' }),
+      at(15_000, 'tool/result', { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'call-1' } } }),
+      at(15_001, 'step/end', { turn: 1, step: 1 }),
+    ])).toEqual(totals({
+      turns: 1, steps: 1, llmMs: 4_000, toolMs: 9_999, ttftMs: 3_999, ttftSteps: 1,
+      decodeMs: 4_000, decodeTokens: 40,
+    }))
+  })
+
+  it('rebuilds version-one cached output timing from the complete log', async () => {
+    const { ctx, session } = await harness(true)
+    const events = [
+      at(0, 'step/start', { turn: 1, step: 1 }),
+      messageAt(35_002, [{
+        time: 35_000, chunk: { type: 'text-delta', index: 0, text: 'buffered answer' },
+      }], { inputTokens: 10, outputTokens: 351 }),
+      at(35_003, 'step/end', { turn: 1, step: 1 }),
+    ].map((event, index) => ({ ...event, seq: SessionSeq(index) }))
+    const legacy = {
+      sessionStats: {
+        ver: 1,
+        seq: SessionSeq(2),
+        val: {
+          ...totals({
+            turns: 1, steps: 1, llmMs: 35_002, ttftMs: 35_000, ttftSteps: 1, decodeMs: 2, decodeTokens: 351,
+          }),
+          lastTurn: 1,
+          openStep: null,
+          pendingCalls: {},
+        },
+      },
+    }
+    expect(ctx.sessionProjections.restoreFloor(legacy)).toBe(0)
+    expect(ctx.sessionProjections.viewCheckpoint(legacy)).toEqual({})
+    const restored = ctx.sessionProjections.restore(
+      legacy, events, SessionLogOffset(0), session.header, SessionLogOffset(0),
+    )
+    expect(restored.snapshot.values.sessionStats).toEqual(totals({
+      turns: 1, steps: 1, llmMs: 35_002, ttftMs: 35_000, ttftSteps: 1, decodeMs: 35_002, decodeTokens: 351,
+    }))
+    expect(restored.checkpoint['sessionStats']).toMatchObject({ ver: 2, seq: 2 })
   })
 
   it('keeps the first attempt token boundary across an in-step retry (window resetForRetry parity)', () => {
