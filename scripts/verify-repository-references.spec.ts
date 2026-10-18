@@ -73,6 +73,33 @@ describe('unique object-name prefix search', () => {
 })
 
 describe('maintained repository reference policy', () => {
+  it.each(['pnpm-lock.yaml', 'python/sdk/uv.lock'])(
+    'allows immutable dependency pins in the exact generated lockfile %s',
+    (file) => {
+      const revision = 'a'.repeat(40)
+      const source = `size = 6_344_383\nsource = { git = "https://example.invalid/dependency#${revision}" }`
+      expect(findRepositoryReferences(file, source, new Set([revision]))).toEqual([])
+    },
+  )
+
+  it.each(['docs/locks.md', 'other/uv.lock', 'nested/pnpm-lock.yaml'])(
+    'rejects matching commit identifiers outside exact generated lockfile paths in %s',
+    (file) => {
+      const revision = 'a'.repeat(40)
+      expect(findRepositoryReferences(file, `commit ${revision}`, new Set([revision]))).toEqual([
+        { file, line: 1, kind: 'commit-hash' },
+      ])
+    },
+  )
+
+  it.each(['pnpm-lock.yaml', 'python/sdk/uv.lock'])(
+    'still rejects the disallowed organization URL in the generated lockfile %s',
+    (file) => {
+      expect(findRepositoryReferences(file, organizationUrl, new Set()))
+        .toEqual([{ file, line: 1, kind: 'organization-url' }])
+    },
+  )
+
   const numericCommit = String(6_344_383)
 
   it.each([

@@ -3,8 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseSessionLog, prepareSessionSnapshotFixtureForComparison } from '@deepseek-ai/dsh-llm-replay'
+import { createSystemMessage } from '@deepseek-ai/dsh-llm'
+import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import {
   assertFixtureInventory,
+  normalizeAria,
   parseSeedFixture,
   recordedSessionFixturePath,
   selectedSessionFixture,
@@ -16,7 +19,62 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })
 
+describe('Web aria workspace normalization', () => {
+  it.each([String.raw`D:\temp\dsh-web-e2e-ws-generated`, '/tmp/dsh-web-e2e-ws-generated'])('normalizes the workspace path and basename from %s', (workspaceCwd) => {
+    const snapshot = `- text: dsh-web-e2e-ws-generated\n- text: ${workspaceCwd}`
+    expect(normalizeAria(snapshot, workspaceCwd, false)).toBe('- text: {{workspace}}\n- text: {{cwd}}')
+  })
+})
+
 describe('Web seed stream timing', () => {
+  it('retains complete generated event timestamps and buffered first-token timing', () => {
+    const startTime = 1_001
+    const events = [
+      { type: 'turn/start', time: 1_000, data: { turn: 1 } },
+      { type: 'step/start', time: startTime, data: { turn: 1, step: 1 } },
+      { type: 'system/message', time: 1_002, data: { turn: 1, step: 1, message: createSystemMessage('') }, surfaceOp: 'append' },
+      {
+        type: 'user/message', time: 1_003,
+        data: { id: '00000000-0000-4000-9000-000000000001', role: 'user', content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } },
+        surfaceOp: 'append',
+      },
+      {
+        type: 'assistant/message', time: startTime + 35_002,
+        data: {
+          turn: 1, step: 1, usage: { inputTokens: 0, outputTokens: 351 },
+          stream: [{ type: 'text-chunks', time0: startTime + 35_000, index: 0, dt: [], texts: ['reply'] }],
+          message: {
+            id: '00000000-0000-4000-8000-000000000001', role: 'assistant', content: [{ type: 'text', text: 'reply' }],
+            source: { kind: 'model', provider: 'snapshot', model: 'snapshot-replier' },
+          },
+        },
+        surfaceOp: 'append',
+      },
+      { type: 'step/end', time: startTime + 35_003, data: { turn: 1, step: 1 } },
+      { type: 'turn/end', time: startTime + 35_004, data: { turn: 1, reason: { kind: 'completed' } } },
+    ]
+    const fixture = [
+      JSON.stringify({ type: 'session', version: SESSION_FORMAT_VERSION, id: 'recorded-timing', createdAt: 1_000, cwd: '/workspace', isSeeded: false, delegationDepth: 0 }),
+      ...events.map((event, seq) => JSON.stringify({ ...event, seq })),
+      '',
+    ].join('\n')
+    const parsed = parseSeedFixture(fixture, { timing: 'recorded' })
+    expect(parsed.events.map(event => event.time)).toEqual(events.map(event => event.time))
+    expect(parsed.events.find(event => event.type === 'assistant/message')?.data.stream[0])
+      .toMatchObject({ time0: startTime + 35_000 })
+  })
+
+  it('requires complete event envelopes when preserving recorded timing', async () => {
+    const fixture = await readFile(new URL('../../../snapshots/session/skill-load/session.v3.jsonl', import.meta.url), 'utf8')
+    const projected = fixture.split(/\r?\n/).map((line, index) => {
+      if (index === 0 || line.trim() === '') return line
+      const { seq: _seq, time: _time, ...event } = JSON.parse(line)
+      return JSON.stringify(event)
+    }).join('\n')
+    expect(() => parseSeedFixture(projected, { timing: 'recorded' }))
+      .toThrow('recorded seed timing requires complete event envelopes')
+  })
+
   it.each([2, 3])('preserves embedded timestamps from format v%i and its current projection', async (version) => {
     const fixture = await readFile(new URL(`../../../snapshots/session/skill-load/session.v${version}.jsonl`, import.meta.url), 'utf8')
     const current = prepareSessionSnapshotFixtureForComparison(fixture)
