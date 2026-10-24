@@ -18,6 +18,57 @@ const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
 const configWith = (model: Record<string, unknown>): (() => unknown) =>
   routeWith({ models: [{ id: 'm', ...model }] })
 
+describe('model request routing', () => {
+  it('leaves routing fields absent on existing stored model rows', () => {
+    const materialized = routeWith({})() as Options
+    const model = materialized.providers?.['acme-gateway']?.models?.[0]
+    expect(model).not.toHaveProperty('baseURL')
+    expect(model).not.toHaveProperty('headers')
+    expect(model).not.toHaveProperty('requestModel')
+  })
+
+  it('accepts explicit model endpoints and binding headers without a provider endpoint', () => {
+    const materialized = routeWith({
+      baseURL: undefined,
+      models: [{ id: 'm@local', requestModel: 'm', baseURL: 'http://127.0.0.1:5000/v1', headers: { 'X-Route': 'local' } }],
+    })() as Options
+    expect(() => { assertServiceable(materialized) }).not.toThrow()
+  })
+
+  it.each(['', '/relative', 'file:///model', 'http://user:password@localhost/v1'])(
+    'rejects an invalid model endpoint %j before settings can be persisted', (baseURL) => {
+      expect(() => { assertServiceable(configWith({ baseURL })() as Options) })
+        .toThrow(/baseURL must be an absolute HTTP\(S\) URL without credentials/)
+    },
+  )
+
+  it('rejects an empty wire model id', () => {
+    expect(() => { assertServiceable(configWith({ requestModel: '' })() as Options) })
+      .toThrow(/requestModel must be non-empty/)
+  })
+
+  it.each([
+    ['bad header name', 'value'],
+    ['x-route', 'line\nbreak'],
+    ['x-route', '部署'],
+  ])('rejects model header %j when Fetch cannot represent it', (name, value) => {
+    expect(() => { assertServiceable(configWith({ headers: { [name]: value } })() as Options) })
+      .toThrow(/header .* is not valid for Fetch/)
+  })
+
+  it('retains an invalid stored model diagnostic beside a usable sibling', () => {
+    const profile = resolveProfiles({ gateway: {
+      api: 'openai-completions',
+      models: [
+        { id: 'invalid', baseURL: 'file:///model' },
+        { id: 'usable', baseURL: 'http://127.0.0.1:5000/v1' },
+      ],
+    } }, 'deferred').get('gateway')
+    expect(profile?.modelErrors.get('invalid')).toMatch(/absolute HTTP/)
+    expect(profile?.piProvider?.getModels().map(model => model.id)).toEqual(['usable'])
+  })
+})
+
 describe('reasoning schema boundary', () => {
   it('accepts an empty provider section and propagates unexpected catalog failures', () => {
     expect(() => { assertServiceable({}) }).not.toThrow()

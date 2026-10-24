@@ -59,6 +59,7 @@ import type {
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
+import { catalogProvider } from './catalog.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
 import { toStreamChunks } from './stream.ts'
@@ -239,14 +240,17 @@ function requestHeaderDiagnostic(error: unknown): string {
 /** Prepare request-owned headers without allowing contributors to replace attribution. */
 function requestHeaders(
   configured: Readonly<Record<string, string>> | undefined,
+  modelHeaders: Readonly<Record<string, string>> | undefined,
   options: GenerateOptions<string>,
   baseURL: string,
   prepare: PiAiAdapterOptions['prepareHeaders'],
 ): Record<string, string> {
   try {
     const initial = new Headers()
-    // Profile aliases overwrite case-insensitively; the Headers constructor appends them.
-    for (const [name, value] of Object.entries(configured ?? {})) initial.set(name, value)
+    // Model headers override provider headers; Headers.set applies names case-insensitively.
+    for (const layer of [configured, modelHeaders]) {
+      for (const [name, value] of Object.entries(layer ?? {})) initial.set(name, value)
+    }
     const request: PiAiRequestHeaderContext = Object.freeze({
       provider: options.provider,
       model: options.model,
@@ -424,6 +428,14 @@ export class PiAiAdapter extends LlmAdapter {
       options.reasoningEffort ?? profile.reasoning,
     )
     const apiKey = await this.config.resolveApiKey(options.provider, profile)
+    if (profile.crossOriginModels.has(options.model)
+      && (apiKey !== undefined || profile.apiKeyEnv !== undefined || catalogProvider(options.provider) !== undefined)) {
+      throw new LlmError(
+        `pi-ai model "${options.model}" cannot send provider credentials to a different endpoint origin;`
+        + ' use a separate provider for authenticated endpoints or a custom keyless route with explicit trusted headers',
+        'INVALID_CONFIG',
+      )
+    }
 
     const consumer = new AbortController()
     const upstream = options.signal === undefined
@@ -457,13 +469,28 @@ export class PiAiAdapter extends LlmAdapter {
             maxBytes: profile.requestImageMaxBytes,
           },
         }, onReplayDegrade, updates.systemPromptUpdate === 'in-history')
-      const events = snapshot.models.streamSimple(model, context, {
+      const requestModel = profile.requestModels.get(options.model)
+      const wireModel = requestModel === undefined ? model : { ...model, id: requestModel }
+      const wireContext = requestModel === undefined ? context : {
+        ...context,
+        messages: context.messages.map((message) => {
+          if (message.role !== 'assistant' || message.provider !== options.provider || message.model !== options.model) return message
+          return { ...message, model: requestModel }
+        }),
+      }
+      const events = snapshot.models.streamSimple(wireModel, wireContext, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
         signal: watchdog.signal,
-        headers: requestHeaders(profile.headers, options, model.baseUrl, this.config.prepareHeaders),
+        headers: requestHeaders(
+          profile.headers,
+          profile.modelHeaders.get(options.model),
+          options,
+          model.baseUrl,
+          this.config.prepareHeaders,
+        ),
       })
       const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id)[Symbol.asyncIterator]()
       let exhausted = false
