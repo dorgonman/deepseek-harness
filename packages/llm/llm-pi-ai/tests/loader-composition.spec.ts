@@ -121,6 +121,52 @@ describe('llm-pi-ai real dormant composition', () => {
     expect(server.headers[0]?.authorization).toBe('Bearer key-from-store')
   })
 
+  it('loads model endpoint aliases from settings and dispatches their exact bindings', async () => {
+    vi.stubEnv('PI_COMPOSITION_KEY', '')
+    const first = await mockServer([{ events: textEvents }])
+    const second = await mockServer([{ events: textEvents }])
+    const { ctx, settingsPath } = await loadComposition()
+    await writeFile(settingsPath, [
+      '- id: llm-pi-ai',
+      '  config:',
+      '    providers:',
+      '      gateway:',
+      '        api: openai-completions',
+      '        headers:',
+      '          Authorization: Bearer kinf-local-placeholder',
+      '        models:',
+      '          - id: native@local',
+      '            requestModel: native',
+      `            baseURL: ${first.url}`,
+      '            headers:',
+      '              X-Kinf-Mode: service',
+      '              X-Kinf-Instance: native',
+      '              X-Kinf-Service: native',
+      '          - id: native@tailscale',
+      '            requestModel: native',
+      `            baseURL: ${second.url}`,
+      '            headers:',
+      '              X-Kinf-Mode: service',
+      '              X-Kinf-Instance: native',
+      '              X-Kinf-Service: native',
+      '',
+    ].join('\n'))
+    await vi.waitFor(() => {
+      expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['gateway'])
+    }, { timeout: 5000 })
+    expect((await ctx.llm.listModels('gateway')).map(model => model.id)).toEqual(['native@local', 'native@tailscale'])
+    const local = await assemble(ctx, { provider: 'gateway', model: 'native@local', messages: [] })
+    const tailnet = await assemble(ctx, { provider: 'gateway', model: 'native@tailscale', messages: [] })
+    expect(local.message.source).toMatchObject({ model: 'native@local', replayState: { response: { model: 'native@local' } } })
+    expect(tailnet.message.source).toMatchObject({ model: 'native@tailscale' })
+    for (const server of [first, second]) {
+      expect(server.requests[0]).toMatchObject({ model: 'native' })
+      expect(server.headers[0]).toMatchObject({
+        'x-kinf-mode': 'service', 'x-kinf-instance': 'native', 'x-kinf-service': 'native', authorization: 'Bearer kinf-local-placeholder',
+      })
+    }
+  })
+
   it('offers OpenAI sign-in by API key only, while other subscription logins stay', async () => {
     const { ctx } = await loadComposition()
     const methods = (provider: string): string[] | undefined => ctx.authorization.list()

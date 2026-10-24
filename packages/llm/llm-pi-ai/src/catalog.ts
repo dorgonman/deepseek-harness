@@ -599,10 +599,16 @@ function assertOfferedCompatFields(
   }
 }
 
-/** One configured model entry: an id plus the catalog fields it overrides. */
+/** One selectable model entry with catalog and request-routing overrides. */
 export interface PiAiModelProfile {
-  /** Model id sent to the provider and accepted by {@link GenerateOptions.model}. */
+  /** Model selector accepted by {@link GenerateOptions.model} and retained in Session metadata. */
   id: string
+  /** Provider model id sent on requests; omission sends the selector id unchanged. */
+  requestModel?: string
+  /** HTTP(S) endpoint for this model, overriding the provider route's endpoint. */
+  baseURL?: string
+  /** Request headers overriding provider headers by case-insensitive name; Harness attribution still wins. */
+  headers?: Record<string, string>
   /** Display name for selectors; defaults to the catalog name, then the id. */
   name?: string
   /** Maximum combined request and response context in tokens. */
@@ -843,6 +849,12 @@ export interface RouteCatalog {
    * picked, so only an explicit configuration lands here.
    */
   configuredMaxTokens: ReadonlyMap<string, number>
+  /** Explicit wire model ids keyed by the unchanged selector id. */
+  requestModels: ReadonlyMap<string, string>
+  /** Explicit request-header overrides keyed by selector id. */
+  modelHeaders: ReadonlyMap<string, Readonly<Record<string, string>>>
+  /** Endpoint overrides whose origin differs from the provider endpoint, including an absent provider endpoint. */
+  crossOriginModels: ReadonlySet<string>
 }
 
 /**
@@ -908,6 +920,9 @@ export function resolveRouteModels(
   assertOfferedCompatFields(provider, 'route', request.compat)
   const seen = new Set<string>()
   const configuredMaxTokens = new Map<string, number>()
+  const requestModels = new Map<string, string>()
+  const modelHeaders = new Map<string, Readonly<Record<string, string>>>()
+  const crossOriginModels = new Set<string>()
   const resolveEntry = (entry: PiAiModelProfile): Model<Api> => {
     assertOfferedCompatFields(provider, `model "${entry.id}"`, entry.compat)
     if (entry.id.length === 0) invalid(provider, 'has a model with an empty id')
@@ -919,7 +934,29 @@ export function resolveRouteModels(
       invalid(provider, `model "${entry.id}" needs an api; the installed catalog does not describe it, so set the`
         + ' route\'s api to the wire protocol its endpoint speaks')
     }
-    const baseUrl = request.baseURL ?? base?.baseUrl ?? providerBaseUrl
+    if (entry.requestModel !== undefined && entry.requestModel.length === 0) {
+      invalid(provider, `model "${entry.id}" requestModel must be non-empty`)
+    }
+    if (entry.baseURL !== undefined) {
+      let endpoint: URL
+      try { endpoint = new URL(entry.baseURL) }
+      catch { invalid(provider, `model "${entry.id}" baseURL must be an absolute HTTP(S) URL without credentials`) }
+      if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username !== '' || endpoint.password !== '') {
+        invalid(provider, `model "${entry.id}" baseURL must be an absolute HTTP(S) URL without credentials`)
+      }
+      const baseline = request.baseURL ?? base?.baseUrl ?? providerBaseUrl
+      let baselineOrigin: string | undefined
+      if (baseline !== undefined) {
+        try { baselineOrigin = new URL(baseline).origin }
+        catch { invalid(provider, `model "${entry.id}" needs an absolute provider baseURL before its endpoint can be compared`) }
+      }
+      if (endpoint.origin !== baselineOrigin) crossOriginModels.add(entry.id)
+    }
+    for (const [name, value] of Object.entries(entry.headers ?? {})) {
+      try { new Headers([[name, value]]) }
+      catch { invalid(provider, `model "${entry.id}" header "${name}" is not valid for Fetch; use a valid HTTP field name and a single-line byte value`) }
+    }
+    const baseUrl = entry.baseURL ?? request.baseURL ?? base?.baseUrl ?? providerBaseUrl
     if (baseUrl === undefined) {
       invalid(provider, `model "${entry.id}" needs a baseURL; the installed catalog does not describe this route`)
     }
@@ -938,6 +975,8 @@ export function resolveRouteModels(
     // Only a value the profile named is a deployment choice; the catalog's is
     // the model's capability and stays out of request defaults.
     if (entry.maxTokens !== undefined) configuredMaxTokens.set(entry.id, entry.maxTokens)
+    if (entry.requestModel !== undefined) requestModels.set(entry.id, entry.requestModel)
+    if (entry.headers !== undefined) modelHeaders.set(entry.id, { ...entry.headers })
     return {
       // The installed entry lays the floor, and the fields below override it.
       // Enumerating instead would silently drop every `Model` field this
@@ -982,5 +1021,5 @@ export function resolveRouteModels(
     invalid(provider, `sets compat "${field}", but no model on the route speaks a protocol that takes it;`
       + ` it exists on ${takers.join(', ')}`)
   }
-  return { models: serviceableModels, configuredMaxTokens, modelErrors }
+  return { models: serviceableModels, configuredMaxTokens, requestModels, modelHeaders, crossOriginModels, modelErrors }
 }

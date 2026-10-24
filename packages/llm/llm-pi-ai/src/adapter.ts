@@ -59,6 +59,7 @@ import type {
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
+import { catalogProvider } from './catalog.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
 import { toStreamChunks } from './stream.ts'
@@ -213,14 +214,16 @@ function reasoningInfo(
   }
 }
 
-/** Merge deployment headers while removing case-insensitive attribution collisions. */
-function requestHeaders(headers: Readonly<Record<string, string>> | undefined): Record<string, string> {
-  const attribution = attributionHeaders()
-  const reserved = new Set(Object.keys(attribution).map(name => name.toLowerCase()))
-  return {
-    ...Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => !reserved.has(name.toLowerCase()))),
-    ...attribution,
+/** Layer explicit model headers above provider headers, then apply Harness attribution. */
+function requestHeaders(
+  headers: Readonly<Record<string, string>> | undefined,
+  modelHeaders: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+  const result = new Map<string, string>()
+  for (const layer of [headers, modelHeaders, attributionHeaders()]) {
+    for (const [name, value] of Object.entries(layer ?? {})) result.set(name.toLowerCase(), value)
   }
+  return Object.fromEntries(result)
 }
 
 /**
@@ -382,6 +385,14 @@ export class PiAiAdapter extends LlmAdapter {
       options.reasoningEffort ?? profile.reasoning,
     )
     const apiKey = await this.config.resolveApiKey(options.provider, profile)
+    if (profile.crossOriginModels.has(options.model)
+      && (apiKey !== undefined || profile.apiKeyEnv !== undefined || catalogProvider(options.provider) !== undefined)) {
+      throw new LlmError(
+        `pi-ai model "${options.model}" cannot send provider credentials to a different endpoint origin;`
+        + ' use a separate provider for authenticated endpoints or a custom keyless route with explicit trusted headers',
+        'INVALID_CONFIG',
+      )
+    }
 
     const consumer = new AbortController()
     const upstream = options.signal === undefined
@@ -413,15 +424,22 @@ export class PiAiAdapter extends LlmAdapter {
             maxBytes: profile.requestImageMaxBytes,
           },
         }, onReplayDegrade)
-      const events = snapshot.models.streamSimple(model, context, {
+      const requestModel = profile.requestModels.get(options.model)
+      const wireModel = requestModel === undefined ? model : { ...model, id: requestModel }
+      const wireContext = requestModel === undefined ? context : {
+        ...context,
+        messages: context.messages.map((message) => {
+          if (message.role !== 'assistant' || message.provider !== options.provider || message.model !== options.model) return message
+          return { ...message, model: requestModel }
+        }),
+      }
+      const events = snapshot.models.streamSimple(wireModel, wireContext, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
         signal: watchdog.signal,
-        // Profile headers are deployment-owned; attribution names are
-        // Harness-owned and therefore win collisions.
-        headers: requestHeaders(profile.headers),
+        headers: requestHeaders(profile.headers, profile.modelHeaders.get(options.model)),
       })
       const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id)[Symbol.asyncIterator]()
       let exhausted = false

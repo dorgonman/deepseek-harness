@@ -9,7 +9,7 @@ import type {
   SaveImageAttachment,
   StoredImageAttachment,
 } from '@deepseek-ai/dsh-attachment'
-import LlmRuntime, { createToolResultMessage, createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, ReasoningEffortId, userAgent } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createMessage, createToolResultMessage, createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, ReasoningEffortId, userAgent } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -112,6 +112,173 @@ describe('PiAiAdapter provider routing', () => {
     expect(chunks.length).toBeGreaterThan(0)
     expect(first.requests).toHaveLength(1)
     expect(second.requests).toHaveLength(0)
+  })
+
+  it('routes model selectors to distinct endpoints while preserving logical identities', async () => {
+    const fallback = await mockServer([{ events: textEvents }])
+    const local = await mockServer([{ events: textEvents }, { events: textEvents }])
+    const tailnet = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, { providers: { gateway: {
+      api: 'openai-completions', baseURL: fallback.url,
+      headers: { Authorization: 'Bearer kinf-local-placeholder', 'x-kinf-mode': 'wrong', 'x-company': 'provider', 'User-Agent': 'provider-agent' },
+      models: [
+        { id: 'native@local', requestModel: 'native', baseURL: local.url, headers: {
+          'X-Kinf-Mode': 'service', 'X-Kinf-Instance': 'native', 'X-Kinf-Service': 'native',
+          'X-Company': 'model', 'User-Agent': 'model-agent',
+        } },
+        { id: 'native@tailscale', requestModel: 'native', baseURL: tailnet.url, headers: {
+          'X-Kinf-Mode': 'service', 'X-Kinf-Instance': 'native', 'X-Kinf-Service': 'native',
+        } },
+        { id: 'unmapped' },
+      ],
+    } } })
+    onTestFinished(async () => { await ctx.fiber.dispose() })
+    expect((await ctx.llm.listModels('gateway')).map(model => model.id))
+      .toEqual(['native@local', 'native@tailscale', 'unmapped'])
+    expect(await ctx.llm.resolveModelInfo('gateway', 'native@local')).toMatchObject({ id: 'native@local' })
+    const first = await assemble(ctx, { provider: 'gateway', model: 'native@local', messages: [] })
+    expect(first.message.source).toMatchObject({
+      kind: 'model', provider: 'gateway', model: 'native@local',
+      replayState: { response: { model: 'native@local' } },
+    })
+    await assemble(ctx, { provider: 'gateway', model: 'native@local', messages: [first.message] })
+    await assemble(ctx, { provider: 'gateway', model: 'native@tailscale', messages: [] })
+    await assemble(ctx, { provider: 'gateway', model: 'unmapped', messages: [] })
+    expect(local.requests).toEqual([expect.objectContaining({ model: 'native' }), expect.objectContaining({ model: 'native' })])
+    expect(tailnet.requests[0]).toMatchObject({ model: 'native' })
+    expect(fallback.requests[0]).toMatchObject({ model: 'unmapped' })
+    expect(local.headers[0]).toMatchObject({
+      'x-kinf-mode': 'service', 'x-kinf-instance': 'native', 'x-kinf-service': 'native', 'x-company': 'model',
+      'user-agent': userAgent(), authorization: 'Bearer kinf-local-placeholder',
+    })
+    expect(tailnet.headers[0]).toMatchObject({ 'x-kinf-mode': 'service', 'x-company': 'provider' })
+    expect(fallback.headers[0]).toMatchObject({ 'x-kinf-mode': 'wrong', 'x-company': 'provider' })
+  })
+
+  it.each([
+    { provider: 'gateway', key: 'test-key', namesKey: false },
+    { provider: 'gateway', key: undefined, namesKey: true },
+    { provider: 'openai', key: undefined, namesKey: false },
+    { provider: 'openai-codex', key: undefined, namesKey: false },
+  ])('refuses cross-origin model credentials for $provider with key=$namesKey', async ({ provider, key, namesKey }) => {
+    const baseline = await mockServer([])
+    const target = await mockServer([])
+    const adapter = new PiAiAdapter({
+      profiles: () => resolveProfiles({ [provider]: {
+        api: 'openai-completions', baseURL: baseline.url,
+        ...namesKey ? { apiKeyEnv: 'PI_TEST_KEY' } : {},
+        models: [{ id: 'selected', requestModel: 'native', baseURL: target.url }],
+      } }),
+      resolveApiKey: () => Promise.resolve(key), auth: memoryAuth(),
+    })
+    const consume = async (): Promise<void> => {
+      for await (const _chunk of adapter.stream({ provider, model: 'selected', messages: [] })) { /* exhaust if accepted */ }
+    }
+    await expect(consume()).rejects.toMatchObject({ code: 'INVALID_CONFIG' })
+    expect(target.requests).toHaveLength(0)
+    expect(baseline.requests).toHaveLength(0)
+  })
+
+  it('keeps provider credentials on a same-origin model endpoint', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const adapter = adapterOf({ gateway: {
+      api: 'openai-completions', baseURL: server.url,
+      models: [{ id: 'selected', requestModel: 'native', baseURL: `${server.url}/v1` }],
+    } })
+    const chunks = []
+    for await (const chunk of adapter.stream({ provider: 'gateway', model: 'selected', messages: [] })) chunks.push(chunk)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(server.requests[0]).toMatchObject({ model: 'native' })
+    expect(server.headers[0]?.authorization).toBe('Bearer test-key')
+  })
+
+  it('preserves signatures only for continuation of the selected alias', async () => {
+    const selected = await mockServer([{ events: anthropicTextEvents }, { events: anthropicTextEvents }])
+    const foreign = await mockServer([])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, { providers: { gateway: {
+      apiKeyEnv: 'PI_TEST_KEY', api: 'anthropic-messages', baseURL: selected.url,
+      models: [
+        { id: 'native@local', requestModel: 'native', baseURL: selected.url },
+        { id: 'native@foreign', requestModel: 'native', baseURL: foreign.url },
+      ],
+    } } })
+    onTestFinished(async () => { await ctx.fiber.dispose() })
+    for (const model of ['native@local', 'native@foreign']) {
+      const history = createMessage({
+        role: 'assistant',
+        content: [{ type: 'reasoning', text: 'retained reasoning' }, { type: 'text', text: 'answer' }],
+        source: {
+          kind: 'model', provider: 'gateway', model,
+          replayState: {
+            response: { kind: 'pi-ai', version: 2, api: 'anthropic-messages', provider: 'gateway', model, stopReason: 'stop' },
+            blocks: [{ type: 'reasoning', thinkingSignature: 'opaque-signature' }, { type: 'text' }],
+          },
+        },
+      })
+      await assemble(ctx, {
+        provider: 'gateway', model: 'native@local',
+        messages: [history, createUserMessage({ content: [{ type: 'text', text: 'continue' }], source: { kind: 'user' } })],
+      })
+      expect(history.source).toMatchObject({ model, replayState: { response: { model } } })
+    }
+    expect(selected.requests[0]).toMatchObject({ model: 'native' })
+    expect(selected.requests[0]).toHaveProperty('messages.0.content.0', {
+      type: 'thinking', thinking: 'retained reasoning', signature: 'opaque-signature',
+    })
+    expect(JSON.stringify(selected.requests[1])).not.toContain('opaque-signature')
+    expect(foreign.requests).toHaveLength(0)
+  })
+
+  it.each([false, true])('dispatches a keyless custom alias only with an explicit placeholder header: %s', async (placeholder) => {
+    const server = await mockServer([{ events: textEvents }])
+    const adapter = new PiAiAdapter({
+      profiles: () => resolveProfiles({ 'keyless-gateway': {
+        api: 'openai-completions',
+        models: [{
+          id: 'selected', requestModel: 'native', baseURL: server.url,
+          ...placeholder ? { headers: { Authorization: 'Bearer kinf-local-placeholder' } } : {},
+        }],
+      } }),
+      resolveApiKey: () => Promise.resolve(undefined),
+      auth: memoryAuth(),
+    })
+    const chunks = []
+    for await (const chunk of adapter.stream({ provider: 'keyless-gateway', model: 'selected', messages: [] })) chunks.push(chunk)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: placeholder ? 'stop' : 'error' } })
+    expect(server.requests).toHaveLength(placeholder ? 1 : 0)
+    if (placeholder) {
+      expect(server.headers[0]?.authorization).toBe('Bearer kinf-local-placeholder')
+      expect(server.requests[0]).toMatchObject({ model: 'native' })
+    }
+  })
+
+  it('freezes an alias endpoint, wire id and headers in a prepared call', async () => {
+    const first = await mockServer([{ events: textEvents }])
+    const second = await mockServer([{ events: textEvents }])
+    let providers: Record<string, LlmPiAi.PiAiProviderProfile> = { gateway: {
+      api: 'openai-completions', headers: { Authorization: 'Bearer kinf-local-placeholder' }, models: [{ id: 'selected', requestModel: 'first-model', baseURL: first.url, headers: { 'X-Route': 'first' } }],
+    } }
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    onTestFinished(async () => { await ctx.fiber.dispose() })
+    ctx.llm.registerAdapter(['gateway'], new PiAiAdapter({
+      profiles: () => resolveProfiles(providers), resolveApiKey: () => Promise.resolve(undefined), auth: memoryAuth(),
+    }))
+    const prepared = await ctx.llm.prepareCall({ provider: 'gateway', model: 'selected' })
+    providers = { gateway: {
+      api: 'openai-completions', headers: { Authorization: 'Bearer kinf-local-placeholder' }, models: [{ id: 'selected', requestModel: 'second-model', baseURL: second.url, headers: { 'X-Route': 'second' } }],
+    } }
+    for await (const _chunk of prepared.stream({ ...prepared.config, messages: [] })) { /* exhaust the captured call */ }
+    await assemble(ctx, { provider: 'gateway', model: 'selected', messages: [] })
+    expect(prepared.config.model).toBe('selected')
+    expect(first.requests[0]).toMatchObject({ model: 'first-model' })
+    expect(first.headers[0]?.['x-route']).toBe('first')
+    expect(second.requests[0]).toMatchObject({ model: 'second-model' })
+    expect(second.headers[0]?.['x-route']).toBe('second')
   })
 
   it('merges profile headers with Harness attribution winning', async () => {

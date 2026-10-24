@@ -77,7 +77,7 @@ kind: "package-reference"
 | `apiKeyEnv` | 无 | 按请求解析的凭据引用；省略时交由 pi-ai 环境发现 |
 | `displayName` | 提供方名 | 选择器界面显示的标签 |
 | `api` | 目录协议 | 协议格式；仅目录不提供的路由需要 |
-| `baseURL` | 目录端点 | 路由上所有模型的端点 |
+| `baseURL` | 目录端点 | 未单独指定端点的模型所用的默认端点 |
 | `models` | 已安装目录 | 整体替换路由目录；每个条目从已安装模型取默认值 |
 | `modelOverrides` | 无 | 重塑个别已安装目录模型，而不替换其余模型 |
 | `compat` | 目录检测 | 无法识别端点的协议兼容开关 |
@@ -87,6 +87,10 @@ kind: "package-reference"
 | `requestImageMaxBytes` | `1 MiB` | 每张请求图片在 base64 扩展前的编码字节目标 |
 | `maxRequestImageBytes` | `20 MiB` | base64 图片载荷总上限，保留图片超过时请求以 `IMAGE_OFFLOAD_REQUIRED` 失败 |
 | `retryPolicy` | normal，5 次重试 | 由 `dsh-llm-retry` 执行的提供方自有重试策略 |
+
+每个 `models` 条目或 `modelOverrides` 值均可设置 `baseURL`、`headers` 和 `requestModel`。端点必须是不含 URL 凭据的绝对 HTTP(S) URL。`requestModel` 修改请求中的模型 id；条目的 `id` 仍是选择器和 Session 身份。显式模型请求头按不区分大小写的名称覆盖提供方请求头，Harness 归因请求头仍具有最高优先级。
+
+跨来源的模型端点覆盖必须使用自定义无密钥提供方路由。已解析的 API 密钥、已命名的凭据引用或已安装目录提供方的环境／OAuth 认证会在发送前拒绝该覆盖。同来源覆盖保留提供方认证。显式部署请求头会应用于所配置的端点；仅配置可信端点。
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-llm-pi-ai)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
