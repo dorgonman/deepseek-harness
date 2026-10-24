@@ -36,7 +36,7 @@ describe.each(['inputModalities', 'input'] as const)('%s input types', (field) =
 
   it('enables images and keeps unrelated metadata', () => {
     const onChange = vi.fn()
-    const model = { id: 'preview', contextWindow: 123456, systemPromptUpdate: 'in-history' }
+    const model = { id: 'preview', contextWindow: 123456, systemPromptUpdate: 'in-history', baseURL: 'http://127.0.0.1:5000/v1', requestModel: 'native', headers: { 'X-Route': 'local' } }
     render(<ModelInputTypes model={model} field={field} position={1} disabled={false} t={key => en[key]} onChange={onChange} />)
     fireEvent.click(screen.getByRole('checkbox', { name: en.modelInputImage }))
     expect(onChange).toHaveBeenCalledWith({ ...model, [field]: ['text', 'image'] })

@@ -1769,7 +1769,7 @@ export interface Config extends ProtocolConfig, ModelListingConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:222`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:228`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -1876,10 +1876,16 @@ export interface PiAiProviderProfile {
   retryPolicy?: RetryPolicyConfig
 }
 
-/** One configured model entry: an id plus the catalog fields it overrides. */
+/** One selectable model entry with catalog and request-routing overrides. */
 export interface PiAiModelProfile {
-  /** Model id sent to the provider and accepted by {@link GenerateOptions.model}. */
+  /** Model selector accepted by {@link GenerateOptions.model} and retained in Session metadata. */
   id: string
+  /** Provider model id sent on requests; omission sends the selector id unchanged. */
+  requestModel?: string
+  /** HTTP(S) endpoint for this model, overriding the provider route's endpoint. */
+  baseURL?: string
+  /** Request headers overriding provider headers by case-insensitive name; Harness attribution still wins. */
+  headers?: Record<string, string>
   /** Display name for selectors; defaults to the catalog name, then the id. */
   name?: string
   /** Maximum combined request and response context in tokens. */

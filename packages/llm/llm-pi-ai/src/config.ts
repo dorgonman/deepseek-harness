@@ -216,6 +216,12 @@ export interface ResolvedPiAiProviderProfile
    * own, so a catalog capability must not appear here.
    */
   configuredMaxTokens: ReadonlyMap<string, number>
+  /** Wire model ids keyed by the unchanged selector id. */
+  requestModels: ReadonlyMap<string, string>
+  /** Explicit model request headers layered above provider headers. */
+  modelHeaders: ReadonlyMap<string, Readonly<Record<string, string>>>
+  /** Models whose endpoint override cannot inherit provider credentials. */
+  crossOriginModels: ReadonlySet<string>
 }
 
 /** Plugin configuration: the provider routes this instance owns. */
@@ -302,6 +308,10 @@ const reasoningEfforts = z.dict(
 /** The fields a `models` entry and a `modelOverrides` value share; only the id's home differs. */
 const modelFields = {
   name: z.string(),
+  baseURL: z.string(),
+  requestModel: z.string(),
+  // A bare dict materializes {}, which would change existing stored model rows.
+  headers: z.union([z.dict(z.string())]),
   contextWindow: z.number().step(1).min(1),
   maxTokens: z.number().step(1).min(1),
   // No explicit default, unlike the route's `defaultInput`: schemastery
@@ -501,6 +511,9 @@ export function resolveProfiles(
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
       ...rest.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...rest.thinkingBudgets } },
       configuredMaxTokens: catalog?.configuredMaxTokens ?? new Map(),
+      requestModels: catalog?.requestModels ?? new Map(),
+      modelHeaders: catalog?.modelHeaders ?? new Map(),
+      crossOriginModels: catalog?.crossOriginModels ?? new Set(),
       modelErrors: catalog?.modelErrors ?? new Map(),
       ...piProvider === undefined ? {} : { piProvider },
       ...catalogError === undefined ? {} : { catalogError },

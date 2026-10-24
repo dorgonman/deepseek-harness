@@ -77,7 +77,7 @@ Each profile may set a `retryPolicy`; omission uses normal mode with five retrie
 | `apiKeyEnv` | absent | Credential reference resolved per request; omission defers to pi-ai ambient discovery |
 | `displayName` | provider name | Label shown by selector surfaces |
 | `api` | catalog protocol | Wire protocol; only needed for routes the catalog does not supply |
-| `baseURL` | catalog endpoint | Endpoint of every model on the route |
+| `baseURL` | catalog endpoint | Default endpoint for models without their own endpoint |
 | `models` | installed catalog | Replaces the route's catalog wholesale; each entry defaults from the installed model |
 | `modelOverrides` | none | Reshapes individual installed-catalog models without replacing the rest |
 | `compat` | catalog detection | Wire-compatibility switches for unrecognized endpoints |
@@ -87,6 +87,10 @@ Each profile may set a `retryPolicy`; omission uses normal mode with five retrie
 | `requestImageMaxBytes` | `1 MiB` | Encoded-byte target for each request image before base64 expansion |
 | `maxRequestImageBytes` | `20 MiB` | Aggregate base64 image-payload bound; a request whose retained images exceed it fails with `IMAGE_OFFLOAD_REQUIRED` |
 | `retryPolicy` | normal, 5 retries | Provider-owned retry policy executed by `dsh-llm-retry` |
+
+Each `models` entry or `modelOverrides` value can set `baseURL`, `headers`, and `requestModel`. The endpoint must be an absolute HTTP(S) URL without URL credentials. `requestModel` changes the wire model id; the entry's `id` remains the selector and Session identity. Explicit model headers override provider headers by case-insensitive name, while Harness attribution still wins.
+
+Model endpoint overrides on another origin require a custom keyless provider route. A resolved API key, a named credential reference, or an installed catalog provider's ambient/OAuth authentication refuses that override before dispatch. Same-origin overrides retain provider authentication. Explicit deployment headers apply to their configured endpoints; configure only trusted endpoints.
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-llm-pi-ai) is the exhaustive source for every accepted field and its JSDoc.
 
