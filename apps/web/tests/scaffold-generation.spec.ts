@@ -68,7 +68,7 @@ describe('Web seed stream timing', () => {
     const fixture = await readFile(new URL('../../../snapshots/session/skill-load/session.v3.jsonl', import.meta.url), 'utf8')
     const projected = fixture.split(/\r?\n/).map((line, index) => {
       if (index === 0 || line.trim() === '') return line
-      const { seq: _seq, time: _time, ...event } = JSON.parse(line)
+      const { seq: _seq, time: _time, ...event } = JSON.parse(line) as Record<string, unknown>
       return JSON.stringify(event)
     }).join('\n')
     expect(() => parseSeedFixture(projected, { timing: 'recorded' }))
