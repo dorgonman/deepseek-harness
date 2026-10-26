@@ -939,6 +939,46 @@ describe('mapStopReason / mapUsage', () => {
   })
 
   it.each([
+    'HTTP 408: The request was cancelled after native execution quiesced.',
+    'HTTP/1.1 408: The request was cancelled after native execution quiesced.',
+    'OpenAI API error (408): The request was cancelled after native execution quiesced.',
+    '408 {"code":"request_timeout","message":"The request was cancelled after native execution quiesced.","type":"invalid_request_error"}',
+    '408 {"error":{"message":"The request was cancelled after native execution quiesced.","type":"invalid_request_error","code":"request_timeout"}}',
+    '{"error":{"message":"The request was cancelled after native execution quiesced.","type":"invalid_request_error","code":"request_timeout"}}',
+    'The request timed out after native execution quiesced.',
+  ])('maps explicit provider request timeout %j', (errorMessage) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toEqual({ kind: 'error', failure: { message: errorMessage, code: 'TIMEOUT' } })
+  })
+
+  it.each([
+    ['The request was cancelled after native execution quiesced.', 'PI_AI_ERROR'],
+    ['409 {"error":{"message":"The request was cancelled after native execution quiesced.","type":"invalid_request_error","code":"request_cancelled"}}', 'INVALID_REQUEST'],
+    ['409 {"error":{"message":"The request was cancelled by an administrator.","code":"request_cancelled"}}', 'PI_AI_ERROR'],
+    ['409 {"error":{"message":"The response delivery was cancelled.","code":"delivery_cancelled"}}', 'PI_AI_ERROR'],
+    ['HTTP 400: invalid request; request_timeout is not a valid parameter', 'INVALID_REQUEST'],
+    ['HTTP 400: invalid request; maxTokens 408 is not supported', 'INVALID_REQUEST'],
+    ['HTTP 413: request body too large', 'INVALID_REQUEST'],
+  ])('preserves non-timeout provider failure %j', (errorMessage, code) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toEqual({ kind: 'error', failure: { message: errorMessage, code } })
+  })
+
+  it('preserves caller cancellation when a provider reports request timeout', async () => {
+    const errorMessage = 'HTTP 408: The request was cancelled after native execution quiesced.'
+    const error = assistant({ stopReason: 'error', errorMessage })
+    const chunks = await collect(toStreamChunks(
+      feed({ type: 'error', reason: 'error', error }),
+      undefined,
+      AbortSignal.abort(),
+    ))
+    expect(chunks.at(-1)).toEqual({
+      type: 'finish',
+      reason: { kind: 'aborted', failure: { message: errorMessage, code: 'ABORTED' } },
+    })
+  })
+
+  it.each([
     'other side closed',
     'HTTP2 request did not get a response',
     'WebSocket closed unexpectedly',
