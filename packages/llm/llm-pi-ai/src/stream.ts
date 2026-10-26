@@ -43,6 +43,10 @@ function classifyPiAiError(message: string): string {
   if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
+  // Native endpoints can label a request deadline as invalid_request_error;
+  // its explicit timeout code or HTTP status wins over that generic type.
+  if (/(?:^|\bHTTP(?:\/[\d.]+)?\s+|\bAPI error\s*\()408\b/i.test(message)
+    || /"code"\s*:\s*"request_timeout"/i.test(message)) return 'TIMEOUT'
   // A rejected request body (gateway or provider size cap): resending the
   // same request cannot succeed, so it is invalid, not transient.
   if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
