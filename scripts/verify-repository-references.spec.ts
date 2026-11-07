@@ -77,8 +77,20 @@ describe('maintained repository reference policy', () => {
     'allows immutable dependency pins in the exact generated lockfile %s',
     (file) => {
       const revision = 'a'.repeat(40)
-      const source = `size = 6_344_383\nsource = { git = "https://example.invalid/dependency#${revision}" }`
+      const source = file === 'pnpm-lock.yaml'
+        ? `resolution: {commit: ${revision}, repo: https://example.invalid/dependency}`
+        : `size = 6_344_383\nsource = { git = "https://example.invalid/dependency#${revision}" }`
       expect(findRepositoryReferences(file, source, new Set([revision]))).toEqual([])
+    },
+  )
+
+  it.each(['pnpm-lock.yaml', 'python/sdk/uv.lock'])(
+    'still rejects commit references outside dependency pins in %s',
+    (file) => {
+      const revision = 'a'.repeat(40)
+      expect(findRepositoryReferences(file, `# commit ${revision}`, new Set([revision]))).toEqual([
+        { file, line: 1, kind: 'commit-hash' },
+      ])
     },
   )
 
