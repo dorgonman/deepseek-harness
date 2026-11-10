@@ -16,7 +16,7 @@ import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 export interface CompactionPolicyConfig {
   /** Window fraction for pressure; capped at context window minus reserved output and `headroomTokens`. Defaults to `0.8`. */
   thresholdRatio?: number
-  /** Additional pressure headroom beyond the routed output reservation. Non-negative integer; defaults to `65536`. */
+  /** Additional pressure headroom beyond the routed output reservation. Non-negative integer; defaults to `65536` where it fits or one eighth of the remaining message budget. */
   headroomTokens?: number
   /** Recent context retained as a fraction of context window minus reserved output tokens. Defaults to `0.16`. */
   retainRatio?: number
@@ -59,6 +59,8 @@ export type ResolvedRetention =
 interface ResolvedPolicyFields {
   readonly thresholdRatio: number
   readonly headroomTokens: number
+  /** An omitted headroom can shrink with capacity, along with an omitted summary cap. */
+  readonly adaptiveHeadroom?: 'pressure' | 'pressure-and-summary'
   readonly summarizationProvider: string
   readonly summarizationModel: string
   readonly maxTokens: number
@@ -78,7 +80,7 @@ export type ResolvedTargetPolicy = ResolvedPolicyFields & ResolvedRetention & {
 }
 
 /** One routed model's concrete pressure and retention budget. */
-export type ResolvedCompactSpec = Omit<ResolvedTargetPolicy, 'retainRatio' | 'retainTokens' | 'headroomTokens'> & {
+export type ResolvedCompactSpec = Omit<ResolvedTargetPolicy, 'retainRatio' | 'retainTokens' | 'headroomTokens' | 'adaptiveHeadroom'> & {
   /** Adapter-declared full window; token budgets below exclude reserved output tokens. */
   readonly contextWindow: number
   readonly thresholdTokens: number

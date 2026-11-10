@@ -314,6 +314,7 @@ describe('compact configuration and defaults', () => {
     expect(resolved).toEqual({
       thresholdRatio: 0.8,
       headroomTokens: 65_536,
+      adaptiveHeadroom: 'pressure-and-summary',
       retainRatio: 0.16,
       summarizationProvider: '',
       summarizationModel: '',
@@ -442,6 +443,24 @@ describe('compact configuration and defaults', () => {
       thresholdTokens: threshold,
       retainTokens: retained,
     })
+  })
+
+  it('fits omitted headroom in a 64K window with a 32K output reservation', () => {
+    const target = { provider: MODEL, model: MODEL }
+    const policy = resolveTargetPolicy(resolveConfig(), target)
+    const explicitSummary = resolveTargetPolicy(resolveConfig({ maxTokens: 512 }), target)
+    const perModelSummary = resolveTargetPolicy(resolveConfig({
+      modelPolicies: [{ ...target, maxTokens: 768 }],
+    }), target)
+
+    expect(resolveCompactSpec(policy, 65_536, 32_768)).toMatchObject({
+      thresholdTokens: 28_672, retainTokens: 5_242, maxTokens: 4_096,
+    })
+    expect(resolveCompactSpec(policy, 262_144, 32_768)).toMatchObject({
+      thresholdTokens: 163_840, retainTokens: 36_700, maxTokens: 65_536,
+    })
+    expect(resolveCompactSpec(explicitSummary, 65_536, 32_768).maxTokens).toBe(512)
+    expect(resolveCompactSpec(perModelSummary, 65_536, 32_768).maxTokens).toBe(768)
   })
 
   it.each([500, 501])('rejects headroom %i that exhausts the remaining capacity', (headroomTokens) => {
@@ -1540,6 +1559,33 @@ describe('default one-shot summarizer', () => {
     expect(policyAdapter.lastOptions?.messages.slice(0, -1)).toEqual([system, prefix])
   })
 
+  it.each([undefined, 512])('bounds the omitted summary cap on the routed 64K model (%s)', async (maxTokens) => {
+    const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'summary' }], undefined, MODEL, {
+      auto: false, maxTokens,
+    })
+    vi.spyOn(adapter, 'resolveModel').mockResolvedValue({
+      provider: MODEL, id: MODEL, name: MODEL, context: { contextWindow: 65_536 }, defaultMaxTokens: 32_768,
+    })
+    const output = await compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL))
+
+    expect(adapter.lastOptions?.maxTokens).toBe(maxTokens ?? 4_096)
+    expect(output.maxTokens).toBe(maxTokens ?? 4_096)
+  })
+
+  it('summarizes an unavailable historical route through its explicitly configured alternate', async () => {
+    const { ctx, adapter, compact } = await summarizerHarness([{ type: 'text', text: 'summary' }], undefined, 'summary', {
+      auto: false,
+      summarizationProvider: 'summary',
+      summarizationModel: 'summary',
+    })
+    const resolve = vi.spyOn(ctx.llm, 'resolveModelInfo')
+    const output = await compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL))
+
+    expect(resolve).not.toHaveBeenCalled()
+    expect(adapter.lastOptions).toMatchObject({ provider: 'summary', model: 'summary', maxTokens: 65_536 })
+    expect(output.summary).toEqual([{ type: 'text', text: 'summary' }])
+  })
+
   it('resolves the latest routed provider/model before the AgentOptions pair', async () => {
     const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'summary' }], undefined, 'routed')
     const session = conversation(1)
@@ -1740,6 +1786,16 @@ describe('model-switch pressure', () => {
     if (override) await expect(switching).resolves.toEqual(selected)
     else await expect(switching).rejects.toMatchObject({ code: 'MODEL_SWITCH_COMPACTION_FAILED' })
     expect(session.requestHeader()).toEqual(previous)
+    expect(adapter.lastOptions).toBeUndefined()
+  })
+
+  it('allows a short-history switch into an unconfigured 64K route', async () => {
+    const { ctx, adapter } = harness({ headroomTokens: undefined, maxTokens: undefined })
+    ctx.llm.registerAdapter(['64k'], new ContextAdapter(65_536))
+    const session = conversation(1, 'short')
+    const selected = { provider: '64k', model: '64k', maxTokens: 32_768 }
+
+    await expect(request(ctx, session, selected)).resolves.toEqual(selected)
     expect(adapter.lastOptions).toBeUndefined()
   })
 

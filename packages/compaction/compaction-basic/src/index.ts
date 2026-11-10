@@ -19,6 +19,7 @@ import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import {
   resolveCompactSpec,
   resolveConfig,
+  resolveSummaryMaxTokens,
   resolveTargetPolicy,
   TargetPressureConfigError,
 } from './config.ts'
@@ -273,10 +274,20 @@ export class BasicCompactionEngine extends CompactionEngine {
     signal?: AbortSignal,
   ): Promise<SummaryResult> {
     const target = conversationTarget(agent)
-    const config = target === undefined
-      ? this.config
-      : resolveTargetPolicy(this.config, target)
-    return summarizeWithLlm(this.ctx, config, input, agent, signal)
+    if (target === undefined) return summarizeWithLlm(this.ctx, this.config, input, agent, signal)
+    const policy = resolveTargetPolicy(this.config, target)
+    if (policy.adaptiveHeadroom !== 'pressure-and-summary') {
+      return summarizeWithLlm(this.ctx, policy, input, agent, signal)
+    }
+    const info = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal).catch(() => {
+      // The stream owns route redirection and dispatch failures; sizing is optional.
+      signal?.throwIfAborted()
+      return undefined
+    })
+    if (info?.context === undefined) return summarizeWithLlm(this.ctx, policy, input, agent, signal)
+    const reserve = agent.session.requestHeader()?.config.maxTokens ?? info.defaultMaxTokens ?? 0
+    const maxTokens = resolveSummaryMaxTokens(policy, info.context.contextWindow - reserve)
+    return summarizeWithLlm(this.ctx, { ...policy, maxTokens }, input, agent, signal)
   }
 
   /**
