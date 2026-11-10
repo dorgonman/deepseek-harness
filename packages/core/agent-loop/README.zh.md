@@ -54,6 +54,8 @@ kind: "package-reference"
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-agent-loop) 列出所有接受的字段。`maxParallelToolCalls` 仍是 volatile 正整数 Config 字段，默认值为 `10`；`1` 表示串行执行。循环在每个批次调用 `execute()` 时传入当前值，其优先级高于执行器配置。实时修改从下一个批次生效；`agents` 仍是启动配置。
 
+`stopOnRepeatedOutput` 是默认关闭的 volatile 布尔配置。启用后，如果单一文本或推理块持续逐字重复，循环会中止该次模型调用。检测器要求一个包含至少 12 个不同字母、长度为 96 至 512 个 UTF-16 单元的片段连续出现六次。循环保留已送达的前缀和排队输入，中止提供方串流，将取消原因记录为 `agent-loop/repeated-model-output`，并且不重试。要在 Web 启用，可在 profile patch 的 `agent-loop` 条目配置中加入 `stopOnRepeatedOutput: true`，并保留该条目现有设置。有意生成的重复文本也可能触发保护。
+
 配置式恢复会在发布前将声明的路由记录为 Session 选择。程序化恢复保留 Session 选择，除非其 setup 显式记录另一条路由；仅传入初始 `agentOptions` 不会覆盖已有历史。
 
 ### 以编程方式创建或恢复 agent

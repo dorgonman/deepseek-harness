@@ -946,6 +946,7 @@ describe('mapStopReason / mapUsage', () => {
     '408 {"error":{"message":"The request was cancelled after native execution quiesced.","type":"invalid_request_error","code":"request_timeout"}}',
     '{"error":{"message":"The request was cancelled after native execution quiesced.","type":"invalid_request_error","code":"request_timeout"}}',
     'The request timed out after native execution quiesced.',
+    '{"error":{"message":"The request timed out without native progress; native execution quiesced.","type":"invalid_request_error","code":"request_progress_timeout"}}',
   ])('maps explicit provider request timeout %j', (errorMessage) => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
       .toEqual({ kind: 'error', failure: { message: errorMessage, code: 'TIMEOUT' } })

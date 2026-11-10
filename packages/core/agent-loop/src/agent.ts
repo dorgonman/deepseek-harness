@@ -40,6 +40,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { ReactLoopInbox } from './inbox.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
+import { REPEATED_MODEL_OUTPUT, StreamRepetition } from './stream-repetition.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
 
 /** Projected facts consumed by this driver; registration stays with the factory. */
@@ -485,6 +486,8 @@ export class ReactLoopAgent implements Agent {
         step,
         (frame) => { this.dispatch.emit('agent/assistant-stream', { frame }) },
       )
+      const repetition = this.loopCtx.agentLoop.config.stopOnRepeatedOutput.get()
+        ? new StreamRepetition() : undefined
       let started = false
       try {
         const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
@@ -493,6 +496,14 @@ export class ReactLoopAgent implements Agent {
         started = true
         for await (const chunk of stream) {
           signal.throwIfAborted()
+          if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+            const offset = repetition?.push(chunk)
+            if (offset !== undefined) {
+              live.push({ ...chunk, text: chunk.text.slice(0, offset) })
+              this.cancel({ kind: 'hook', reason: REPEATED_MODEL_OUTPUT }, { keepInbox: true })
+              signal.throwIfAborted()
+            }
+          }
           live.push(chunk)
         }
         signal.throwIfAborted()
