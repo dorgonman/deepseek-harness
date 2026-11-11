@@ -12,6 +12,7 @@ import { assemble } from './assemble.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
 const MODEL = 'flash-native-mtp-decision'
+const SELECTOR = 'chat-qwen-flash-next-exl3-decision@local'
 const KEY = 'decision-fixture-key'
 const contexts: Context[] = []
 afterEach(async () => {
@@ -42,12 +43,12 @@ function reply() {
 }
 
 function model() {
-  return { id: `${MODEL}@fixture`, requestModel: MODEL, requestProtocol: 'kinf-decision-v1' as const,
+  return { id: SELECTOR, requestModel: MODEL, requestProtocol: 'kinf-decision-v1' as const,
     contextWindow: 262144, maxTokens: 1, input: ['text' as const], reasoningEfforts: false as const }
 }
 
 function options(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
-  return { provider: 'fixture', model: `${MODEL}@fixture`, messages: [
+  return { provider: 'fixture', model: SELECTOR, messages: [
     createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Is the evidence relevant?' }] }),
   ], ...overrides }
 }
@@ -75,7 +76,7 @@ describe('KINF Decision adaptation', () => {
   it('publishes both scores and exact served identity without private metadata', async () => {
     const server = await mockServer([{ body: JSON.stringify(reply()) }])
     const ctx = await harness(server.url)
-    expect(await ctx.llm.resolveModelInfo('fixture', `${MODEL}@fixture`)).toMatchObject({
+    expect(await ctx.llm.resolveModelInfo('fixture', SELECTOR)).toMatchObject({
       nativeTools: false, inputProjectionPolicy: 'reject', defaultMaxTokens: 1,
     })
     const result = await assemble(ctx, options())
@@ -85,11 +86,15 @@ describe('KINF Decision adaptation', () => {
     expect(block?.type).toBe('text')
     if (block?.type !== 'text') throw new Error('expected visible Decision text')
     const displayed = JSON.parse(block.text) as Record<string, unknown>
+    expect(displayed['model']).toBe(MODEL)
     expect(displayed['decision']).toEqual(reply().decision)
-    expect(displayed['served_identity']).toMatchObject({ serving_variant_id: MODEL, worker_pid: 42 })
+    expect(displayed['served_identity']).toMatchObject({
+      logical_model: MODEL, requested_model: MODEL, requested_serving_variant_id: MODEL,
+      serving_variant_id: MODEL, worker_pid: 42,
+    })
     expect(block.text).not.toContain(KEY)
     expect(block.text).not.toContain('private')
-    expect(result.message.source).toMatchObject({ model: `${MODEL}@fixture` })
+    expect(result.message.source).toMatchObject({ model: SELECTOR })
     expect(server.requests).toEqual([{
       model: MODEL, messages: [{ role: 'user', content: 'Is the evidence relevant?' }],
       stream: false, max_tokens: 1, kinf_decision: 'label_scores',
