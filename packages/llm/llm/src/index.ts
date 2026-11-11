@@ -852,6 +852,8 @@ export class LlmRuntime extends TypertRemoteService {
       ...inputModalities === undefined ? {} : { inputModalities },
       ...context === undefined ? {} : { context: { contextWindow: context.contextWindow } },
       ...defaultMaxTokens === undefined ? {} : { defaultMaxTokens },
+      ...resolved.nativeTools === undefined ? {} : { nativeTools: resolved.nativeTools },
+      ...resolved.inputProjectionPolicy === undefined ? {} : { inputProjectionPolicy: resolved.inputProjectionPolicy },
       ...resolved.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: resolved.systemPromptUpdate },
       ...resolved.toolUpdate === undefined ? {} : { toolUpdate: resolved.toolUpdate },
     }
@@ -1112,6 +1114,13 @@ export class LlmRuntime extends TypertRemoteService {
         : Object.isFrozen(options)
           ? deepFreeze({ ...options, ...resolvedConfig })
           : { ...options, ...resolvedConfig }
+      if (modelInfo.nativeTools === false && (resolvedOptions.tools?.length ?? 0) > 0) {
+        throw new LlmError('The selected model does not support native tool declarations.', 'UNSUPPORTED_TOOLS')
+      }
+      if (modelInfo.inputProjectionPolicy === 'reject'
+        && resolvedOptions.messages.some(message => message.content.some(block => block.type !== 'text'))) {
+        throw new LlmError('The selected model requires plain text input without content projection.', 'UNSUPPORTED_CONTENT')
+      }
       // Files are never dispatched natively: every route receives handle text.
       let projectedMessages: readonly RequestMessage[] = resolvedOptions.messages
       if (projectedMessages.some(message => contentHasFile(message.content))) {
@@ -1124,6 +1133,9 @@ export class LlmRuntime extends TypertRemoteService {
       }
       // Tool changes are logged on every route; the route's declared mode selects what it receives.
       const projectedTools = projectToolUpdates(projectedMessages, resolvedOptions.tools, modelInfo.toolUpdate, resolvedOptions.toolHistory)
+      if (modelInfo.nativeTools === false && (projectedTools.tools?.length ?? 0) > 0) {
+        throw new LlmError('The selected model does not support native tool declarations.', 'UNSUPPORTED_TOOLS')
+      }
       projectedMessages = projectedTools.messages
       let projectedOptions = resolvedOptions
       if (projectedMessages !== resolvedOptions.messages || projectedTools.tools !== resolvedOptions.tools) {

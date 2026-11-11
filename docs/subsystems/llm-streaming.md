@@ -613,6 +613,10 @@ interface LlmModelReasoningInfo {
 ```ts type-equiv
 /** Exact-route model metadata resolved by its owning adapter. */
 interface LlmResolvedModelInfo extends LlmModelInfo {
+  /** Whether requests may declare native tools; omission preserves normal tool admission. */
+  nativeTools?: boolean
+  /** Reject non-text input before projecting files or images; omission preserves normal projection. */
+  inputProjectionPolicy?: 'reject'
   /** Provider-owned context capacity when known. */
   context?: LlmModelContext
   /** Adapter-configured per-request output cap materialized when callers omit one. */
@@ -627,6 +631,8 @@ interface LlmResolvedModelInfo extends LlmModelInfo {
 ```
 
 Auxiliary callers can provide user content without a durable identity or source. Existing `Message[]` histories remain valid request inputs. Session writes, Agent delivery, and recorded title requests continue to require durable messages.
+
+`nativeTools: false` declares that the exact model cannot accept native tool calls. [Tool admission](tools.md) uses it before prompt assembly, and direct dispatch rejects tool declarations. `inputProjectionPolicy: 'reject'` rejects non-text input before file or image projection. Omitted fields preserve normal tool admission and input projection.
 
 ```ts type-equiv
 /** User input for one LLM request; it has no durable Session identity or source. */

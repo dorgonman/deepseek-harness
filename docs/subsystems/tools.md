@@ -181,6 +181,8 @@ interface ToolRestriction {
 
 A registration may carry a `when` condition. AgentLoop calls `ctx.tools.resolve()` once per proposed step with the captured model selection; the returned set decides that step's tool declarations, executor sections, and every call in its batch, including PTC program subcalls. `ctx.tools.executable()` applies the set at execution and, without one, excludes conditional registrations. A same-name replacement or a new restriction stops unstarted calls from using an admitted registration, and the loop disposes the set once the step's batch settles.
 
+For a registered exact model whose `LlmResolvedModelInfo.nativeTools` is false, admission excludes all tools, schemas, and executor guidance, including PTC transport declarations. `ResolvedToolSet.nativeTools: false` also refuses execution through `ctx.tools.execute()`. Omitted metadata and compositions without a matching LLM route retain normal admission.
+
 ```ts type-equiv
 /** Inputs for a tool's step-time activation condition. */
 interface ToolActivationContext {
@@ -210,6 +212,8 @@ interface ToolRegistrationOptions {
 ```ts type-equiv
 /** One step's admitted registrations, also used by nested PTC calls. */
 interface ResolvedToolSet {
+  /** False suppresses native schemas and executor guidance for this exact model step. */
+  readonly nativeTools?: boolean
   /** Close admission after the step's tool batch settles. */
   dispose(): void
   /**

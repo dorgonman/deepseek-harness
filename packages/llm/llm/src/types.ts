@@ -452,6 +452,10 @@ export type ToolUpdate = 'in-history' | 'addition-only'
 
 /** Exact-route model metadata resolved by its owning adapter. */
 export interface LlmResolvedModelInfo extends LlmModelInfo {
+  /** Whether requests may declare native tools; omission preserves normal tool admission. */
+  nativeTools?: boolean
+  /** Reject non-text input before projecting files or images; omission preserves normal projection. */
+  inputProjectionPolicy?: 'reject'
   /** Provider-owned context capacity when known. */
   context?: LlmModelContext
   /** Adapter-configured per-request output cap materialized when callers omit one. */

@@ -94,6 +94,8 @@ kind: "package-reference"
 
 每个 `models` 条目或 `modelOverrides` 值均可设置 `baseURL`、`headers` 和 `requestModel`。端点必须是不含 URL 凭据的绝对 HTTP(S) URL。`requestModel` 修改请求中的模型 id；条目的 `id` 仍是选择器和 Session 身份。显式模型请求头按不区分大小写的名称覆盖提供方请求头，Harness 归因请求头仍具有最高优先级。
 
+显式的逐模型 `requestProtocol: kinf-decision-v1` 选择 KINF 的首 token Decision 操作。它要求 `api: openai-completions`、`maxTokens: 1`、`input: [text]` 和 `reasoningEfforts: false`；省略时保留普通 pi-ai 分派。请求发送 `kinf_decision: label_scores`，禁用原生流式传输，仅接受纯文本 system、user 和 assistant 历史。原生工具、推理、停止控制、非零 temperature 及非一的输出上限均被拒绝。完整 JSON 响应限制为 64 KiB，并校验两个 logit、两个未校准标签分数、token 用量和确切服务身份。其原生 `length` 结束状态表示 Decision 成功完成。对话文本仅包含经过校验的 `model`、`decision`、`served_identity` 和 `usage` 字段；私有或未知响应字段被省略。不会尝试普通聊天或其他提供方回退。
+
 跨来源的模型端点覆盖必须使用自定义无密钥提供方路由。已解析的 API 密钥、已命名的凭据引用或已安装目录提供方的环境／OAuth 认证会在发送前拒绝该覆盖。同来源覆盖保留提供方认证。显式部署请求头会应用于所配置的端点；仅配置可信端点。
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-llm-pi-ai)是每个受支持字段及其 JSDoc 的穷尽式真源。
@@ -252,6 +254,20 @@ pi-ai 事件变成 harness 的推理、文本、工具调用、用量与 finish 
 #### KV Cache 影响
 
 已记录的响应内容会追加到下一个请求，不会使其更早可复用前缀失效。未记录的传输元数据与用量计量不影响缓存标识。
+
+### KINF Decision
+
+#### 模型看到什么
+
+Decision 模型接收纯文本历史，不含原生工具 schema 或执行器指导。非文本输入在文件或图片投影之前失败。
+
+#### Token 影响
+
+原生操作生成一个标签 token。其完整且已校验的读数成为对话文本，保留时计入后续输入 token。
+
+#### KV Cache 影响
+
+保留的读数文本追加到历史。选择其他模型会改变请求的模型身份和缓存归属。
 
 ## 已知限制与延期工作
 

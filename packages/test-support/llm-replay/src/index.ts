@@ -90,6 +90,10 @@ export interface ReplayModelConfig {
    * omit one, so replay reconstructs the request header a live catalog produced.
    */
   defaultMaxTokens?: number
+  /** Whether replayed requests may declare native tools; false reproduces a no-tools model. */
+  nativeTools?: boolean
+  /** Reject non-text input before replay instead of projecting it to text. */
+  inputProjectionPolicy?: 'reject'
   /**
    * Optional flat visual-token price the replay route declares for every
    * retained request image, so keyless scenarios exercise route-priced
@@ -908,6 +912,8 @@ class ReplayAdapter extends LlmAdapter {
       ...configuredModel?.defaultMaxTokens === undefined
         ? {}
         : { defaultMaxTokens: configuredModel.defaultMaxTokens },
+      ...configuredModel?.nativeTools === undefined ? {} : { nativeTools: configuredModel.nativeTools },
+      ...configuredModel?.inputProjectionPolicy === undefined ? {} : { inputProjectionPolicy: configuredModel.inputProjectionPolicy },
       ...configuredModel?.systemPromptUpdate === undefined
         ? {}
         : { systemPromptUpdate: configuredModel.systemPromptUpdate },
@@ -1175,6 +1181,13 @@ function validateConfiguredModels(providers: ReplayProviderConfig[] | undefined)
         )
       }
       const toolUpdate: unknown = model.toolUpdate
+      if (model.nativeTools !== undefined && typeof model.nativeTools !== 'boolean') {
+        throw new Error(`llm-replay: provider "${provider.id}" model "${model.id}" nativeTools must be a boolean when present`)
+      }
+      const inputProjectionPolicy: unknown = model.inputProjectionPolicy
+      if (inputProjectionPolicy !== undefined && inputProjectionPolicy !== 'reject') {
+        throw new Error(`llm-replay: provider "${provider.id}" model "${model.id}" inputProjectionPolicy must be "reject" when present`)
+      }
       if (toolUpdate !== undefined && toolUpdate !== 'in-history' && toolUpdate !== 'addition-only') {
         throw new Error(
           `llm-replay: provider "${provider.id}" model "${model.id}" toolUpdate `

@@ -7,6 +7,7 @@ import { ToolExecutorUnavailableError } from './executor.ts'
 import type { ToolExecutor, ToolBatchInput, ToolBatchResult } from './executor.ts'
 import './events.ts'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import { projectToolSchema } from './schema.ts'
 import { assertSupportedJsonSchema } from './json-schema.ts'
 import { RUN_CODE_NAME, ToolActivationError } from './contracts.ts'
@@ -113,7 +114,11 @@ export class ToolsService extends Service {
     ctx.systemPrompt.tools(({ scope, toolSet }) => {
       const executor = this.selectExecutor(scope)
       const description = executor.describe(this.definitions(scope, toolSet))
-      return { ...description, knownNames: description.knownNames ?? [...this.view(scope).knownNames] }
+      return {
+        ...description,
+        ...toolSet?.nativeTools === false ? { schemas: [] } : {},
+        knownNames: description.knownNames ?? [...this.view(scope).knownNames],
+      }
     })
   }
 
@@ -265,8 +270,14 @@ export class ToolsService extends Service {
     const { agent, signal } = context
     signal.throwIfAborted()
     const view = this.view(agent)
+    const llm = this.ctx.get('llm')
+    const nativeTools = llm?.listProviders().some(provider => provider.id === context.modelSelection.provider) === true
+      ? (await llm.resolveModelInfo(context.modelSelection.provider, context.modelSelection.model, signal)).nativeTools
+      : undefined
+    signal.throwIfAborted()
     const admitted = new Map<string, ToolDefinition>()
     for (const [name, definition] of view.visible) {
+      if (nativeTools === false) break
       const registration = view.registrations.get(name)
       let enabled: boolean
       try {
@@ -280,6 +291,7 @@ export class ToolsService extends Service {
     }
     let closed = false
     return Object.freeze({
+      ...nativeTools === undefined ? {} : { nativeTools },
       dispose: () => { closed = true },
       view: (scope: ScopeKey | undefined): ReadonlyMap<string, ToolDefinition> => {
         const visible = new Map<string, ToolDefinition>()
@@ -335,7 +347,7 @@ export class ToolsService extends Service {
           order: section.order,
           ...section.interpolate === undefined ? {} : { interpolate: section.interpolate },
           text: ({ scope, toolSet }) => {
-            if (this.selectExecutor(scope) !== executor) return ''
+            if (toolSet?.nativeTools === false || this.selectExecutor(scope) !== executor) return ''
             return typeof section.text === 'function' ? section.text(this.definitions(scope, toolSet)) : section.text
           },
         })
@@ -373,6 +385,9 @@ export class ToolsService extends Service {
    * @returns the selected executor's settled batch; unavailable selections reject.
    */
   async execute(input: ToolBatchInput): Promise<ToolBatchResult> {
+    if (input.toolSet?.nativeTools === false && input.calls.length > 0) {
+      throw new LlmError('The selected model does not support native tool calls.', 'UNSUPPORTED_TOOLS')
+    }
     return this.selectExecutor(input.agent).execute(input)
   }
 

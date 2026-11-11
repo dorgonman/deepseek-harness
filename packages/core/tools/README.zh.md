@@ -72,6 +72,8 @@ ctx.tools.register(defineTool({
 
 `get(name, scope, toolSet)`、`definitions(scope, toolSet)` 和 `schemas(scope, toolSet)` 读取已准入集合；省略 `toolSet` 时只查看已注册定义，不计算条件。`executable(name, scope, toolSet)` 是执行时的查找：它应用集合，没有集合时排除条件注册。执行器的描述与分区通过 `AssembleContext.toolSet` 接收同一集合。展示变换不能增删可调用工具。
 
+已注册的精确模型解析为 `nativeTools: false` 时，`resolve()` 不准入任何工具，并抑制执行器 schema 和指导，包括 PTC 的 `run_code` 传输。已解析集合以 `UNSUPPORTED_TOOLS` 拒绝尝试执行的工具批次。省略能力元数据、缺少 LLM 服务或提供方路由未注册时，保留正常准入。
+
 ### 选择执行器
 
 在部署、预设或 Agent 作用域中挂载一个执行器。最近的作用域决定提供者，同一作用域的重复提供者会报错。原生执行器直接公开可见能力；PTC 执行器公开 `run_code` 和生成的 SDK。执行器注册和卸载不触发 `tools/change`；提示词组装和批次执行在运行时解析当前执行器。

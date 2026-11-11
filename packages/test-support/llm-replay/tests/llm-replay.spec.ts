@@ -1413,6 +1413,8 @@ describe('installLlmReplay (through the real LlmRuntime)', () => {
               contextWindow: 128_000,
               inputModalities: ['text', 'image'],
               defaultMaxTokens: 64_000,
+              nativeTools: false,
+              inputProjectionPolicy: 'reject',
               reasoningEfforts: ['off', 'max'],
               defaultReasoningEffort: 'max',
               systemPromptUpdate: 'in-history',
@@ -1438,6 +1440,8 @@ describe('installLlmReplay (through the real LlmRuntime)', () => {
       context: { contextWindow: 128_000 },
       inputModalities: ['text', 'image'],
       defaultMaxTokens: 64_000,
+      nativeTools: false,
+      inputProjectionPolicy: 'reject',
       reasoning: {
         efforts: [{ id: 'off', name: 'off' }, { id: 'max', name: 'max' }],
         defaultEffort: 'max',
@@ -1447,6 +1451,8 @@ describe('installLlmReplay (through the real LlmRuntime)', () => {
     })
     await expect(ctx.llm.resolveModelInfo('deepseek', 'pro')).resolves.not.toHaveProperty('systemPromptUpdate')
     await expect(ctx.llm.resolveModelInfo('deepseek', 'pro')).resolves.not.toHaveProperty('toolUpdate')
+    await expect(ctx.llm.resolveModelInfo('deepseek', 'pro')).resolves.not.toHaveProperty('nativeTools')
+    await expect(ctx.llm.resolveModelInfo('deepseek', 'pro')).resolves.not.toHaveProperty('inputProjectionPolicy')
     await expect(ctx.llm.resolveModelInfo('deepseek', 'pro')).resolves.not.toHaveProperty('inputModalities')
     await expect(ctx.llm.resolveModelInfo('deepseek', 'pro')).resolves.not.toHaveProperty('context')
     // Efforts without a configured default preserve the provider's own default.
@@ -1470,6 +1476,30 @@ describe('installLlmReplay (through the real LlmRuntime)', () => {
       maxDelayMs: 10_000,
       jitterRatio: 0.1,
     })
+    expect(await drain(ctx.llm.stream({
+      provider: 'deepseek', model: 'flash', messages: [],
+      tools: [{ name: 'echo', description: 'Echo.', parameters: {} }],
+    }))).toMatchObject([{ type: 'finish', reason: { kind: 'error', failure: { code: 'UNSUPPORTED_TOOLS' } } }])
+    for (const mode of ['direct', 'prepared']) {
+      const config = { provider: 'deepseek', model: 'flash' }
+      const input = { messages: [], toolHistory: {
+        tools: [{ name: 'echo', description: 'Echo.', parameters: {} }], updates: [],
+      } }
+      const bound = mode === 'prepared' ? await ctx.llm.prepareCall(config) : undefined
+      const stream = bound === undefined
+        ? ctx.llm.stream({ ...config, ...input })
+        : bound.stream({ ...bound.config, ...input })
+      expect(await drain(stream)).toMatchObject([
+        { type: 'finish', reason: { kind: 'error', failure: { code: 'UNSUPPORTED_TOOLS' } } },
+      ])
+      const strict = mode === 'prepared' ? await ctx.llm.prepareCall(config) : undefined
+      const messages: GenerateOptions['messages'] = [{ role: 'user', content: [{ type: 'reasoning', text: 'unsupported input' }] }]
+      expect(await drain(strict === undefined
+        ? ctx.llm.stream({ ...config, messages })
+        : strict.stream({ ...strict.config, messages }))).toMatchObject([
+        { type: 'finish', reason: { kind: 'error', failure: { code: 'UNSUPPORTED_CONTENT' } } },
+      ])
+    }
     const prepared = await ctx.llm.prepareCall({
       provider: 'deepseek', model: 'flash',
     }, undefined, (controls, model) => ({ ...controls, reasoningEffort: model.reasoning!.efforts[0]!.id }))

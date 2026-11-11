@@ -1,0 +1,10 @@
+version: 1
+scenario: kinf-decision
+profile: headless
+composition: kinf-decision
+recording: authored
+header:
+  class: kinf-decision
+  pin: true
+environment:
+  DEEPSEEK_API_KEY: kinf-decision-snapshot-key

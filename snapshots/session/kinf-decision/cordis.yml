@@ -1,0 +1,32 @@
+# Controlled native-HTTP recording through the shipped headless profile.
+- id: llm-deepseek
+  disabled: true
+
+- id: agent-default-model
+  config:
+    provider: kinf-snapshot
+    model: flash-native-mtp-decision
+
+- id: llm-pi-ai
+  config:
+    providers:
+      kinf-snapshot:
+        api: openai-completions
+        apiKeyEnv: DEEPSEEK_API_KEY
+        baseURL: !!js process.env.DSH_KINF_DECISION_SNAPSHOT_URL
+        retryPolicy:
+          mode: normal
+          maxRetries: 0
+        headers:
+          X-Kinf-Mode: mservice
+          X-Kinf-Instance: fixture-managed
+        models:
+          - id: flash-native-mtp-decision
+            requestModel: flash-native-mtp-decision
+            requestProtocol: kinf-decision-v1
+            headers:
+              X-Kinf-Service: flash-native-mtp-decision
+            contextWindow: 262144
+            maxTokens: 1
+            input: [text]
+            reasoningEfforts: false

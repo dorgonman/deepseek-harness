@@ -606,6 +606,8 @@ export interface PiAiModelProfile {
   id: string
   /** Provider model id sent on requests; omission sends the selector id unchanged. */
   requestModel?: string
+  /** Explicit native request adaptation; omission uses the configured pi-ai protocol unchanged. */
+  requestProtocol?: 'kinf-decision-v1'
   /** HTTP(S) endpoint for this model, overriding the provider route's endpoint. */
   baseURL?: string
   /** Request headers overriding provider headers by case-insensitive name; Harness attribution still wins. */
@@ -852,6 +854,8 @@ export interface RouteCatalog {
   configuredMaxTokens: ReadonlyMap<string, number>
   /** Explicit wire model ids keyed by the unchanged selector id. */
   requestModels: ReadonlyMap<string, string>
+  /** Native request adapters keyed by selector id. */
+  requestProtocols: ReadonlyMap<string, 'kinf-decision-v1'>
   /** Explicit request-header overrides keyed by selector id. */
   modelHeaders: ReadonlyMap<string, Readonly<Record<string, string>>>
   /** Endpoint overrides whose origin differs from the provider endpoint, including an absent provider endpoint. */
@@ -922,6 +926,7 @@ export function resolveRouteModels(
   const seen = new Set<string>()
   const configuredMaxTokens = new Map<string, number>()
   const requestModels = new Map<string, string>()
+  const requestProtocols = new Map<string, 'kinf-decision-v1'>()
   const modelHeaders = new Map<string, Readonly<Record<string, string>>>()
   const crossOriginModels = new Set<string>()
   const resolveEntry = (entry: PiAiModelProfile): Model<Api> => {
@@ -937,6 +942,11 @@ export function resolveRouteModels(
     }
     if (entry.requestModel !== undefined && entry.requestModel.length === 0) {
       invalid(provider, `model "${entry.id}" requestModel must be non-empty`)
+    }
+    if (entry.requestProtocol === 'kinf-decision-v1'
+      && (api !== 'openai-completions' || entry.maxTokens !== 1
+        || declaredInput(entry.input)?.join(',') !== 'text' || entry.reasoningEfforts !== false)) {
+      invalid(provider, `model "${entry.id}" kinf-decision-v1 requires openai-completions, maxTokens: 1, input: [text], and reasoningEfforts: false`)
     }
     if (entry.baseURL !== undefined) {
       let endpoint: URL
@@ -977,6 +987,7 @@ export function resolveRouteModels(
     // the model's capability and stays out of request defaults.
     if (entry.maxTokens !== undefined) configuredMaxTokens.set(entry.id, entry.maxTokens)
     if (entry.requestModel !== undefined) requestModels.set(entry.id, entry.requestModel)
+    if (entry.requestProtocol !== undefined) requestProtocols.set(entry.id, entry.requestProtocol)
     if (entry.headers !== undefined) modelHeaders.set(entry.id, { ...entry.headers })
     return {
       // The installed entry lays the floor, and the fields below override it.
@@ -1022,5 +1033,5 @@ export function resolveRouteModels(
     invalid(provider, `sets compat "${field}", but no model on the route speaks a protocol that takes it;`
       + ` it exists on ${takers.join(', ')}`)
   }
-  return { models: serviceableModels, configuredMaxTokens, requestModels, modelHeaders, crossOriginModels, modelErrors }
+  return { models: serviceableModels, configuredMaxTokens, requestModels, requestProtocols, modelHeaders, crossOriginModels, modelErrors }
 }

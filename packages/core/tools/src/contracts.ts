@@ -126,6 +126,8 @@ export interface ToolRegistrationOptions {
 
 /** One step's admitted registrations, also used by nested PTC calls. */
 export interface ResolvedToolSet {
+  /** False suppresses native schemas and executor guidance for this exact model step. */
+  readonly nativeTools?: boolean
   /** Close admission after the step's tool batch settles. */
   dispose(): void
   /**

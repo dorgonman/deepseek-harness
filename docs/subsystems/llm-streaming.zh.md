@@ -619,6 +619,10 @@ interface LlmModelReasoningInfo {
 ```ts type-equiv
 /** Exact-route model metadata resolved by its owning adapter. */
 interface LlmResolvedModelInfo extends LlmModelInfo {
+  /** Whether requests may declare native tools; omission preserves normal tool admission. */
+  nativeTools?: boolean
+  /** Reject non-text input before projecting files or images; omission preserves normal projection. */
+  inputProjectionPolicy?: 'reject'
   /** Provider-owned context capacity when known. */
   context?: LlmModelContext
   /** Adapter-configured per-request output cap materialized when callers omit one. */
@@ -633,6 +637,8 @@ interface LlmResolvedModelInfo extends LlmModelInfo {
 ```
 
 辅助调用方可以提供不含持久身份或来源的 user 内容。既有 `Message[]` 历史仍然是有效的请求输入。Session 写入、Agent 投递和已记录的标题请求仍然要求持久消息。
+
+`nativeTools: false` 声明精确模型不接受原生工具调用。[工具准入](tools.zh.md)在提示词组装之前使用它，直接分派也会拒绝工具声明。`inputProjectionPolicy: 'reject'` 在文件或图片投影之前拒绝非文本输入。省略字段时保留正常工具准入和输入投影。
 
 ```ts type-equiv
 /** User input for one LLM request; it has no durable Session identity or source. */

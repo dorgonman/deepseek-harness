@@ -94,6 +94,8 @@ Each profile may set a `retryPolicy`; omission uses normal mode with five retrie
 
 Each `models` entry or `modelOverrides` value can set `baseURL`, `headers`, and `requestModel`. The endpoint must be an absolute HTTP(S) URL without URL credentials. `requestModel` changes the wire model id; the entry's `id` remains the selector and Session identity. Explicit model headers override provider headers by case-insensitive name, while Harness attribution still wins.
 
+An explicit per-model `requestProtocol: kinf-decision-v1` selects KINF's first-token Decision operation. It requires `api: openai-completions`, `maxTokens: 1`, `input: [text]`, and `reasoningEfforts: false`; omission retains ordinary pi-ai dispatch. The request sends `kinf_decision: label_scores` with native streaming disabled and accepts only plain-text system, user, and assistant history. Native tools, reasoning, stop controls, nonzero temperature, and output caps other than one are refused. The completed JSON response is limited to 64 KiB and validated for both logits, both uncalibrated label scores, token usage, and the exact served identity. Its native `length` finish completes the Decision successfully. Conversation text contains only the validated `model`, `decision`, `served_identity`, and `usage` fields; private or unknown response fields are omitted. No ordinary-chat or alternate-provider fallback is attempted.
+
 Model endpoint overrides on another origin require a custom keyless provider route. A resolved API key, a named credential reference, or an installed catalog provider's ambient/OAuth authentication refuses that override before dispatch. Same-origin overrides retain provider authentication. Explicit deployment headers apply to their configured endpoints; configure only trusted endpoints.
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-llm-pi-ai) is the exhaustive source for every accepted field and its JSDoc.
@@ -252,6 +254,20 @@ Generated content affects later inputs only after the loop records it. pi-ai fol
 #### KV Cache effect
 
 Recorded response content appends to the next request and does not invalidate its earlier reusable prefix. Unrecorded transport metadata and usage accounting do not affect cache identity.
+
+### KINF Decision
+
+#### What the model sees
+
+Decision models receive plain-text history without native tool schemas or executor guidance. Non-text input fails before file or image projection.
+
+#### Token effect
+
+The native operation generates one label token. Its complete validated readout becomes conversation text and contributes to later input tokens when retained.
+
+#### KV Cache effect
+
+Retained readout text appends to history. Selecting another model changes the request's model identity and cache ownership.
 
 ## Known Limitations and Deferred Work
 

@@ -1,0 +1,23 @@
+# Keep this readout snapshot portable while the SDK profile test owns stock tool parity.
+- id: system-prompt
+  config:
+    includeRuntimeContext: false
+
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
+
+- id: skill
+  disabled: true
+
+- id: skill-filesystem
+  disabled: true
+
+- id: tool-skill
+  disabled: true
+
+- insert:
+    - id: kinf-decision-context
+      name: '../../../packages/test-support/session-snapshot/tests/fixtures/kinf-decision-context.ts'

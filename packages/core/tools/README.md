@@ -72,6 +72,8 @@ The unified schema DSL supports `string`, `number`, `integer`, `boolean`, `null`
 
 `get(name, scope, toolSet)`, `definitions(scope, toolSet)`, and `schemas(scope, toolSet)` inspect an admitted set; omitting `toolSet` inspects registered definitions without evaluating conditions. `executable(name, scope, toolSet)` is the execution lookup: it applies the set, and without one it excludes conditional registrations. Executor descriptions and sections receive the same selection as `AssembleContext.toolSet`. A presentation transform cannot add or remove callable tools.
 
+When the registered exact model resolves `nativeTools: false`, `resolve()` admits no tools and suppresses executor schemas and guidance, including PTC's `run_code` transport. The resolved set rejects attempted tool batches with `UNSUPPORTED_TOOLS`. Omitted capability metadata, an absent LLM service, and unregistered provider routes retain normal admission.
+
 ### Select an executor
 
 Mount one executor in the deployment, preset, or Agent scope. The nearest scope selects the provider; duplicate providers in one scope fail. Native exposes visible capabilities directly; PTC exposes `run_code` and a generated SDK. Executor registration and disposal do not emit `tools/change`; prompt assemblies and batches resolve the current executor when they run.

@@ -181,6 +181,8 @@ interface ToolRestriction {
 
 注册可以携带 `when` 条件。AgentLoop 为每个拟议步骤以捕获的模型选择调用一次 `ctx.tools.resolve()`；返回的集合决定该步骤的工具声明、执行器分区以及批次中的每次调用，包括 PTC 程序的子调用。`ctx.tools.executable()` 在执行时应用集合，没有集合时排除条件注册。同名替换或新的限制会阻止尚未开始的调用使用已准入的注册，步骤的批次结束后循环释放集合。
 
+已注册的精确模型的 `LlmResolvedModelInfo.nativeTools` 为 false 时，准入排除全部工具、schema 和执行器指导，包括 PTC 传输声明。`ResolvedToolSet.nativeTools: false` 也会拒绝经 `ctx.tools.execute()` 执行。省略元数据或组合中没有匹配的 LLM 路由时，保留正常准入。
+
 ```ts type-equiv
 /** Inputs for a tool's step-time activation condition. */
 interface ToolActivationContext {
@@ -210,6 +212,8 @@ interface ToolRegistrationOptions {
 ```ts type-equiv
 /** One step's admitted registrations, also used by nested PTC calls. */
 interface ResolvedToolSet {
+  /** False suppresses native schemas and executor guidance for this exact model step. */
+  readonly nativeTools?: boolean
   /** Close admission after the step's tool batch settles. */
   dispose(): void
   /**

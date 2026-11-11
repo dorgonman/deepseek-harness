@@ -59,6 +59,7 @@ import type {
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
+import { decisionChunks } from './decision.ts'
 import { catalogProvider } from './catalog.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
@@ -391,6 +392,7 @@ export class PiAiAdapter extends LlmAdapter {
       inputModalities: [...resolvedModel.input],
       context: { contextWindow: resolvedModel.contextWindow },
       ...configuredMaxTokens === undefined ? {} : { defaultMaxTokens: configuredMaxTokens },
+      ...profile.requestProtocols.get(model) === 'kinf-decision-v1' ? { nativeTools: false, inputProjectionPolicy: 'reject' as const } : {},
       ...reasoningInfo(resolvedModel, defaultLevel),
       ...conversationUpdates(resolvedModel),
     }
@@ -432,9 +434,10 @@ export class PiAiAdapter extends LlmAdapter {
     const request = needsPlaceholder
       ? { ...options, tools: [ANTHROPIC_TOOL_UPDATE_PLACEHOLDER, ...tools] }
       : options
+    const isDecision = profile.requestProtocols.get(options.model) === 'kinf-decision-v1'
     const reasoning = resolveReasoningLevel(
       model,
-      options.reasoningEffort ?? profile.reasoning,
+      options.reasoningEffort ?? (isDecision ? undefined : profile.reasoning),
     )
     const apiKey = await this.config.resolveApiKey(options.provider, profile)
     if (profile.crossOriginModels.has(options.model)
@@ -454,6 +457,31 @@ export class PiAiAdapter extends LlmAdapter {
     using watchdog = idleWatchdog(upstream, streamIdleTimeoutMs, 'LLM_STREAM_IDLE_TIMEOUT')
 
     try {
+      if (isDecision) {
+        const iterator = decisionChunks({
+          options,
+          model: profile.requestModels.get(options.model) ?? model.id,
+          baseURL: model.baseUrl,
+          headers: requestHeaders(
+            profile.headers, profile.modelHeaders.get(options.model), options, model.baseUrl, this.config.prepareHeaders,
+          ),
+          ...apiKey === undefined ? {} : { apiKey },
+          ...profile.timeoutMs === undefined ? {} : { timeoutMs: profile.timeoutMs },
+          signal: watchdog.signal,
+        })
+        try {
+          for (;;) {
+            const result = await watchdog.next(iterator)
+            if (result.done) return
+            yield result.value
+          }
+        } finally {
+          consumer.abort('KINF Decision consumer stopped')
+          void iterator.return(undefined).catch((_closed: unknown) => {
+            // Aborting the request owns termination if a pending read outlives the consumer.
+          })
+        }
+      }
       const containsImage = options.messages.some(message => contentHasImage(message.content))
       if (containsImage && !model.input.includes('image')) {
         throw new LlmError(`pi-ai model "${model.id}" does not support image input`, 'UNSUPPORTED_CONTENT')

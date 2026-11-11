@@ -25,6 +25,9 @@ describe('model request routing', () => {
     expect(model).not.toHaveProperty('baseURL')
     expect(model).not.toHaveProperty('headers')
     expect(model).not.toHaveProperty('requestModel')
+    expect(model).not.toHaveProperty('requestProtocol')
+    const resolved = resolveProfiles(materialized.providers ?? {}).get('acme-gateway')
+    expect(resolved?.requestProtocols.size).toBe(0)
   })
 
   it('accepts explicit model endpoints and binding headers without a provider endpoint', () => {

@@ -21,8 +21,8 @@
   en: f3b761c7c7ecb82f
   zh: e10d999aa348ef86
 /deepseek-ai-dsh-llm-pi-ai/use-this-package/configure-provider-routes:
-  en: 832cfe0c06e427a2
-  zh: 988795fed0bfa85e
+  en: 51585f4a7b2e9427
+  zh: 8e04ef566d7ccf6d
 /deepseek-ai-dsh-llm-pi-ai/use-this-package/sign-in-to-a-provider:
   en: c36f66438638ae08
   zh: 066a2fc4cb97c86f
@@ -92,6 +92,18 @@
 /deepseek-ai-dsh-llm-pi-ai/model-experience/provider-response/kv-cache-effect:
   en: b6bd570c0159ba08
   zh: 7d2d91eea6a8d830
+/deepseek-ai-dsh-llm-pi-ai/model-experience/kinf-decision:
+  en: dcbbd19667bdc058
+  zh: dcbbd19667bdc058
+/deepseek-ai-dsh-llm-pi-ai/model-experience/kinf-decision/what-the-model-sees:
+  en: b10a9f54454c6699
+  zh: 63340cc304a5472a
+/deepseek-ai-dsh-llm-pi-ai/model-experience/kinf-decision/token-effect:
+  en: 8a2168636d3577b0
+  zh: c228c0e477bddeb0
+/deepseek-ai-dsh-llm-pi-ai/model-experience/kinf-decision/kv-cache-effect:
+  en: 462aa4e0354242cf
+  zh: f1f3d6de55b12865
 /deepseek-ai-dsh-llm-pi-ai/known-limitations-and-deferred-work:
   en: fdbe8ce850250b66
   zh: d8b9a06a996850c1
