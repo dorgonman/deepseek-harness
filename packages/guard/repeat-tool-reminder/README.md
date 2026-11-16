@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-This package helps a model escape loops in which it calls the same tool with identical arguments without making progress. At configured repeat counts, it asks the model to inspect the previous result and change approach or finish. The reminder is advisory: it never blocks or delays a legitimate repeated call. Repeats are tracked separately for each agent and cleared by a new user message. The `dsh` base bundle enables the package with reminders at 3, 5, and 8 repeats.
+This package helps a model escape loops in which it calls the same tool with identical arguments without making progress. At configured repeat counts, it asks the model to inspect the previous result and change approach or finish. The reminder is advisory: it never blocks or delays a legitimate repeated call. Past a configurable repeat count the guard blocks the repeated call instead of running it again, so a chain that keeps repeating cannot run unbounded. Repeats are tracked separately for each agent and cleared by a new user message. The `dsh` base bundle enables the package with reminders at 3, 5, and 8 repeats and blocking at 8.
 
 ## Table of Contents
 
@@ -41,6 +41,7 @@ When you want to change when reminders fire or which tools they cover, mount the
     thresholds: [3, 5, 8]        # remind at 3, 5, and 8 consecutive repeats
     include: []                  # track every tool; list patterns to track only some
     exclude: [todo_write]        # never track these tools
+    blockAfter: 8                # block the call at 8 consecutive repeats; 0 stays advisory
     argumentsPreviewChars: 500   # cap on arguments shown in the detailed reminder
 ```
 
@@ -49,13 +50,14 @@ When you want to change when reminders fire or which tools they cover, mount the
 | `thresholds` | `[3, 5, 8]` | Repeat counts that trigger a reminder |
 | `include` | `[]` | Only these tools are tracked; empty means every tool |
 | `exclude` | `[]` | These tools are never tracked; calls to them neither count nor reset |
+| `blockAfter` | `8` | Consecutive-repeat count at which the call is blocked instead of run; `0` keeps the guard advisory only |
 | `argumentsPreviewChars` | `500` | How many characters of the repeated arguments the detailed reminder shows |
 
-Invalid configuration fails at startup with a clear error — an empty `thresholds` list, a repeat count below 2, or a duplicate — never a silent change of behavior. The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-repeat-tool-reminder) documents every accepted value.
+Invalid configuration fails at startup with a clear error — an empty `thresholds` list, a repeat count below 2, a duplicate, or a `blockAfter` that is neither `0` nor an integer >= 2 — never a silent change of behavior. The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-repeat-tool-reminder) documents every accepted value.
 
 ### What you get
 
-With the defaults, a model that repeats the same call with identical arguments receives a short reminder on the third repeat — to analyze the previous result before calling again — and detailed reminders on the fifth and eighth, naming the tool and the repeated arguments so it can decide whether to change approach, gather more evidence, or finish. A new user message clears the count, so a fresh instruction is never treated as a loop. Reminders appear in the conversation after the repeated call's result, attributed to the plugin, so the model reads them like any other message.
+With the defaults, a model that repeats the same call with identical arguments receives a short reminder on the third repeat — to analyze the previous result before calling again — and detailed reminders on the fifth and eighth, naming the tool and the repeated arguments so it can decide whether to change approach, gather more evidence, or finish. The eighth repeat is also blocked: the call does not run again, and the tool result carries the block reason so the model sees why. A new user message clears the count, so a fresh instruction is never treated as a loop. Reminders appear in the conversation after the repeated call's result, attributed to the plugin, so the model reads them like any other message.
 
 -----
 
@@ -71,10 +73,10 @@ This section explains how the guard detects repeats and delivers reminders, and 
 
 The guard is built on four commitments:
 
-- **Advisory, not veto.** The guard enriches post-execute decisions with model context; it never blocks or rewrites a call, so `PostToolDecision` blocking stays a later listener's job.
+- **Advisory until `blockAfter`, then blocking.** The guard enriches post-execute decisions with model context; below `blockAfter` it never blocks or rewrites a call, so `PostToolDecision` blocking stays a later listener's job. At `blockAfter` it replaces the repeated call with a block decision whose feedback names the tool, the run length, and the arguments.
 - **Count in post-execute.** Detection runs on `tools/post-execute`, which also fires for denied calls; counting there lets one listener cover every attempt with no cross-event state.
 - **Exact-match canonicalization.** Arguments reach the guard as the loop's `JSON.parse` output (or its raw-string fallback), so JSON's value domain is the whole input domain and a deep key-sort plus `JSON.stringify` is a complete, deterministic identity — no bigint, cycle, or `undefined` handling exists because no input path can produce them.
-- **Fail loud at load.** `thresholds` and `argumentsPreviewChars` validate in `apply` and throw, never falling back to defaults.
+- **Fail loud at load.** `thresholds`, `blockAfter`, and `argumentsPreviewChars` validate in `apply` and throw, never falling back to defaults.
 
 ### Detection: the repeat chain
 
@@ -89,6 +91,8 @@ Each agent's chain is keyed by `(tool name, canonical arguments)` — two calls 
 ### Reminder delivery
 
 Reminders ride the post-execute decision's `additionalContexts` (source `{kind: 'repeat-tool-reminder', form: 'notice', summary: '<tool> × <count>'}`), never a `content` replacement: the `tool/result` event stays the tool's own output for audit. The loop buffers the context and appends it as an injected `user/message` after the step's tool results, which the session renders as a plain synthetic user message — model-visible, source-attributed, and reconstructable from the session log with no new session event. The guard always delegates via `next()` and prepends its reminder to the downstream decision's context array, so both decision variants (a blocked call included) still get the nudge while every entry retains its own source and metadata and a downstream block keeps its feedback and structured error identity.
+
+At `blockAfter`, the guard returns a `block` decision instead. The repeated call does not run; the tool result carries the block feedback as an error, and the model reads the reason from that result. A downstream listener's own block decision still wins its own feedback — the guard's block replaces the decision only because it refuses the call outright.
 
 ### Source map
 
@@ -158,6 +162,30 @@ Each reminder is retained history; `argumentsPreviewChars` bounds its data-depen
 
 Append-only; newly visible content follows the reusable request prefix and does not invalidate existing KV-cache entries.
 
+### Blocked repeat
+
+#### What the model sees
+
+At the `blockAfter` count the call does not run, and the tool result carries the block reason below instead of the tool's own output.
+
+##### Block feedback
+
+```markdown
+Repeated tool call blocked:
+- tool: <toolName>
+- consecutive_calls: <count>
+- arguments: <canonicalArguments>
+This exact call has already run this many times without progress, so it was not executed again. Do not repeat it. Choose a different action or different arguments, or finish the task and report what the evidence gathered so far establishes.
+```
+
+#### Token effect
+
+The blocked call costs the tool's own invocation tokens zero; the block feedback is retained history for that agent.
+
+#### KV Cache effect
+
+Append-only; newly visible content follows the reusable request prefix and does not invalidate existing KV-cache entries.
+
 ## Known Limitations and Deferred Work
 
 <a id="known-limitations-and-deferred-work"></a>
@@ -167,10 +195,10 @@ These limits define when the guard is a poor fit. They are current package const
 
 - **Exact-match detection only** — canonicalization is a deep key-sort, so near-identical variants (a tweaked path, extra whitespace inside a value) evade the chain; fuzzy matching is rejected pending evidence of need.
 - **Compaction does not reset chains** — a chain spanning a compaction checkpoint keeps counting.
-- **Advisory only** — escalating to a blocking form at a high threshold is not implemented, though `PostToolDecision` already supports blocking.
+- **Blocking is count-based, not time-based** — the guard blocks the `blockAfter`-th identical call but cannot interrupt a single long-running call.
 - **No subagent chain-sharing** — chains stay isolated per agent; a parent and its subagent repeating the same call never combine.
 - **Legitimate idempotent polling still draws nudges** past the thresholds — the pressure valves are the `thresholds`/`exclude` config.
-- **Past the highest threshold a chain goes silent** — reminders fire only at exact configured counts, never beyond them.
+- **Past the highest threshold a chain goes silent** — reminders fire only at exact configured counts, never beyond them; `blockAfter` is what stops the chain from running on.
 
 <a id="dev-note"></a>
 ### Dev Note

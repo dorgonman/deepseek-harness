@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-本包帮助模型跳出以相同参数反复调用同一工具却没有进展的循环。达到配置的重复次数时，它会要求模型检查上一次结果并改变方法或结束任务。提醒只是建议，绝不会阻止或延迟合理的重复调用。每个 agent 的重复分别跟踪，新的用户消息会清除计数。`dsh` 基础组合包默认启用本包，并在重复 3、5、8 次时提醒。
+本包帮助模型跳出以相同参数反复调用同一工具却没有进展的循环。达到配置的重复次数时，它会要求模型检查上一次结果并改变方法或结束任务。提醒只是建议，绝不会阻止或延迟合理的重复调用。超过可配置的重复次数后，guard 会阻止这次重复调用而不是再执行一次，因此一条持续重复的链不会无限运行。每个 agent 的重复分别跟踪，新的用户消息会清除计数。`dsh` 基础组合包默认启用本包，并在重复 3、5、8 次时提醒，在第 8 次时阻止。
 
 ## 目录
 
@@ -41,6 +41,7 @@ kind: "package-reference"
     thresholds: [3, 5, 8]        # remind at 3, 5, and 8 consecutive repeats
     include: []                  # track every tool; list patterns to track only some
     exclude: [todo_write]        # never track these tools
+    blockAfter: 8                # block the call at 8 consecutive repeats; 0 stays advisory
     argumentsPreviewChars: 500   # cap on arguments shown in the detailed reminder
 ```
 
@@ -49,13 +50,14 @@ kind: "package-reference"
 | `thresholds` | `[3, 5, 8]` | 触发提醒的重复次数 |
 | `include` | `[]` | 只跟踪这些工具；空表示所有工具 |
 | `exclude` | `[]` | 绝不跟踪这些工具；对它们的调用既不计数也不重置 |
+| `blockAfter` | `8` | 在该连续重复次数上阻止调用而不是执行；`0` 表示仅提供建议 |
 | `argumentsPreviewChars` | `500` | 详细提醒中显示多少字符的重复参数 |
 
-无效配置会在启动时以清晰错误失败——空的 `thresholds` 列表、小于 2 的重复次数或重复值——绝不会静默改变行为。生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-repeat-tool-reminder)记录每个受支持的值。
+无效配置会在启动时以清晰错误失败——空的 `thresholds` 列表、小于 2 的重复次数、重复值，或既不是 `0` 也不是大于等于 2 的整数的 `blockAfter`——绝不会静默改变行为。生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-repeat-tool-reminder)记录每个受支持的值。
 
 ### 你会得到什么
 
-按默认值，以相同参数重复同一调用的模型会在第三次重复时收到简短提醒——先分析上一次结果再调用——并在第五次和第八次收到详细提醒，列出工具与重复参数，使其决定改变方法、收集更多证据还是结束任务。新的用户消息会清零计数，因此全新指令绝不会被当作循环。提醒出现在重复调用的结果之后、归属于插件，模型像阅读任何其他消息一样阅读它。
+按默认值，以相同参数重复同一调用的模型会在第三次重复时收到简短提醒——先分析上一次结果再调用——并在第五次和第八次收到详细提醒，列出工具与重复参数，使其决定改变方法、收集更多证据还是结束任务。第八次重复同时会被阻止：调用不再执行，工具结果携带阻止原因，让模型知道为什么。新的用户消息会清零计数，因此全新指令绝不会被当作循环。提醒出现在重复调用的结果之后、归属于插件，模型像阅读任何其他消息一样阅读它。
 
 -----
 
@@ -71,10 +73,10 @@ kind: "package-reference"
 
 guard 建立在四项承诺之上：
 
-- **仅建议，不否决。** guard 用模型上下文丰富 post-execute 决策；它从不阻止或改写调用，因此 `PostToolDecision` 阻止仍是后续监听器的事。
+- **在 `blockAfter` 之前仅建议，之后阻止。** guard 用模型上下文丰富 post-execute 决策；在 `blockAfter` 之前它从不阻止或改写调用，因此 `PostToolDecision` 阻止仍是后续监听器的事。到 `blockAfter` 时，它把这次重复调用换成阻止决策，其反馈列出工具、连续次数与参数。
 - **在 post-execute 中计数。** 检测运行在 `tools/post-execute` 上，被拒绝的调用同样会经过它；在那里计数让一个监听器即可覆盖所有尝试，无需跨事件状态。
 - **精确匹配规范化。** 参数以循环的 `JSON.parse` 输出（或畸形参数 JSON 的原始字符串回退）到达 guard，因此 JSON 的值域就是全部输入域，深度键排序加 `JSON.stringify` 是完整、确定性的同一性判定——不存在 bigint、循环引用或 `undefined` 处理，因为没有输入路径能产生它们。
-- **加载时快速失败。** `thresholds` 与 `argumentsPreviewChars` 在 `apply` 中校验并抛出错误，绝不回退到默认值。
+- **加载时快速失败。** `thresholds`、`blockAfter` 与 `argumentsPreviewChars` 在 `apply` 中校验并抛出错误，绝不回退到默认值。
 
 ### 检测：重复链
 
@@ -89,6 +91,8 @@ guard 建立在四项承诺之上：
 ### 提醒传递
 
 提醒随 post-execute 决策的 `additionalContexts`（来源为 `{kind: 'repeat-tool-reminder', form: 'notice', summary: '<tool> × <count>'}`）传递，绝不替换 `content`：用于审计的 `tool/result` 事件仍保留工具自己的输出。循环会缓冲这段上下文，并在该步骤的工具结果之后作为注入的 `user/message` 追加，会话将其渲染为普通的合成用户消息——模型可见、带有来源归属，且无需新会话事件即可从会话日志重建。guard 始终通过 `next()` 委派，并把提醒放在下游决策的上下文数组之前，因此两种决策变体（包括被阻止的调用）都会收到提醒，同时每个条目保留自己的来源与元数据，下游阻止也保留其反馈与结构化错误标识。
+
+到 `blockAfter` 时，guard 返回 `block` 决策。这次重复调用不会执行；工具结果以错误形式携带阻止反馈，模型从该结果读到原因。下游监听器自己的阻止决策仍保留自己的反馈——guard 的阻止之所以替换该决策，是因为它 outright 拒绝了这次调用。
 
 ### 源码地图
 
@@ -158,6 +162,30 @@ The repeated calls are not making progress. Do not call this tool with these exa
 
 仅追加；新出现的内容位于可复用请求前缀之后，不会使现有 KV Cache 条目失效。
 
+### 被阻止的重复调用
+
+#### 模型看到什么
+
+到达 `blockAfter` 次数时调用不会执行，工具结果携带下面的阻止原因，而不是工具自己的输出。
+
+##### 阻止反馈
+
+```markdown
+Repeated tool call blocked:
+- tool: <toolName>
+- consecutive_calls: <count>
+- arguments: <canonicalArguments>
+This exact call has already run this many times without progress, so it was not executed again. Do not repeat it. Choose a different action or different arguments, or finish the task and report what the evidence gathered so far establishes.
+```
+
+#### Token 影响
+
+被阻止的调用对工具自身调用 token 的消耗为零；阻止反馈作为该 agent 的历史记录保留。
+
+#### KV Cache 影响
+
+仅追加；新出现的内容位于可复用请求前缀之后，不会使现有 KV Cache 条目失效。
+
 ## 已知限制与延期工作
 
 <a id="known-limitations-and-deferred-work"></a>
@@ -167,10 +195,10 @@ The repeated calls are not making progress. Do not call this tool with these exa
 
 - **仅精确匹配检测**——规范化是深度键排序，因此近似变体（稍作修改的路径、值内多余的空白）会绕过链；在没有需求证据前，不采用模糊匹配。
 - **压缩（compaction）不会重置链**——跨越压缩检查点的链会继续计数。
-- **仅提供建议**——尚未实现高阈值时升级为阻止形式，但 `PostToolDecision` 已支持阻止。
+- **阻止基于次数而非时间**——guard 会阻止第 `blockAfter` 次相同调用，但无法中断单次长时间运行的调用。
 - **subagent 之间不共享链**——链始终按 agent 隔离；父 agent 与其 subagent 重复相同调用也绝不合并。
 - **合理的幂等轮询超过阈值后仍会收到提醒**——可通过 `thresholds`／`exclude` 配置释放压力。
-- **超过最高阈值后链不再提醒**——提醒只在精确达到所配置的次数时触发，超过后不会继续发送。
+- **超过最高阈值后链不再提醒**——提醒只在精确达到所配置的次数时触发，超过后不会继续发送；正是 `blockAfter` 阻止这条链继续运行。
 
 <a id="dev-note"></a>
 ### 开发备注

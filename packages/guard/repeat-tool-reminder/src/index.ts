@@ -40,6 +40,15 @@ export interface Config {
   /** Tool-name patterns transparent to the chain (neither count nor reset). */
   exclude?: string[]
   /**
+   * Maximum consecutive identical repeats tolerated before the chain is
+   * treated as a stuck loop (default 8). At that count the guard blocks the
+   * call — the same `PostToolDecision` blocking a `tools/pre-execute` listener
+   * uses — instead of only reminding, because past the highest reminder
+   * threshold a chain goes silent and the loop runs unbounded. `0` keeps the
+   * guard advisory-only.
+   */
+  blockAfter?: number
+  /**
    * Maximum characters of canonical arguments quoted in the DETAILED reminder
    * (default 500). Large payloads (a `write` body, a long command) would
    * otherwise ride into the next request unbounded — precisely in a loop
@@ -53,6 +62,7 @@ export const Config: z<Config> = z.object({
   thresholds: z.array(z.number()).default([3, 5, 8]),
   include: z.array(z.string()).default([]),
   exclude: z.array(z.string()).default([]),
+  blockAfter: z.number().default(8),
   argumentsPreviewChars: z.number().default(500),
 })
 
@@ -83,6 +93,18 @@ function detailedReminder(toolName: string, count: number, canonicalArguments: s
     + 'these exact arguments again. Inspect the latest result and choose a '
     + 'different action, different arguments, or finish the task if enough '
     + 'evidence has been gathered.'
+}
+
+/** Feedback returned instead of the tool result once a chain passes the blocking threshold. */
+function blockedReminder(toolName: string, count: number, canonicalArguments: string): string {
+  return 'Repeated tool call blocked:\n'
+    + `- tool: ${toolName}\n`
+    + `- consecutive_calls: ${count}\n`
+    + `- arguments: ${canonicalArguments}\n`
+    + 'This exact call has already run this many times without progress, so it '
+    + 'was not executed again. Do not repeat it. Choose a different action or '
+    + 'different arguments, or finish the task and report what the evidence '
+    + 'gathered so far establishes.'
 }
 
 /**
@@ -148,6 +170,18 @@ function validateThresholds(values: number[]): number[] {
 }
 
 /**
+ * Validate `blockAfter` per the fail-loud contract: `0` disables blocking,
+ * otherwise the count must be an integer >= 2 so a call is never blocked
+ * before it has repeated at least once.
+ */
+function validateBlockAfter(value: number): number {
+  if (!Number.isInteger(value) || (value !== 0 && value < 2)) {
+    throw new Error(`repeat-tool-reminder: invalid blockAfter ${value} — must be 0 or an integer >= 2`)
+  }
+  return value
+}
+
+/**
  * Prepend the guard's reminder while preserving every downstream context's
  * source and metadata.
  */
@@ -172,6 +206,7 @@ export function apply(ctx: Context, config: Config): void {
   const thresholdSet = new Set(thresholds)
   const includePatterns = (config.include as string[]).map(wildcardToRegExp)
   const excludePatterns = (config.exclude as string[]).map(wildcardToRegExp)
+  const blockAfter = validateBlockAfter(config.blockAfter as number)
   const argumentsPreviewChars = config.argumentsPreviewChars as number
   if (!Number.isInteger(argumentsPreviewChars) || argumentsPreviewChars < 1) {
     throw new Error(`repeat-tool-reminder: invalid argumentsPreviewChars ${argumentsPreviewChars} — must be an integer >= 1`)
@@ -213,17 +248,40 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
-  // Observe-and-enrich, never veto: count first (state advances regardless of
-  // the downstream outcome), DELEGATE so a later listener can still block or
+  /**
+   * The blocking decision for one attempt whose run length passed `blockAfter`,
+   * or undefined when the chain is still within the tolerated run. The count
+   * must already have advanced (via {@link observe}) so the block fires on the
+   * attempt that would have been the `blockAfter`-th identical call.
+   */
+  function blocking(exec: ToolExecution): PostToolDecision | undefined {
+    if (blockAfter === 0) return undefined
+    const chain = exec.agent === undefined ? undefined : chains.get(exec.agent)
+    if (chain === undefined || chain.count < blockAfter) return undefined
+    const canonical = canonicalize(exec.arguments)
+    return {
+      kind: 'block',
+      feedback: [{
+        type: 'text',
+        text: blockedReminder(exec.name, chain.count, previewArguments(canonical, argumentsPreviewChars)),
+      }],
+    }
+  }
+
+  // Observe-and-enrich: count first (state advances regardless of the
+  // downstream outcome), DELEGATE so a later listener can still block or
   // replace, then fold the reminder onto whatever came back — additionalContexts
-  // rides both decision variants, so a blocked call still gets the nudge.
+  // rides both decision variants, so a blocked call still gets the nudge. Once a
+  // chain passes `blockAfter`, the call is replaced with a block decision
+  // instead of executing again.
   ctx.on('tools/post-execute', async (exec, _result, next): Promise<PostToolDecision> => {
     const reminder = observe(exec)
     const downstream = await next()
+    const block = blocking(exec)
+    if (block !== undefined) return block
     if (!reminder) return downstream
     return { ...downstream, additionalContexts: prependContext(reminder, downstream.additionalContexts) }
   })
-
   // A user interjection changes the context; repetition across it is not a
   // loop. Pure reset hook: always delegates (attaching nothing, vetoing
   // nothing).

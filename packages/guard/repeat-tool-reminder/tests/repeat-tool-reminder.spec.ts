@@ -376,6 +376,64 @@ describe('fold onto the downstream decision', () => {
   })
 })
 
+describe('blocking past blockAfter', () => {
+  it('blocks the call once the chain reaches blockAfter', async () => {
+    const ctx = await harness({ thresholds: [3], blockAfter: 5 })
+    const adapter = new MockAdapter([
+      ...Array.from({ length: 5 }, (_, i) => toolCallResponse(`c${i}`, 'probe', { q: 'same' })),
+      textResponse('done'),
+    ])
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const results = agent.session.snapshotEvents().filter((e): e is SessionEvent<'tool/result'> => e.type === 'tool/result')
+    expect(results).toHaveLength(5)
+    // The first four repeats still executed; the fifth is blocked.
+    expect(results.slice(0, 4).every(r => r.data.message.isError)).toBe(false)
+    expect(results[4]!.data.message.isError).toBe(true)
+    expect(results[4]!.data.message.content[0]).toMatchObject({ type: 'text' })
+    expect((results[4]!.data.message.content[0] as { text: string }).text).toContain('Repeated tool call blocked')
+    expect((results[4]!.data.message.content[0] as { text: string }).text).toContain('consecutive_calls: 5')
+  })
+
+  it('keeps the guard advisory when blockAfter is 0', async () => {
+    const ctx = await harness({ thresholds: [3], blockAfter: 0 })
+    const adapter = new MockAdapter([
+      ...Array.from({ length: 6 }, (_, i) => toolCallResponse(`c${i}`, 'probe', { q: 'same' })),
+      textResponse('done'),
+    ])
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const results = agent.session.snapshotEvents().filter((e): e is SessionEvent<'tool/result'> => e.type === 'tool/result')
+    expect(results).toHaveLength(6)
+    expect(results.every(r => r.data.message.isError)).toBe(false)
+  })
+
+  it('a different tracked call below blockAfter still resets the chain', async () => {
+    const ctx = await harness({ thresholds: [3], blockAfter: 4 })
+    const adapter = new MockAdapter([
+      toolCallResponse('c1', 'probe', { q: 1 }),
+      toolCallResponse('c2', 'probe', { q: 1 }),
+      toolCallResponse('c3', 'other', {}), // tracked, different → reset
+      toolCallResponse('c4', 'probe', { q: 1 }),
+      toolCallResponse('c5', 'probe', { q: 1 }),
+      textResponse('done'),
+    ])
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const results = agent.session.snapshotEvents().filter((e): e is SessionEvent<'tool/result'> => e.type === 'tool/result')
+    expect(results.every(r => r.data.message.isError)).toBe(false)
+  })
+})
+
 describe('config validation fails loud', () => {
   async function spine(): Promise<Context> {
     const ctx = new Context()
@@ -402,6 +460,14 @@ describe('config validation fails loud', () => {
   it('rejects duplicate thresholds', async () => {
     const ctx = await spine()
     await expect(ctx.plugin(RepeatToolGuard, { thresholds: [3, 3] })).rejects.toThrow(/duplicates/)
+  })
+
+  it('rejects a blockAfter that is neither 0 nor an integer >= 2', async () => {
+    const ctx = await spine()
+    await expect(ctx.plugin(RepeatToolGuard, { blockAfter: 1 })).rejects.toThrow(/blockAfter/)
+    await expect(ctx.plugin(RepeatToolGuard, { blockAfter: 2.5 })).rejects.toThrow(/blockAfter/)
+    const ctx2 = await spine()
+    await expect(ctx2.plugin(RepeatToolGuard, { blockAfter: -1 })).rejects.toThrow(/blockAfter/)
   })
 
   it('rejects a non-positive or fractional argumentsPreviewChars', async () => {

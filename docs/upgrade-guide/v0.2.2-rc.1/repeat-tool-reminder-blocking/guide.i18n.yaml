@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.2-rc.1/repeat-tool-reminder-blocking/guide.md
+/:
+  en: 031eb3ab2fc1e57a
+  zh: 031eb3ab2fc1e57a
+/the-repeat-tool-reminder-guard-blocks-a-repeated-tool-call:
+  en: a49c676154b20530
+  zh: 4c230cee3e95ef55
+/the-repeat-tool-reminder-guard-blocks-a-repeated-tool-call/change:
+  en: fb2b6b0fbfbdd84f
+  zh: b8effedd6ed9af6e
+/the-repeat-tool-reminder-guard-blocks-a-repeated-tool-call/migration:
+  en: e1d6b1a0eaca3bb8
+  zh: f1b9d17306dfe380
