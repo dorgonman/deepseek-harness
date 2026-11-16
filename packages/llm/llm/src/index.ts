@@ -78,6 +78,31 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/**
+ * Structural shape of the optional `decisionRelevance` capability.
+ *
+ * Declared here rather than imported so the LLM core keeps no package
+ * dependency on the relevance plugin: any plugin that registers a
+ * `decisionRelevance` service with this shape is adopted at the
+ * request-projection seam. Ordinary routes without the plugin are untouched.
+ *
+ * The LLM core has no session dependency, so the capability resolves the
+ * session itself from the identity the loop stamped on the request; `append`
+ * is the only session behaviour it needs, and it is structural for the same
+ * reason.
+ */
+interface RelevanceProjector {
+  /** Whether the capability is enabled with an explicit Decision route. */
+  readonly enabled: boolean
+  /** Shape one outbound message list, recording bounded durable evidence. */
+  project(
+    messages: readonly RequestMessage[],
+    sessionId: string,
+    conversation: { provider: string; model: string },
+    signal: AbortSignal | undefined,
+  ): Promise<{ readonly messages: readonly RequestMessage[] }>
+}
+
 /** Structured provider facts and cause accepted by {@link LlmError}. */
 export interface LlmErrorOptions extends ErrorOptions {
   /** Valid HTTP status observed at the provider boundary. */
@@ -844,6 +869,14 @@ export class LlmRuntime extends TypertRemoteService {
         'INVALID_MODEL_MAX_TOKENS',
       )
     }
+    // Widened: the protocol is adapter-owned catalog data, checked here as text.
+    const requestProtocol: string | undefined = resolved.requestProtocol
+    if (requestProtocol !== undefined && requestProtocol !== 'kinf-decision-v1') {
+      throw new LlmError(
+        `adapter returned invalid request protocol for provider "${provider}" model "${model}"`,
+        'INVALID_MODEL_INFO',
+      )
+    }
     const info: LlmResolvedModelInfo = {
       provider,
       id: model,
@@ -852,6 +885,7 @@ export class LlmRuntime extends TypertRemoteService {
       ...inputModalities === undefined ? {} : { inputModalities },
       ...context === undefined ? {} : { context: { contextWindow: context.contextWindow } },
       ...defaultMaxTokens === undefined ? {} : { defaultMaxTokens },
+      ...requestProtocol === undefined ? {} : { requestProtocol: requestProtocol as 'kinf-decision-v1' },
       ...resolved.nativeTools === undefined ? {} : { nativeTools: resolved.nativeTools },
       ...resolved.inputProjectionPolicy === undefined ? {} : { inputProjectionPolicy: resolved.inputProjectionPolicy },
       ...resolved.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: resolved.systemPromptUpdate },
@@ -1137,6 +1171,19 @@ export class LlmRuntime extends TypertRemoteService {
         throw new LlmError('The selected model does not support native tool declarations.', 'UNSUPPORTED_TOOLS')
       }
       projectedMessages = projectedTools.messages
+      // An opt-in background relevance filter may elide judged-irrelevant tool
+      // results from this request only. It is a merge-extensible Context
+      // capability: absent by default, so ordinary routes are unaffected.
+      const relevance = this.ctx.get('decisionRelevance') as RelevanceProjector | undefined
+      if (relevance?.enabled === true && options.sessionId !== undefined) {
+        const projected = await relevance.project(
+          projectedMessages,
+          options.sessionId,
+          { provider: resolvedConfig.provider, model: resolvedConfig.model },
+          options.signal,
+        )
+        projectedMessages = projected.messages
+      }
       let projectedOptions = resolvedOptions
       if (projectedMessages !== resolvedOptions.messages || projectedTools.tools !== resolvedOptions.tools) {
         projectedOptions = {

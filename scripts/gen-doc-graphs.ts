@@ -340,6 +340,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Rewrites oversized current tool results through replayable single-node surface replacements before summary compaction.',
   },
   {
+    key: 'decisionRelevance',
+    pkg: 'decision-relevance',
+    title: 'Decision-judged outbound tool-result relevance',
+    mode: 'core',
+    consumers: ['llm'],
+    note: 'Asks a separately configured Decision model whether each oversized tool result still serves the current goal, and elides judged-irrelevant bodies from the outbound projection only.',
+  },
+  {
     key: 'sessions',
     pkg: 'session',
     title: 'In-memory session store',

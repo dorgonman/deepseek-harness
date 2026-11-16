@@ -459,6 +459,7 @@
       name: '@deepseek-ai/dsh-repeat-tool-reminder'
       config:
         thresholds: [3, 5, 8]
+        blockAfter: 8
         argumentsPreviewChars: 500
 
     # The shared base enables the stable model-facing web_search and web_fetch

@@ -1,0 +1,67 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/context/decision-relevance/README.md
+/:
+  en: 9d885616aecb5cc4
+  zh: d874a2e0fcfb71f8
+/deepseek-ai-dsh-context-decision-relevance:
+  en: 135fd831be9cda11
+  zh: 76d7fdbedb09a163
+/deepseek-ai-dsh-context-decision-relevance/summary:
+  en: 0fe58f2b3c2cca4d
+  zh: db158b2929eb397f
+/deepseek-ai-dsh-context-decision-relevance/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 405b30feaf48c087
+/deepseek-ai-dsh-context-decision-relevance/use-this-package:
+  en: 82b7d07c704a1eaf
+  zh: a3723ea2bebbc25b
+/deepseek-ai-dsh-context-decision-relevance/use-this-package/smallest-working-composition:
+  en: e315286860ab1b8d
+  zh: 016e66636df5d93e
+/deepseek-ai-dsh-context-decision-relevance/use-this-package/what-gets-considered:
+  en: 03e1c16b36eb62f0
+  zh: abdb202e5faf8943
+/deepseek-ai-dsh-context-decision-relevance/use-this-package/setting-the-thresholds:
+  en: 664594643b18b924
+  zh: 832f1f3760551602
+/deepseek-ai-dsh-context-decision-relevance/use-this-package/when-judgments-run:
+  en: 5a9c8af60158147f
+  zh: 5e1950005f1a6bb9
+/deepseek-ai-dsh-context-decision-relevance/understand-the-implementation:
+  en: 974f9f86db54fd55
+  zh: fb55ed3fb3cadcbd
+/deepseek-ai-dsh-context-decision-relevance/understand-the-implementation/design-philosophy:
+  en: bb1339d0523b3c22
+  zh: 8be60e5516312501
+/deepseek-ai-dsh-context-decision-relevance/understand-the-implementation/evaluation-mechanics:
+  en: a13a8453340e693d
+  zh: 51976074aebd8f22
+/deepseek-ai-dsh-context-decision-relevance/understand-the-implementation/source-map:
+  en: a7a71c0254cecd1c
+  zh: 23d59df13e59d87b
+/deepseek-ai-dsh-context-decision-relevance/further-exploration:
+  en: 2287bd70053d16fd
+  zh: 9d3c13b448dbf02e
+/deepseek-ai-dsh-context-decision-relevance/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/deepseek-ai-dsh-context-decision-relevance/model-experience/elided-tool-result:
+  en: f47f909e670fd391
+  zh: d67ff0094dd1b090
+/deepseek-ai-dsh-context-decision-relevance/model-experience/elided-tool-result/what-the-model-sees:
+  en: d45d331396d0f583
+  zh: e7cf9127eab45f73
+/deepseek-ai-dsh-context-decision-relevance/model-experience/elided-tool-result/token-effect:
+  en: f957441f4bab6c44
+  zh: ba457bfd9137f96e
+/deepseek-ai-dsh-context-decision-relevance/model-experience/elided-tool-result/kv-cache-effect:
+  en: a15106b7eb400ab0
+  zh: df8165f46240de6b
+/deepseek-ai-dsh-context-decision-relevance/known-limitations-and-deferred-work:
+  en: 5029a7f07bd454ae
+  zh: 0e1a94459ff2d2a3
+/deepseek-ai-dsh-context-decision-relevance/known-limitations-and-deferred-work/dev-note:
+  en: d3a43f2a9cccbc4f
+  zh: 8a0ed74832a31cc8
