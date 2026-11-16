@@ -3130,6 +3130,15 @@ it('retains a sign-out cancellation notice when reopening a partial turn', () =>
   })
 })
 
+it('retains a repeat-output stop notice when reopening a partial turn', () => {
+  const value = assembler([
+    at(7, 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'hook', reason: 'agent-loop/repeated-model-output' } } }),
+  ], true)
+  expect(node(snapshot(value), 'turn-error')?.data).toMatchObject({
+    code: 'REPEATED_MODEL_OUTPUT', message: 'Stopped because the model repeatedly generated the same output.',
+  })
+})
+
 it('reports a turn closed after its process exited as a stopped turn', () => {
   const value = assembler([
     at(7, 'turn/end', { turn: 1, reason: { kind: 'interrupted' } }),

@@ -54,6 +54,8 @@ Agents declared in config start automatically when the plugin loads. Each entry 
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-agent-loop) lists every accepted field. `maxParallelToolCalls` remains a volatile positive-integer Config field with default `10`; `1` selects serial execution. The loop passes its current value to each batch's `execute()` call, taking precedence over executor configuration. Live edits apply to the next batch; `agents` remains startup configuration.
 
+`stopOnRepeatedOutput` is a volatile boolean, disabled by default. When enabled, an attempt stops after a sustained exact repeating span within a single text or reasoning block. The detector looks for six adjacent copies of a 96–512 UTF-16-unit span with at least 12 distinct letters. The loop preserves the delivered prefix and queued input, aborts the provider stream, and records `agent-loop/repeated-model-output` as the cancellation reason without retrying. Enable it for the Web host by adding `stopOnRepeatedOutput: true` under the `agent-loop` entry in its profile patch. Keep any existing `agent-loop` configuration fields in that row. Intentional repeated prose can also trigger the guard.
+
 A configured resume records the declared route as the Session selection before publication. Programmatic resume preserves the Session choice unless its setup explicitly records another route; initial `agentOptions` alone do not override saved history.
 
 ### Create or resume agents programmatically
