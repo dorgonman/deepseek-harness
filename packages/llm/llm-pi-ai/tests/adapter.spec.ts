@@ -233,7 +233,7 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.headers[0]?.authorization).toBe('Bearer test-key')
   })
 
-  it('preserves signatures only for continuation of the selected alias', async () => {
+  it('routes the selected alias while omitting replay thinking without a recorded prefix digest', async () => {
     const selected = await mockServer([{ events: anthropicTextEvents }, { events: anthropicTextEvents }])
     const foreign = await mockServer([])
     const ctx = new Context()
@@ -265,9 +265,11 @@ describe('PiAiAdapter provider routing', () => {
       expect(history.source).toMatchObject({ model, replayState: { response: { model } } })
     }
     expect(selected.requests[0]).toMatchObject({ model: 'native' })
-    expect(selected.requests[0]).toHaveProperty('messages.0.content.0', {
-      type: 'thinking', thinking: 'retained reasoning', signature: 'opaque-signature',
-    })
+    // rc.3 binds signed thinking to a recorded request-prefix digest and treats replay
+    // state without one as stale, so both aliases omit the signature here; the alias
+    // mapping still routes every request to the selected endpoint.
+    expect(JSON.stringify(selected.requests[0])).not.toContain('opaque-signature')
+    expect(selected.requests[0]).toHaveProperty('messages.0.content.0', { type: 'text', text: 'answer' })
     expect(JSON.stringify(selected.requests[1])).not.toContain('opaque-signature')
     expect(foreign.requests).toHaveLength(0)
   })

@@ -59,6 +59,10 @@ export const LLM_FAILURE_CODES = {
   REQUEST_HEADERS: {},
   SERVER: { retryChoice: true },
   STREAM_CLOSED: { retryChoice: true },
+  SUMMARY_CAPACITY_EXCEEDED: {},
+  SUMMARY_TARGET_NOT_CHAT: {},
+  SUMMARY_TARGET_UNCONFIGURED: {},
+  SUMMARY_TARGET_UNVERIFIED: {},
   TIMEOUT: { retryChoice: true },
   TRANSPORT: { retryChoice: true },
   UNKNOWN: {},
@@ -67,6 +71,7 @@ export const LLM_FAILURE_CODES = {
   UNSUPPORTED_CONTENT: {},
   UNSUPPORTED_OPTION: {},
   UNSUPPORTED_REASONING_EFFORT: {},
+  UNSUPPORTED_TOOLS: {},
 } as const satisfies Readonly<Record<string, { readonly retryChoice?: true }>>
 
 /** A failure code from {@link LLM_FAILURE_CODES}, or an unclassified provider HTTP status. */
