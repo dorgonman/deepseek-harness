@@ -82,7 +82,10 @@ export interface Config {
   grepMaxLineBytes?: number
   /** Max bytes of one search's serialized `presentationMeta`; trailing groups/paths drop past it so the persisted card stays bounded. */
   searchMetaMaxBytes?: number
-  /** Max complete raw `rg` stdout bytes a search will parse; larger raw output fails with `SEARCH_RAW_OUTPUT_OVERFLOW`. */
+  /**
+   * Max bytes of complete raw `rg` stdout or glob output with restored root prefixes;
+   * larger output fails with `SEARCH_RAW_OUTPUT_OVERFLOW`.
+   */
   rawOutputMaxBytes?: number
   /** Terminate-escalation grace (ms), handed to the subprocess seam and bounded by `MAX_TIMER_DELAY_MS`. */
   graceMs?: number

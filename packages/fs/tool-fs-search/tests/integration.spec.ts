@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import { join, sep, win32 } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -45,7 +45,7 @@ function text(result: { content: { type: string; text?: string }[] }): string {
 }
 
 /** The fixture workspace as a session cwd, so relative paths resolve inside `dir`. */
-const agent = () => ({ session: { header: { id: 'session-int', cwd: dir } } })
+const agent = (cwd = dir) => ({ session: { header: { id: 'session-int', cwd } } })
 
 describe('search tools over the real subprocess service + the packaged rg', () => {
   beforeEach(async () => {
@@ -166,6 +166,199 @@ describe('search tools over the real subprocess service + the packaged rg', () =
     it('scopes to a directory search root (path arg)', async () => {
       const result = await call('glob', { pattern: '*.ts', path: 'src' }, agent())
       expect(text(result).split('\n').sort()).toEqual([join('src', 'alpha.ts'), join('src', 'beta.ts')])
+    })
+
+    it('anchors slash patterns to an explicit directory rather than the session cwd', async () => {
+      await mkdir(join(dir, 'src', 'nested'))
+      await writeFile(join(dir, 'src', 'nested', 'target.ts'), '')
+      const result = await call('glob', { pattern: 'nested/*.ts', path: 'src' }, agent())
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected glob success')
+      expect(result.value).toEqual({ root: 'src', paths: [join('src', 'nested', 'target.ts')] })
+    })
+
+    it('anchors a slash pattern to an absolute dot-dot root with portable display paths', async () => {
+      await mkdir(join(dir, 'anchor'))
+      await writeFile(join(dir, 'target.root-proof'), '')
+      const result = await call('glob', { pattern: '/*.root-proof', path: `${dir}/anchor/..` }, agent())
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected glob success')
+      expect(result.value).toEqual({ root: '.', paths: ['target.root-proof'] })
+    })
+
+    it.each([
+      ['./src', `./src${sep}nested${sep}target.ts`],
+      ['.//src//', `.//src//nested${sep}target.ts`],
+      ['src/../src', `src/../src${sep}nested${sep}target.ts`],
+    ])('preserves lexical output spelling under relative root %s', async (path, expectedPath) => {
+      await mkdir(join(dir, 'src', 'nested'))
+      await writeFile(join(dir, 'src', 'nested', 'target.ts'), '')
+      const result = await call('glob', { pattern: 'nested/*.ts', path }, agent())
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected glob success')
+      expect(result.value).toEqual({ root: path, paths: [expectedPath] })
+    })
+
+    it('maps an absolute inside-Session directory back to Session-relative paths', async () => {
+      await mkdir(join(dir, 'src', 'nested'))
+      await writeFile(join(dir, 'src', 'nested', 'target.ts'), '')
+      const result = await call('glob', { pattern: 'nested/*.ts', path: join(dir, 'src') }, agent())
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected glob success')
+      expect(result.value).toEqual({ root: 'src', paths: [join('src', 'nested', 'target.ts')] })
+    })
+
+    it.each([
+      ['/nested/*.ts', ['nested/target.ts']],
+      ['**/*.ts', ['.hidden.ts', 'root.ts', 'nested/target.ts', 'nested/deeper/too-deep.ts']],
+      ['./nested/*.ts', []],
+      ['!nested/*.ts', ['.hidden.ts', 'root.ts', 'other.txt', 'nested/deeper/too-deep.ts']],
+      ['nested/', []],
+      ['{nested,missing}/*.ts', ['nested/target.ts']],
+    ] as const)('retains rg pattern semantics for %s under a literal metacharacter root', async (pattern, expected) => {
+      const root = '-meta [q] {a,b} !-literal'
+      await mkdir(join(dir, root, 'nested', 'deeper'), { recursive: true })
+      await mkdir(join(dir, root, '.git'), { recursive: true })
+      for (const path of ['.hidden.ts', 'root.ts', 'other.txt', 'nested/target.ts', 'nested/deeper/too-deep.ts', '.git/internal.ts']) {
+        await writeFile(join(dir, root, path), '')
+      }
+      const spawn = vi.spyOn(ctx.subprocess, 'spawn')
+      const result = await call('glob', { pattern, path: root }, agent())
+      expect(result.isError).toBe(false)
+      const paths = expected.map(path => join(root, path)).sort()
+      expect(paths.length === 0 ? text(result) : text(result).split('\n').sort()).toEqual(paths.length === 0 ? 'No files found' : paths)
+      expect(spawn.mock.calls[0]?.[0].argv).toContain(`--glob=${pattern}`)
+      expect(spawn.mock.calls[0]?.[0].argv.slice(-2)).toEqual(['--', '.'])
+    })
+
+    it('restores mixed inside/outside Session coordinates from an absolute ancestor root', async () => {
+      const cwd = join(dir, 'session')
+      await mkdir(cwd)
+      await writeFile(join(dir, 'outside.root-proof'), '')
+      await writeFile(join(cwd, 'inside.root-proof'), '')
+      await utimes(join(dir, 'outside.root-proof'), 1_000_000, 1_000_000)
+      await utimes(join(cwd, 'inside.root-proof'), 1_000_001, 1_000_001)
+      const result = await call('glob', { pattern: '**/*.root-proof', path: dir }, agent(cwd))
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected glob success')
+      expect(result.value).toEqual({ root: dir, paths: [join(dir, 'outside.root-proof'), 'inside.root-proof'] })
+    })
+
+    it('uses a sibling root without re-anchoring its files through the Session subtree', async () => {
+      const cwd = join(dir, 'session')
+      await mkdir(cwd)
+      await mkdir(join(dir, 'sibling', 'nested'), { recursive: true })
+      await writeFile(join(dir, 'sibling', 'nested', 'target.ts'), '')
+      const result = await call('glob', { pattern: '/nested/*.ts', path: '../sibling' }, agent(cwd))
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected glob success')
+      expect(result.value).toEqual({ root: '../sibling', paths: [`../sibling${sep}nested${sep}target.ts`] })
+    })
+
+    it.each(['reference/alias', 'reference/alias/..'])('keeps symlink lookup semantics for root %s', async (path) => {
+      await mkdir(join(dir, 'reference'))
+      await mkdir(join(dir, 'outside', 'real'), { recursive: true })
+      await symlink(join(dir, 'outside', 'real'), join(dir, 'reference', 'alias'), 'junction')
+      await writeFile(join(dir, 'reference', 'lexical.parent-proof'), '')
+      await writeFile(join(dir, 'outside', 'physical.parent-proof'), '')
+      await writeFile(join(dir, 'outside', 'real', 'target.root-proof'), '')
+      const extension = path.endsWith('/..') ? 'parent-proof' : 'root-proof'
+      const basename = await call('glob', { pattern: `*.${extension}`, path }, agent())
+      const anchored = await call('glob', { pattern: `/*.${extension}`, path }, agent())
+      expect(basename.isError).toBe(false)
+      expect(anchored.isError).toBe(false)
+      if (basename.isError || anchored.isError) throw new Error('expected glob success')
+      expect(text(basename)).not.toBe('No files found')
+      expect(anchored.value).toEqual(basename.value)
+    })
+
+    it.each(['.git', 'container/.svn/inner', '.hg', 'container/.bzr/inner', '.jj', 'container/.sl/inner'])(
+      'excludes metadata when a slash pattern starts at or inside %s', async (path) => {
+        await mkdir(join(dir, path), { recursive: true })
+        await writeFile(join(dir, path, 'internal.ts'), '')
+        const spawn = vi.spyOn(ctx.subprocess, 'spawn')
+        const result = await call('glob', { pattern: '**/*.ts', path }, agent())
+        expect(result.isError).toBe(false)
+        expect(text(result)).toBe('No files found')
+        const argv = spawn.mock.calls[0]?.[0].argv ?? []
+        expect(argv.indexOf('--glob=!**')).toBeGreaterThan(argv.indexOf('--glob=**/*.ts'))
+        expect(argv.indexOf('--glob=!**')).toBeLessThan(argv.indexOf('--'))
+      },
+    )
+
+    it.each(['missing', '.git/missing', 'src/alpha.ts'])('fails rather than returning false-empty when a rooted directory is unusable: %s', async (path) => {
+      const spawn = vi.spyOn(ctx.subprocess, 'spawn')
+      const result = await call('glob', { pattern: '**/*.ts', path }, agent())
+      expect(result.isError).toBe(true)
+      expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_FAILED' } })
+      expect(spawn).toHaveBeenCalledTimes(1)
+    })
+
+    it('classifies an invalid slash pattern under an explicit directory', async () => {
+      const result = await call('glob', { pattern: 'nested/[', path: 'src' }, agent())
+      expect(result.isError).toBe(true)
+      expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_INVALID_PATTERN' } })
+    })
+
+    it.runIf(process.platform === 'win32').each(['drive-relative', 'drive-only', 'root-relative'] as const)(
+      'keeps packaged-rg output coordinates for a Windows %s root', async (kind) => {
+        await mkdir(join(dir, 'src', 'nested'))
+        await writeFile(join(dir, 'src', 'nested', 'target.root-proof'), '')
+        const drive = win32.parse(dir).root.slice(0, 2)
+        const path = kind === 'drive-relative' ? `${drive}src` : kind === 'drive-only' ? drive : join(dir, 'src').slice(2)
+        const pattern = kind === 'drive-only' ? 'src/nested/*.root-proof' : 'nested/*.root-proof'
+        const basename = await call('glob', { pattern: 'target.root-proof', path }, agent())
+        const anchored = await call('glob', { pattern, path }, agent())
+        expect(basename.isError).toBe(false)
+        expect(anchored.isError).toBe(false)
+        if (basename.isError || anchored.isError) throw new Error('expected glob success')
+        expect(text(basename)).not.toBe('No files found')
+        expect(anchored.value).toEqual(basename.value)
+      },
+    )
+
+    it.runIf(process.platform === 'win32').each([
+      ['', false], ['', true], ['.git', false], ['.git', true], ['.git/objects', false], ['.git/objects', true],
+    ] as const)('excludes metadata without changing basename coordinates for drive-relative %s (lowercase=%s)', async (suffix, lowercase) => {
+      await mkdir(join(dir, '.git', 'objects'))
+      await writeFile(join(dir, '.git', 'objects', 'secret.ts'), '')
+      const sessionDrive = win32.parse(dir).root.slice(0, 2)
+      const drive = lowercase ? sessionDrive.toLowerCase() : sessionDrive.toUpperCase()
+      const path = drive + suffix
+      const spawn = vi.spyOn(ctx.subprocess, 'spawn')
+      const result = await call('glob', { pattern: '*.ts', path }, agent())
+      expect(result.isError).toBe(false)
+      if (suffix.length === 0) {
+        expect(text(result).split('\n').sort()).toEqual([
+          `${drive}.hidden.ts`, `${drive}src${sep}alpha.ts`, `${drive}src${sep}beta.ts`, `${drive}spaced dir${sep}wei'rd name.ts`,
+        ].sort())
+      } else {
+        expect(text(result)).toBe('No files found')
+      }
+      expect(spawn.mock.calls[0]?.[0].cwd).toBe(dir)
+      expect(spawn.mock.calls[0]?.[0].argv.slice(-2)).toEqual(['--', path])
+    })
+
+    it.skipIf(process.platform === 'win32').each(['*.ts', 'nested/*.ts'])(
+      'keeps a POSIX colon-literal root searchable with %s', async (pattern) => {
+        const root = 'C:.git'
+        await mkdir(join(dir, root, 'nested'), { recursive: true })
+        await writeFile(join(dir, root, 'nested', 'target.ts'), '')
+        const result = await call('glob', { pattern, path: root }, agent())
+        expect(result.isError).toBe(false)
+        if (result.isError) throw new Error('expected glob success')
+        expect(result.value).toEqual({ root, paths: [join(root, 'nested', 'target.ts')] })
+      },
+    )
+
+    it.skipIf(process.platform === 'win32')('treats a POSIX root backslash as a filename character, not a VCS separator', async () => {
+      const root = '.git\\literal'
+      await mkdir(join(dir, root, 'nested'), { recursive: true })
+      await writeFile(join(dir, root, 'nested', 'target.ts'), '')
+      const result = await call('glob', { pattern: 'nested/*.ts', path: root }, agent())
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected glob success')
+      expect(result.value).toEqual({ root, paths: [join(root, 'nested', 'target.ts')] })
     })
 
     it('keeps an explicit path as the only search root when the pattern has a literal prefix', async () => {

@@ -13,7 +13,7 @@ import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { provideWorkingDirectoryFixture } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createScope, type Scope } from '@deepseek-ai/dsh-scope'
 import { join, sep } from 'node:path'
@@ -374,6 +374,34 @@ describe('command construction (plain argv)', () => {
       '--', 'docs dir'])
   })
 
+  it.runIf(process.platform === 'win32').each(['C:', 'c:.git', 'C:.git/objects', 'C:src'])(
+    'glob: adds only fixed drive-prefixed metadata exclusions for %s', (path) => {
+      const drive = path.slice(0, 2)
+      expect(buildGlobCommand({ pattern: '*.ts', path })).toEqual([
+        ...buildGlobCommand({ pattern: '*.ts' }),
+        `--glob=!${drive}.git`, `--glob=!${drive}.git/**`,
+        `--glob=!${drive}.svn`, `--glob=!${drive}.svn/**`,
+        `--glob=!${drive}.hg`, `--glob=!${drive}.hg/**`,
+        `--glob=!${drive}.bzr`, `--glob=!${drive}.bzr/**`,
+        `--glob=!${drive}.jj`, `--glob=!${drive}.jj/**`,
+        `--glob=!${drive}.sl`, `--glob=!${drive}.sl/**`,
+        '--', path,
+      ])
+    },
+  )
+
+  it.each(['C:/src', 'C:\\src', '11:src', 'CC:.git', './C:.git', 'src/C:.git'])(
+    'glob: leaves a root without a Windows drive-relative prefix unchanged: %s', (path) => {
+      expect(buildGlobCommand({ pattern: '*.ts', path })).toEqual([...buildGlobCommand({ pattern: '*.ts' }), '--', path])
+    },
+  )
+
+  it.skipIf(process.platform === 'win32').each(['C:', 'c:.git', 'C:.git/objects', 'C:src'])(
+    'glob: leaves POSIX colon-literal root argv unchanged: %s', (path) => {
+      expect(buildGlobCommand({ pattern: '*.ts', path })).toEqual([...buildGlobCommand({ pattern: '*.ts' }), '--', path])
+    },
+  )
+
   it('grep: fixed rg --json argv with the pattern in --regexp= form', () => {
     expect(buildGrepCommand({ pattern: 'foo.*bar' })).toEqual(['--json', '--regexp=foo.*bar'])
   })
@@ -396,6 +424,153 @@ describe('command construction (plain argv)', () => {
     // of its argument because there is no shell between the vector and rg.
     expect(buildGrepCommand({ pattern: raw })).toEqual(['--json', `--regexp=${raw}`])
     expect(buildGlobCommand({ pattern: raw })[1]).toBe(`--glob=${raw}`)
+  })
+})
+
+describe('explicit slash-pattern roots', () => {
+  const cwd = process.platform === 'win32' ? 'Q:\\sessions\\s1' : '/sessions/s1'
+  let fixture: Awaited<ReturnType<typeof setup>> | undefined
+
+  async function rootedSetup(options: SetupOptions = {}) {
+    fixture = await setup(options)
+    return fixture
+  }
+
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    const owned = fixture
+    fixture = undefined
+    await owned?.ctx.fiber.dispose()
+  })
+
+  it('resolves the Session cwd once and restores the lexical root without moving the Session', async () => {
+    const { ctx, subprocess } = await rootedSetup()
+    const caller = agent(cwd)
+    const ensure = vi.spyOn(ctx.workingDirectory, 'ensure')
+    subprocess.handler = () => runResult(`.${sep}nested${sep}a.ts\n`)
+    const result = await call(ctx, 'glob', { pattern: 'nested/*.ts', path: 'src/../src' }, { agent: caller })
+    expect(ensure).toHaveBeenCalledTimes(1)
+    expect(caller.session.header.cwd).toBe(cwd)
+    expect(subprocess.spawns[0]?.cwd).toBe(`${cwd}${sep}src/../src`)
+    expect(subprocess.spawns[0]?.argv).toEqual([rgPath, '--no-config', ...buildGlobCommand({ pattern: 'nested/*.ts', path: '.' })])
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected glob success')
+    expect(result.value).toEqual({ root: 'src/../src', paths: [`src/../src${sep}nested${sep}a.ts`] })
+    expect(text(result)).toBe(`src/../src${sep}nested${sep}a.ts`)
+  })
+
+  it.each([
+    { pattern: 'src/*.ts' },
+    { pattern: '*.ts', path: 'src' },
+    { pattern: 'nested\\*.ts', path: 'src' },
+  ])('keeps the original command and cwd for $pattern with $path', async (input) => {
+    const { ctx, subprocess } = await rootedSetup()
+    subprocess.handler = () => runResult(`src${sep}a.ts\n`)
+    const result = await call(ctx, 'glob', input, { agent: agent(cwd) })
+    expect(result.isError).toBe(false)
+    expect(subprocess.spawns[0]?.cwd).toBe(cwd)
+    expect(subprocess.spawns[0]?.argv).toEqual([rgPath, '--no-config', ...buildGlobCommand(input)])
+  })
+
+  it('keeps grep cwd and argv when its pattern, include, and path contain slashes', async () => {
+    const { ctx, subprocess } = await rootedSetup()
+    subprocess.handler = () => runResult(matchLine('src/a.ts', 1, 'foo/bar\n'))
+    const input = { pattern: 'foo/bar', include: 'nested/*.ts', path: 'src/..' }
+    const result = await call(ctx, 'grep', input, { agent: agent(cwd) })
+    expect(result.isError).toBe(false)
+    expect(subprocess.spawns[0]?.cwd).toBe(cwd)
+    expect(subprocess.spawns[0]?.argv).toEqual([rgPath, '--no-config', ...buildGrepCommand(input)])
+  })
+
+  it.each([
+    ['long root at the exact byte cap', 'nested/'.repeat(256) + 'root', 128, 0],
+    ['long root one byte over the cap', 'nested/'.repeat(256) + 'root', 128, -1],
+    ['UTF-8 root at the exact byte cap', '根/é🙂', 3, 0],
+    ['UTF-8 root one byte over the cap', '根/é🙂', 3, -1],
+  ] as const)('bounds restored paths for %s', async (_label, root, count, margin) => {
+    const names = Array.from({ length: count }, (_, index) => `file-${index}.ts`)
+    const paths = names.map(name => `${root}${sep}${name}`)
+    const stdout = names.map(name => `.${sep}${name}\n`).join('')
+    const restoredBytes = Buffer.byteLength(paths.join('\n') + '\n', 'utf8')
+    const cap = restoredBytes + margin
+    expect(Buffer.byteLength(stdout, 'utf8')).toBeLessThan(cap)
+    const { ctx, subprocess, spill } = await rootedSetup({ config: { rawOutputMaxBytes: cap, globMaxResults: 1 }, spill: true })
+    subprocess.handler = () => runResult(stdout)
+    const result = await call(ctx, 'glob', { pattern: '**/*.ts', path: root }, { agent: agent(cwd) })
+    expect(result.isError).toBe(margin < 0)
+    if (margin < 0) {
+      expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_RAW_OUTPUT_OVERFLOW' } })
+      expect(text(result)).toContain(`glob produced ${restoredBytes} bytes of root-prefixed path output, over the ${cap}-byte cap; narrow pattern or path and retry`)
+      expect(spill?.saves).toHaveLength(0)
+      expect(result.meta).toBeUndefined()
+    } else {
+      if (result.isError) throw new Error('expected glob success')
+      expect(result.value).toEqual({ root, paths })
+      expect(spill?.saves[0]?.content).toBe(paths.join('\n'))
+    }
+  })
+
+  it.each(['nested/a.ts', '/unexpected/a.ts', `..${sep}a.ts`, `.${sep}`])('rejects an unexpected child output path %s without partial success', async (path) => {
+    const { ctx, subprocess, spill } = await rootedSetup({ spill: true })
+    subprocess.handler = () => runResult(`.${sep}good.ts\n${path}\n`)
+    const result = await call(ctx, 'glob', { pattern: '**/*.ts', path: 'src' }, { agent: agent(cwd) })
+    expect(result.isError).toBe(true)
+    expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_FAILED' } })
+    expect(text(result)).toContain('glob search command returned an unexpected path; narrow pattern or path and retry')
+    expect(spill?.saves).toHaveLength(0)
+    expect(result.meta).toBeUndefined()
+  })
+
+  it('retains abort priority and forwards cancellation to the rooted process', async () => {
+    const { ctx, subprocess } = await rootedSetup()
+    const controller = new AbortController()
+    subprocess.handler = () => {
+      controller.abort('cancel rooted search')
+      return runResult('', { exitCode: null, signal: 'SIGTERM' })
+    }
+    const result = await call(ctx, 'glob', { pattern: '**/*.ts', path: 'src' }, { agent: agent(cwd), signal: controller.signal })
+    expect(result.isError).toBe(true)
+    expect(result.error).toMatchObject({ info: { code: 'SEARCH_ABORTED' } })
+    expect(subprocess.spawns[0]?.signal).toBe(controller.signal)
+    expect(subprocess.handles[0]?.terminated).toBe(true)
+    expect(subprocess.handles[0]?.settled).toBe(true)
+  })
+
+  it.runIf(process.platform === 'win32').each([
+    ['Q:src', 'Q:\\sessions\\s1\\src', 'Q:src\\nested\\a.ts'],
+    ['q:src', 'Q:\\sessions\\s1\\src', 'q:src\\nested\\a.ts'],
+    ['Q:', 'Q:\\sessions\\s1\\', 'Q:nested\\a.ts'],
+    ['\\src', 'Q:\\src', '\\src\\nested\\a.ts'],
+    ['/src', 'Q:\\src', '/src\\nested\\a.ts'],
+    ['R:\\root\\..\\src', 'R:\\root\\..\\src', 'R:\\root\\..\\src\\nested\\a.ts'],
+    ['\\\\server\\share\\root/..', '\\\\server\\share\\root/..', '\\\\server\\share\\root/..\\nested\\a.ts'],
+    ['\\\\?\\R:\\root/..', '\\\\?\\R:\\root/..', '\\\\?\\R:\\root/..\\nested\\a.ts'],
+  ])('resolves Windows root %s from the Session, not the host drive cwd', async (path, expectedCwd, expectedPath) => {
+    const { ctx, subprocess } = await rootedSetup()
+    subprocess.handler = () => runResult('.\\nested\\a.ts\n')
+    const result = await call(ctx, 'glob', { pattern: 'nested/*.ts', path }, { agent: agent(cwd) })
+    expect(result.isError).toBe(false)
+    expect(subprocess.spawns[0]?.cwd).toBe(expectedCwd)
+    if (result.isError) throw new Error('expected glob success')
+    expect(result.value).toEqual({ root: toWorkdirRelative(path, cwd), paths: [toWorkdirRelative(expectedPath, cwd)] })
+  })
+
+  it.runIf(process.platform === 'win32')('uses the Session drive in a namespaced Session cwd', async () => {
+    const { ctx, subprocess } = await rootedSetup()
+    subprocess.handler = () => runResult('.\\a.ts\n')
+    const result = await call(ctx, 'glob', { pattern: '**/*.ts', path: 'q:src' }, { agent: agent('\\\\?\\Q:\\sessions\\s1') })
+    expect(result.isError).toBe(false)
+    expect(subprocess.spawns[0]?.cwd).toBe('\\\\?\\Q:\\sessions\\s1\\src')
+  })
+
+  it.runIf(process.platform === 'win32')('rejects another drive-relative root before spawn and requests an absolute path', async () => {
+    const { ctx, subprocess } = await rootedSetup()
+    const result = await call(ctx, 'glob', { pattern: 'nested/*.ts', path: 'R:src' }, { agent: agent(cwd) })
+    expect(result.isError).toBe(true)
+    expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_FAILED' } })
+    expect(text(result)).toContain('glob needs an absolute path when a drive-relative search root is not on the Session drive')
+    expect(text(result)).not.toContain('ripgrep launch failed')
+    expect(subprocess.spawns).toHaveLength(0)
   })
 })
 

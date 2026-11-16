@@ -10,11 +10,11 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { sep } from 'node:path'
+import { isAbsolute, sep, win32 } from 'node:path'
 import { ToolArgsError, defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, SearchResultView, ToolResult } from '@deepseek-ai/dsh-tools'
 import type { SpillRef } from '@deepseek-ai/dsh-spill'
-import { runRipgrep, toWorkdirRelative, trySaveFormattedResult } from './search-core.ts'
+import { runRipgrep, SearchError, toWorkdirRelative, trySaveFormattedResult } from './search-core.ts'
 import { globSearchMeta, searchViewFromMeta } from './presentation.ts'
 import { acceptedDirectCallValue } from './direct-call.ts'
 
@@ -44,7 +44,7 @@ export interface GlobToolCaps {
   maxResults: number
   /** Max bytes of serialized `presentationMeta`; trailing paths drop past it. */
   maxMetaBytes: number
-  /** Cap on the complete raw `rg` stdout the tool will parse. */
+  /** Byte cap on complete raw stdout and glob output with restored root prefixes. */
   rawOutputMaxBytes: number
   /** Terminate-escalation grace period (ms) for the search process. */
   graceMs: number
@@ -81,8 +81,9 @@ export function parseGlobArgs(args: { pattern: string; path?: string }): GlobInp
  * search root rides behind `--` so a leading-dash path can never be parsed as
  * a flag. `--sort=modified` orders by modification time, `--no-ignore
  * --hidden` searches ignored and hidden files, and
- * {@link GLOB_VCS_EXCLUDES} keeps VCS metadata out. Simple directory prefixes
- * prune unrelated subtrees through directory-name globs without changing the
+ * {@link GLOB_VCS_EXCLUDES} keeps VCS metadata out, including Windows
+ * drive-prefixed first components. Simple directory prefixes prune unrelated
+ * subtrees through directory-name globs without changing the
  * search root, path separators, or symlink handling. The last matching glob
  * wins. A fixed 8 KiB budget bounds added argv bytes; larger additions retain
  * the original traversal, since even linear growth can exceed command-line limits.
@@ -117,8 +118,75 @@ export function buildGlobCommand(input: GlobInput): string[] {
       `--glob=!**/${name}/**`,
     ]),
   ]
+  if (sep === '\\' && input.path !== undefined && /^[a-z]:(?![\\/])/i.test(input.path)) {
+    const drive = input.path.slice(0, 2)
+    parts.push(...GLOB_VCS_EXCLUDES.flatMap(name => [
+      `--glob=!${drive}${name}`,
+      `--glob=!${drive}${name}/**`,
+    ]))
+  }
   if (input.path !== undefined) parts.push('--', input.path)
   return parts
+}
+
+/** Preserve native separators and drive-only prefixes when restoring rg paths. */
+function globPathPrefix(path: string): string {
+  return path.endsWith(sep) || sep === '\\' && (path.endsWith('/') || /^[a-z]:$/i.test(path)) ? path : `${path}${sep}`
+}
+
+/** Root slash-pattern matching in a child cwd without normalizing symlinks or `..`. */
+function rootedGlobCommand(pattern: string, path: string, workdir: string): { argv: string[]; cwd: string } {
+  let cwd = isAbsolute(path) ? path : globPathPrefix(workdir) + path
+  if (sep === '\\') {
+    const root = win32.parse(path).root
+    const sessionRoot = win32.parse(workdir).root
+    if (/^[a-z]:$/i.test(root)) {
+      // A drive root may include a Windows namespace prefix.
+      if (sessionRoot.slice(-3, -1).toLowerCase() !== root.toLowerCase()) {
+        throw new SearchError('glob needs an absolute path when a drive-relative search root is not on the Session drive', 'SEARCH_FAILED')
+      }
+      cwd = globPathPrefix(workdir) + path.slice(root.length)
+    } else if (root === '\\' || root === '/') {
+      cwd = sessionRoot + path.slice(root.length)
+    }
+  }
+  const argv = buildGlobCommand({ pattern, path: '.' })
+  const lexicalRoot = sep === '\\' && /^[a-z]:/i.test(path) ? path.slice(2) : path
+  if (lexicalRoot.split(sep === '\\' ? /[\\/]/ : '/').some(part => GLOB_VCS_EXCLUDES.includes(part))) {
+    // The child cwd hides this lexical metadata prefix from the paired excludes.
+    argv.splice(argv.length - 2, 0, '--glob=!**')
+  }
+  return { argv, cwd }
+}
+
+/** Validate rooted output and bound UTF-8 prefix expansion before allocating paths. */
+function parseGlobPaths(stdout: string, workdir: string, rootedPath: string | undefined, rawOutputMaxBytes: number): string[] {
+  const lines = stdout.split('\n')
+  const prefix = rootedPath === undefined ? undefined : globPathPrefix(rootedPath)
+  if (prefix !== undefined) {
+    const rgPrefix = `.${sep}`
+    let count = 0
+    for (const line of lines) {
+      if (line.length === 0) continue
+      if (!line.startsWith(rgPrefix) || line.length === rgPrefix.length) {
+        throw new SearchError('glob search command returned an unexpected path; narrow pattern or path and retry', 'SEARCH_FAILED')
+      }
+      count += 1
+    }
+    const restoredBytes = Buffer.byteLength(stdout, 'utf8') + count * (Buffer.byteLength(prefix, 'utf8') - Buffer.byteLength(rgPrefix, 'utf8'))
+    if (restoredBytes > rawOutputMaxBytes) {
+      throw new SearchError(
+        `glob produced ${restoredBytes} bytes of root-prefixed path output, over the ${rawOutputMaxBytes}-byte cap; narrow pattern or path and retry`,
+        'SEARCH_RAW_OUTPUT_OVERFLOW',
+      )
+    }
+  }
+  const paths: string[] = []
+  for (const line of lines) {
+    if (line.length === 0) continue
+    paths.push(toWorkdirRelative(prefix === undefined ? line : prefix + line.slice(2), workdir))
+  }
+  return paths
 }
 
 /**
@@ -352,17 +420,14 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
     },
     async execute(args, exec) {
       const input = parseGlobArgs(args)
-      const run = await runRipgrep(ctx, exec, 'glob', buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes)
+      const rootedPath = input.path !== undefined && input.pattern.includes('/') ? input.path : undefined
+      const command = rootedPath === undefined
+        ? buildGlobCommand(input)
+        : (workdir: string) => rootedGlobCommand(input.pattern, rootedPath, workdir)
+      const run = await runRipgrep(ctx, exec, 'glob', command, caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes)
       const root = input.path === undefined ? '.' : toWorkdirRelative(input.path, run.workdir)
       if (run.noMatches) return { root, paths: [] }
-
-      const all: string[] = []
-      for (const line of run.stdout.split('\n')) {
-        if (line.length === 0) continue
-        const displayPath = toWorkdirRelative(line, run.workdir)
-        all.push(displayPath)
-      }
-      return { root, paths: all }
+      return { root, paths: parseGlobPaths(run.stdout, run.workdir, rootedPath, caps.rawOutputMaxBytes) }
     },
     presentCall: presentGlobCall,
     presentResult: presentGlobResult,

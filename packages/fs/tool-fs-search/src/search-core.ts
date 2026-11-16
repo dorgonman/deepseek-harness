@@ -19,7 +19,7 @@
  * @module @deepseek-ai/dsh-tool-fs-search/search-core
  */
 
-import { isAbsolute, relative, sep } from 'node:path'
+import { isAbsolute, relative, sep, win32 } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { spawnRipgrep } from '@deepseek-ai/dsh-util-ripgrep'
 export { resolveRgPath } from '@deepseek-ai/dsh-util-ripgrep'
@@ -31,8 +31,8 @@ import type { SaveTextSpill, SpillRef } from '@deepseek-ai/dsh-spill'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 
 /**
- * Default cap on the complete raw `rg` stdout the tools will parse (the
- * `rawOutputMaxBytes` config), matching Claude Code's ripgrep raw buffer.
+ * Default byte cap for complete raw `rg` stdout and restored glob path output
+ * (`rawOutputMaxBytes`); the raw-stdout limit matches Claude Code's ripgrep buffer.
  */
 export const RAW_OUTPUT_MAX_BYTES = 20_000_000
 
@@ -103,7 +103,7 @@ export interface RipgrepRun {
   stdout: string
   /** True when ripgrep exited 1: a successful search with zero results. */
   noMatches: boolean
-  /** The resolved working directory the command ran in (the display-relativization base). */
+  /** The resolved Session workdir (the display base), independent of a factory-selected child cwd. */
   workdir: string
 }
 
@@ -157,9 +157,10 @@ function completeStdout(toolName: string, stdout: SubprocessOutputRead, rawOutpu
 
 /**
  * Run the packaged ripgrep binary with a plain argv vector and return its
- * complete raw stdout. The working directory is the calling agent's session
- * current directory when available, else
- * `process.cwd()`. `exec.signal` is forwarded so the cooperative tool timeout
+ * complete raw stdout. The Session workdir is resolved once from the calling
+ * agent, or from `process.cwd()` without an agent. An argv factory may select
+ * a different child cwd; the returned workdir remains the Session display base.
+ * `exec.signal` is forwarded so the cooperative tool timeout
  * (`@deepseek-ai/dsh-tool-call-timeout-policy`) and caller cancellation terminate the
  * process tree.
  *
@@ -185,7 +186,9 @@ function completeStdout(toolName: string, stdout: SubprocessOutputRead, rawOutpu
  * @param ctx - the plugin context; execution uses its `subprocess` service.
  * @param exec - the tool-execution context; supplies the owning Agent and the abort signal.
  * @param toolName - `glob` or `grep`, used in error messages.
- * @param argv - the ripgrep arguments (every model value an unquoted argv element; no shell layer exists).
+ * @param argv - literal ripgrep arguments, or a factory evaluated once with the
+ *   resolved Session workdir that returns arguments and child cwd; every model
+ *   value remains one unquoted argv element with no shell layer.
  * @param rawOutputMaxBytes - cap on the complete raw stdout the tool will parse.
  * @param graceMs - the seam's terminate-escalation grace period.
  * @param stderrMaxBytes - cap on the retained stderr diagnostic tail.
@@ -195,7 +198,7 @@ export async function runRipgrep(
   ctx: Context,
   exec: ToolExecution,
   toolName: string,
-  argv: readonly string[],
+  argv: readonly string[] | ((workdir: string) => { argv: readonly string[]; cwd: string }),
   rawOutputMaxBytes: number,
   graceMs: number,
   stderrMaxBytes: number,
@@ -208,9 +211,10 @@ export async function runRipgrep(
     : await ctx.workingDirectory.ensure(exec.agent, exec.signal)
   let handle: SubprocessHandle
   try {
+    const command = typeof argv === 'function' ? argv(workdir) : { argv, cwd: workdir }
     handle = await spawnRipgrep(ctx.subprocess, {
-      argv,
-      cwd: workdir,
+      argv: command.argv,
+      cwd: command.cwd,
       stdio: {
         stdin: 'ignore',
         stdout: { maxBytes: rawOutputMaxBytes },
@@ -229,6 +233,7 @@ export async function runRipgrep(
     if (exec.signal.aborted) {
       throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, 'SEARCH_ABORTED')
     }
+    if (error instanceof SearchError) throw error
     throw new SearchError(`${toolName} could not start its search command (ripgrep launch failed)`, 'SEARCH_FAILED', { cause: error })
   }
   let outcome: SubprocessOutcome
@@ -261,20 +266,33 @@ export async function runRipgrep(
 /**
  * Map an `rg` output path to its display form: absolute paths inside the
  * resolved workdir become workdir-relative; everything else (relative output,
- * paths outside the workdir) passes through unchanged. Display-only —
- * returned paths are follow-up-readable in co-located workdir/filesystem
- * deployments where both resolve the same workspace (the documented v1
- * deployment requirement).
+ * paths outside the workdir) passes through unchanged. On Windows, a
+ * root-relative path (one whose `parse().root` is a bare `\` or `/`) is
+ * anchored to the Session workdir's volume before comparison, so the display
+ * does not silently use the host process's per-drive current directory.
+ * When `relative()` returns an absolute string (cross-volume), the original
+ * spelling is preserved rather than normalized. Display-only — returned paths
+ * are follow-up-readable in co-located workdir/filesystem deployments where
+ * both resolve the same workspace (the documented v1 deployment requirement).
  *
  * @param path - one path as ripgrep printed it.
- * @param workdir - the resolved workdir the command ran in.
+ * @param workdir - the resolved Session workdir used as the display base.
  * @returns the workdir-relative display path when possible, else `path` unchanged.
  */
 export function toWorkdirRelative(path: string, workdir: string): string {
   if (!isAbsolute(path)) return path
-  const rel = relative(workdir, path)
+  let comparisonPath = path
+  if (sep === '\\') {
+    const pathRoot = win32.parse(path).root
+    if (pathRoot === '\\' || pathRoot === '/') {
+      const sessionRoot = win32.parse(workdir).root
+      comparisonPath = sessionRoot + path.slice(pathRoot.length)
+    }
+  }
+  const rel = relative(workdir, comparisonPath)
   if (rel.length === 0) return '.'
   if (rel === '..' || rel.startsWith(`..${sep}`)) return path
+  if (isAbsolute(rel)) return path
   return rel
 }
 

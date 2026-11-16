@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-搜索使用 Session 的当前工作目录，包括通过 `working_directory` 切换后的目录。
+搜索相对于 Session 的当前工作目录解析相对路径，包括通过 `working_directory` 切换后的目录；该目录也始终作为结果显示的基准。
 
 在 `ctx.subprocess` 后端之后挂载工具；无需宿主 `rg` 安装，也无需文件系统提供方。模型随后获得按修改时间排序的文件发现与按行组织的内容搜索，两者都有界并受超时防护。
 
@@ -47,7 +47,7 @@ kind: "package-reference"
 
 | 工具 | 参数 | 行为 |
 |---|---|---|
-| `glob` | `pattern`、`path?` | 查找路径匹配 glob 模式的文件，包含隐藏与忽略文件但排除 VCS 元数据；不含 `/` 的模式匹配任意深度的基名，因此 `*` 匹配整棵树；完整结果保持按修改时间排序 |
+| `glob` | `pattern`、`path?` | 查找路径匹配 glob 模式的文件，包含隐藏与忽略文件但排除 VCS 元数据；含 `/` 的模式相对于 `path` 匹配，省略时相对于 Session cwd；不含 `/` 的模式匹配任意深度的基名，因此 `*` 匹配整棵树；完整结果保持按修改时间排序 |
 | `grep` | `pattern`、`path?`、`include?` | 用 ripgrep 正则搜索文件内容，并按文件分组返回 `Line N: <preview>` 匹配；省略 `include` 或传入空字符串时不限制文件类型；否则 `include` 是一个正向 glob 过滤器，仅含空白的值、逗号分隔列表与否定值会被前置拒绝 |
 
 常规预算不进入面向模型的 schema：需要周边上下文的模型用 `read` 读取匹配文件，需要后续结果的模型遵循返回的 spill locator 检索提示。
@@ -64,7 +64,7 @@ kind: "package-reference"
 | `globMaxResults` | `100` | 一次 `glob` 调用内联展示的最大路径数 |
 | `grepMaxMatches` | `250` | 一次 `grep` 调用内联保留的最大平铺匹配数；后续匹配写入格式化 spill 产物 |
 | `grepMaxLineBytes` | `2000` | 每条匹配行预览的字节上限，保留 UTF-8 边界 |
-| `rawOutputMaxBytes` | `20000000` | 搜索将解析的完整原始 `rg` stdout 上限；更大的原始输出以 `SEARCH_RAW_OUTPUT_OVERFLOW` 失败 |
+| `rawOutputMaxBytes` | `20000000` | 完整原始 `rg` stdout 与恢复搜索根前缀后的 `glob` 输出字节上限；任一超限均以 `SEARCH_RAW_OUTPUT_OVERFLOW` 失败 |
 | `timeoutMs` | `30000` | 附加到两个工具的协作式工具调用预算，通过 `exec.signal` 强制执行 |
 | `graceMs` | `3000` | subprocess seam 在 `timeoutMs` 之外授予的终止升级宽限期 |
 | `stderrMaxBytes` | `65536` | `rg` stderr 的诊断尾部预算 |
