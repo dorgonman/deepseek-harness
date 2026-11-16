@@ -617,6 +617,12 @@ interface LlmResolvedModelInfo extends LlmModelInfo {
   nativeTools?: boolean
   /** Reject non-text input before projecting files or images; omission preserves normal projection. */
   inputProjectionPolicy?: 'reject'
+  /**
+   * Adapter-owned request protocol when the route is not ordinary chat.
+   * Callers that need generated text, such as compaction summarization, must
+   * reject a non-chat protocol instead of accepting its structured readout.
+   */
+  requestProtocol?: 'kinf-decision-v1'
   /** Provider-owned context capacity when known. */
   context?: LlmModelContext
   /** Adapter-configured per-request output cap materialized when callers omit one. */

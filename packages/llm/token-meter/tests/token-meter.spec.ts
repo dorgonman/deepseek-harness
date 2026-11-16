@@ -1,7 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantStreamAccumulator, createAssistantMessage, createUserMessage, createSystemMessage, ToolCallId, createMessage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, TokenUsage, ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, SessionSeq, canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { EpochHeader, SessionEvent, SessionSeq as SessionSeqType } from '@deepseek-ai/dsh-session'
@@ -166,6 +166,9 @@ describe('TokenMeter pricing', () => {
     }))
     expect(estimated).toBeGreaterThan(30)
     expect(service.estimateMessage(textMessage('abcd'))).toBe(9)
+    const tool = { name: 'read', description: 'read a file', parameters: { type: 'object', properties: {} } } as ToolSchema
+    expect(service.estimateTools(undefined)).toBe(0)
+    expect(service.estimateTools([tool])).toBe(Math.ceil(JSON.stringify([tool]).length / 4) + 4)
   })
 
   it('returns a detached deeply immutable empty measurement', () => {

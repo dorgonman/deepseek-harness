@@ -78,7 +78,9 @@ describe('KINF Decision adaptation', () => {
     const ctx = await harness(server.url)
     expect(await ctx.llm.resolveModelInfo('fixture', SELECTOR)).toMatchObject({
       nativeTools: false, inputProjectionPolicy: 'reject', defaultMaxTokens: 1,
+      requestProtocol: 'kinf-decision-v1',
     })
+    expect(await ctx.llm.resolveModelInfo('fixture', 'ordinary')).not.toHaveProperty('requestProtocol')
     const result = await assemble(ctx, options())
     expect(result.finish).toEqual({ kind: 'stop' })
     expect(result.usage).toEqual({ inputTokens: 8, outputTokens: 1, totalTokens: 9 })

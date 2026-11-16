@@ -17,6 +17,7 @@ import {
   estimateContent,
   estimateMessage,
   estimateSystemMessage,
+  estimateToolSchemasTokens,
   estimateToolsTokens,
 } from '../src/estimate.ts'
 
@@ -565,5 +566,14 @@ describe('shared estimator', () => {
     expect(estimateToolsTokens({ config: CONFIG, tools: [] })).toBe(0)
     expect(estimateToolsTokens({ config: CONFIG, tools: TOOLS }))
       .toBe(Math.ceil(JSON.stringify(TOOLS).length / 4) + 4)
+  })
+
+  it('prices replayed raw tool-schema declarations through the request-side estimator', () => {
+    expect(estimateToolSchemasTokens(undefined)).toBe(0)
+    expect(estimateToolSchemasTokens([])).toBe(0)
+    const priced = Math.ceil(JSON.stringify(TOOLS).length / 4) + 4
+    expect(estimateToolSchemasTokens(TOOLS)).toBe(priced)
+    // The envelope helper is the header-bound face of the same estimator.
+    expect(estimateToolsTokens({ config: CONFIG, tools: TOOLS })).toBe(priced)
   })
 })
