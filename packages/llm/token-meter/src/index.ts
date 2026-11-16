@@ -7,7 +7,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-compaction-image-offload/projection'
 import z from '@deepseek-ai/schemastery'
-import type { LlmImageRequestPricing, LlmRuntime, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { LlmImageRequestPricing, LlmRuntime, RequestMessage, TokenUsage, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type {
   EpochHeader,
@@ -33,7 +33,7 @@ import type {
 import { contextBreakdownProjectionDefinition } from './breakdown-projection.ts'
 import { contextPressureProjectionDefinition, tokenUsageProjectionDefinition } from './usage-projection.ts'
 import type { ContextPressureState } from './usage-projection.ts'
-import { estimateMessage, estimateToolsTokens } from './estimate.ts'
+import { estimateMessage, estimateToolSchemasTokens, estimateToolsTokens } from './estimate.ts'
 import { advanceMeasurement, measurementProjectionDefinition } from './measurement-projection.ts'
 import type { MeasurementState } from './measurement-projection.ts'
 import { commitSurfaceTokens, planSurfaceTokens } from './surface-fold.ts'
@@ -216,8 +216,18 @@ export class TokenMeter extends Service {
    * @param message - message to price without mutation.
    * @returns content and role-framing tokens under the fixed service heuristic.
    */
-  estimateMessage(message: Message): number {
+  estimateMessage(message: RequestMessage): number {
     return estimateMessage(message)
+  }
+
+  /**
+   * Heuristically price model-visible tool schemas (instance face of the pure
+   * `estimateToolSchemasTokens` export from `estimate.ts`).
+   * @param tools - tool schemas to price without mutation.
+   * @returns tool-schema tokens under the fixed service heuristic.
+   */
+  estimateTools(tools: readonly ToolSchema[] | undefined): number {
+    return estimateToolSchemasTokens(tools)
   }
 
   /** Resolve one of the two header payloads retained by the rebuildable price cache. */

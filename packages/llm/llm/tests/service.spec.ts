@@ -139,6 +139,7 @@ describe('LlmRuntime', () => {
       'usage-limit-exceeded',
       'out of credits',
       'OpenAI API error (429): You exceeded your current quota, please check your plan and billing details.',
+      '429 {"type":"error","error":{"type":"rate_limit_error","message":"The Token Plan usage limit has been reached. To avoid interruption, please upgrade your plan or buy credits and turn on auto consumption. (2067)"}}',
     ]) expect(isQuotaExceededError(detail)).toBe(true)
     expect(isQuotaExceededError('HTTP 429: rate limit reached')).toBe(false)
     expect(isQuotaExceededError('quota resets in one minute')).toBe(false)
@@ -739,6 +740,7 @@ describe('LlmRuntime', () => {
     [{ provider: 'route', id: 'model', name: '' }, 'empty name'],
     [{ provider: 'route', id: 'model', name: 'Model', description: 1 }, 'non-string description'],
     [{ provider: 'route', id: 'model', name: 'Model', toolUpdate: 'sometimes' }, 'unknown tool update mode'],
+    [{ provider: 'route', id: 'model', name: 'Model', requestProtocol: 'other' }, 'unknown request protocol'],
   ] as const)('rejects invalid exact model metadata (%s: %s)', async (metadata, _label) => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -775,6 +777,31 @@ describe('LlmRuntime', () => {
       toolUpdate: 'in-history',
     })
     expect((await ctx.llm.prepareCall({ provider: 'route', model: 'model' })).toolUpdate).toBe('in-history')
+  })
+
+  it('preserves the adapter-owned request protocol through exact resolution', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new class extends ScriptedAdapter {
+      override resolveModel(): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({
+          provider: 'route', id: 'model', name: 'Model',
+          requestProtocol: 'kinf-decision-v1',
+          nativeTools: false,
+          inputProjectionPolicy: 'reject',
+        })
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+
+    // A summarizer or other text consumer acts on this exact field; losing it
+    // in normalization turns a Decision route into an ordinary chat route.
+    await expect(ctx.llm.resolveModelInfo('route', 'model')).resolves.toEqual({
+      provider: 'route', id: 'model', name: 'Model',
+      requestProtocol: 'kinf-decision-v1',
+      nativeTools: false,
+      inputProjectionPolicy: 'reject',
+    })
   })
 
   it('resolves detached model context independently of advisory catalog membership', async () => {

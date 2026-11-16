@@ -6,7 +6,7 @@
  * @module @deepseek-ai/dsh-token-meter/estimate
  */
 
-import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, RequestMessage, ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { EpochHeader } from '@deepseek-ai/dsh-session'
 
 /** Fixed text-density estimate used until exact tokenization is needed. */
@@ -81,13 +81,23 @@ export function estimateSystemMessage(message: Message): number {
 
 /**
  * Heuristically price one model-visible message.
- * @param message - message to price without mutation.
+ * @param message - message to price without mutation; durable and request-only messages share the density heuristic.
  * @returns content and role-framing tokens under the fixed heuristic; a
  *   system-role message prices as {@link estimateSystemMessage}.
  */
-export function estimateMessage(message: Message): number {
+export function estimateMessage(message: RequestMessage): number {
   if (message.role === 'system') return estimateSystemMessage(message)
   return estimateContent(message.content) + ROLE_OVERHEAD
+}
+
+/**
+ * Price one request's tool-schema declarations.
+ * @param tools - tool schemas sent with the request, or undefined before any are declared.
+ * @returns heuristic tool-schema tokens; 0 when absent or empty.
+ */
+export function estimateToolSchemasTokens(tools: readonly ToolSchema[] | undefined): number {
+  if (tools === undefined || tools.length === 0) return 0
+  return Math.ceil(JSON.stringify(tools).length / CHARS_PER_TOKEN) + BLOCK_OVERHEAD
 }
 
 /**
@@ -97,6 +107,5 @@ export function estimateMessage(message: Message): number {
  * @returns heuristic tool-schema tokens; 0 when absent or empty.
  */
 export function estimateToolsTokens(header: EpochHeader | undefined): number {
-  if (header?.tools === undefined || header.tools.length === 0) return 0
-  return Math.ceil(JSON.stringify(header.tools).length / CHARS_PER_TOKEN) + BLOCK_OVERHEAD
+  return estimateToolSchemasTokens(header?.tools)
 }

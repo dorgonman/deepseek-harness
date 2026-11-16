@@ -909,6 +909,10 @@ describe('mapStopReason / mapUsage', () => {
       stopReason: 'error',
       errorMessage: 'OpenAI API error (429): You exceeded your current quota, please check your plan and billing details.',
     }))).toMatchObject({ kind: 'error', failure: { code: 'QUOTA' } })
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '429 {"type":"error","error":{"type":"rate_limit_error","message":"The Token Plan usage limit has been reached. To avoid interruption, please upgrade your plan or buy credits and turn on auto consumption. (2067)"}}',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'QUOTA' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 500: backend down' })))
       .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'provider timed out' })))
@@ -960,6 +964,7 @@ describe('mapStopReason / mapUsage', () => {
     '408 {"error":{"message":"The request was cancelled after native execution quiesced.","type":"invalid_request_error","code":"request_timeout"}}',
     '{"error":{"message":"The request was cancelled after native execution quiesced.","type":"invalid_request_error","code":"request_timeout"}}',
     'The request timed out after native execution quiesced.',
+    '{"error":{"message":"The request timed out without native progress; native execution quiesced.","type":"invalid_request_error","code":"request_progress_timeout"}}',
   ])('maps explicit provider request timeout %j', (errorMessage) => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
       .toEqual({ kind: 'error', failure: { message: errorMessage, code: 'TIMEOUT' } })
