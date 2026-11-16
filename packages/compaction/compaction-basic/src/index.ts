@@ -10,7 +10,7 @@ import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compac
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { EpochHeader, Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, LlmError } from '@deepseek-ai/dsh-llm'
-import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import type { LlmCallConfig, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
@@ -19,6 +19,7 @@ import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import {
   resolveCompactSpec,
   resolveConfig,
+  resolveSummaryMaxTokens,
   resolveTargetPolicy,
   TargetPressureConfigError,
 } from './config.ts'
@@ -77,12 +78,27 @@ function conversationTarget(
   return { provider: agent.options.provider, model: agent.options.model }
 }
 
+/** Per-failure phase tag for the model-switch receipt, without changing error identity. */
+const compactionStages = new WeakMap<object, string>()
+
+/** Attach a receipt stage to a thrown error and return it unchanged for rethrowing. */
+function tagStage(error: unknown, stage: string): unknown {
+  if (error !== null && typeof error === 'object') compactionStages.set(error, stage)
+  return error
+}
+
+/** Read the receipt stage tagged on a thrown error. */
+function stageOf(error: unknown): string | undefined {
+  return error !== null && typeof error === 'object' ? compactionStages.get(error) : undefined
+}
+
 const thresholdRatioSchema = z.number()
 const headroomTokensSchema = z.number().step(1).min(0)
 const retainRatioSchema = z.number()
 const retainTokensSchema = z.number().step(1).min(0)
 const summarizationProviderSchema = z.string()
 const summarizationModelSchema = z.string()
+const summarizationFallbackSchema = z.union([z.const('latest-route'), z.const('error')])
 const maxTokensSchema = z.number().step(1).min(1)
 const compactionRetriesSchema = z.number().step(1).min(0)
 const maxOverflowRetriesSchema = z.number().step(1).min(0)
@@ -96,6 +112,7 @@ const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
   retainTokens: retainTokensSchema,
   summarizationProvider: summarizationProviderSchema,
   summarizationModel: summarizationModelSchema,
+  summarizationFallback: summarizationFallbackSchema,
   maxTokens: maxTokensSchema,
   compactionRetries: compactionRetriesSchema,
   maxOverflowRetries: maxOverflowRetriesSchema,
@@ -119,6 +136,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     retainTokens: retainTokensSchema,
     summarizationProvider: summarizationProviderSchema,
     summarizationModel: summarizationModelSchema,
+    summarizationFallback: summarizationFallbackSchema,
     maxTokens: maxTokensSchema,
     compactionRetries: compactionRetriesSchema,
     maxOverflowRetries: maxOverflowRetriesSchema,
@@ -192,9 +210,27 @@ export class BasicCompactionEngine extends CompactionEngine {
       } catch (error: unknown) {
         signal.throwIfAborted()
         const message = error instanceof Error ? error.message : String(error)
+        // A switch receipt names both routes and the summarizer that actually
+        // governed the failed step, so an operator can tell a destination
+        // capacity problem from a summarizer service or policy problem.
+        const from = `${previous.config.provider}/${previous.config.model}`
+        const to = `${config.provider}/${config.model}`
+        const summaryPolicy = resolveTargetPolicy(this.config, previous.config)
+        const summarizer = summaryPolicy.summarizationProvider === ''
+          ? summaryPolicy.summarizationFallback === 'error'
+            ? 'unconfigured (fallback disabled)'
+            : 'latest routed request'
+          : `${summaryPolicy.summarizationProvider}/${summaryPolicy.summarizationModel}`
+        const code: unknown = (error as { code?: unknown }).code
+        const stage = error instanceof TargetPressureConfigError
+          ? 'destination capacity preflight'
+          : typeof code === 'string' && code.startsWith('SUMMARY_')
+            ? 'summarizer preflight'
+            : stageOf(error) ?? 'summary generation or apply'
         throw new LlmError(
-          `Cannot switch to ${config.provider}/${config.model}: context compaction failed: ${message}. `
-          + 'The previous request model is preserved; retry or select a model with a larger context window.',
+          `Cannot switch from ${from} to ${to}: compaction failed during ${stage} `
+          + `(summarizer ${summarizer}): ${message}. `
+          + 'The previous request model is preserved; retry or choose a different model.',
           'MODEL_SWITCH_COMPACTION_FAILED',
           { cause: error },
         )
@@ -231,7 +267,6 @@ export class BasicCompactionEngine extends CompactionEngine {
         // A model-free prune can land before later summary work fails. That
         // durable reduction is sufficient retry proof; do not discard it just
         // because the optional second phase threw. Cancellation still wins.
-        // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while recovery is awaited.
         if (!signal.aborted && agent.session.surface.replaceGeneration > generation) {
           ctx.logger.warn(
             `context-overflow compaction failed after durable surface progress: ${message}; `
@@ -241,14 +276,12 @@ export class BasicCompactionEngine extends CompactionEngine {
           return { kind: 'retry' }
         }
         ctx.logger.warn(
-          // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while recovery is awaited.
           `context-overflow compaction failed: ${message}; ${signal.aborted
             ? 'cancellation prevents retry'
             : 'preserving the original request error'}`,
         )
         return next()
       }
-      // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while compaction is awaited.
       if (signal.aborted
         || agent.session.surface.replaceGeneration <= generation) return next()
       if (result !== null) logResult(result, 'context overflow recovery')
@@ -273,10 +306,20 @@ export class BasicCompactionEngine extends CompactionEngine {
     signal?: AbortSignal,
   ): Promise<SummaryResult> {
     const target = conversationTarget(agent)
-    const config = target === undefined
-      ? this.config
-      : resolveTargetPolicy(this.config, target)
-    return summarizeWithLlm(this.ctx, config, input, agent, signal)
+    if (target === undefined) return summarizeWithLlm(this.ctx, this.config, input, agent, signal)
+    const policy = resolveTargetPolicy(this.config, target)
+    if (policy.adaptiveHeadroom !== 'pressure-and-summary') {
+      return summarizeWithLlm(this.ctx, policy, input, agent, signal)
+    }
+    const info = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal).catch(() => {
+      // The stream owns route redirection and dispatch failures; sizing is optional.
+      signal?.throwIfAborted()
+      return undefined
+    })
+    if (info?.context === undefined) return summarizeWithLlm(this.ctx, policy, input, agent, signal)
+    const reserve = agent.session.requestHeader()?.config.maxTokens ?? info.defaultMaxTokens ?? 0
+    const maxTokens = resolveSummaryMaxTokens(policy, info.context.contextWindow - reserve)
+    return summarizeWithLlm(this.ctx, { ...policy, maxTokens }, input, agent, signal)
   }
 
   /**
@@ -324,8 +367,17 @@ export class BasicCompactionEngine extends CompactionEngine {
     const meter = this.ctx.tokenMeter
     let measurement = meter.measure(agent.session, header)
     const prune = this.ctx.get('toolResultPruner')
-    const info = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)
-    assertNoActiveCompaction(agent.session, 'automatic pressure compaction')
+    let info: LlmResolvedModelInfo
+    try {
+      info = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)
+    } catch (error: unknown) {
+      throw tagStage(error, 'destination model lookup')
+    }
+    try {
+      assertNoActiveCompaction(agent.session, 'automatic pressure compaction')
+    } catch (error: unknown) {
+      throw tagStage(error, 'active compaction conflict')
+    }
     const targetKey = `${target.provider}/${target.model}`
     if (info.context === undefined) {
       throw new TargetPressureConfigError(

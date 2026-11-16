@@ -30,6 +30,7 @@ const POLICY_CONFIG_KEYS = [
   'retainTokens',
   'summarizationProvider',
   'summarizationModel',
+  'summarizationFallback',
   'maxTokens',
   'compactionRetries',
   'maxOverflowRetries',
@@ -98,9 +99,13 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
   return deepFreeze({
     thresholdRatio,
     headroomTokens,
+    ...config.headroomTokens === undefined ? {
+      adaptiveHeadroom: config.maxTokens === undefined ? 'pressure-and-summary' : 'pressure',
+    } : {},
     ...retention,
     summarizationProvider: config.summarizationProvider ?? '',
     summarizationModel: config.summarizationModel ?? '',
+    summarizationFallback: config.summarizationFallback ?? 'latest-route',
     maxTokens,
     compactionRetries: config.compactionRetries ?? 1,
     maxOverflowRetries: config.maxOverflowRetries ?? 1,
@@ -125,13 +130,20 @@ export function resolveTargetPolicy(
   const inheritedRetention: ResolvedRetention = config.retainTokens === undefined
     ? { retainRatio: config.retainRatio }
     : { retainTokens: config.retainTokens }
+  const summarizationProvider = override?.summarizationProvider ?? config.summarizationProvider
   return deepFreeze({
     target: { provider: target.provider, model: target.model },
     thresholdRatio: override?.thresholdRatio ?? config.thresholdRatio,
     headroomTokens: override?.headroomTokens ?? config.headroomTokens,
+    ...override?.headroomTokens !== undefined || config.adaptiveHeadroom === undefined ? {} : {
+      adaptiveHeadroom: override?.maxTokens !== undefined || summarizationProvider.length > 0
+        ? 'pressure'
+        : config.adaptiveHeadroom,
+    },
     ...resolveRetention(override ?? {}, inheritedRetention),
-    summarizationProvider: override?.summarizationProvider ?? config.summarizationProvider,
+    summarizationProvider,
     summarizationModel: override?.summarizationModel ?? config.summarizationModel,
+    summarizationFallback: override?.summarizationFallback ?? config.summarizationFallback,
     maxTokens: override?.maxTokens ?? config.maxTokens,
     compactionRetries: override?.compactionRetries ?? config.compactionRetries,
     maxOverflowRetries: override?.maxOverflowRetries ?? config.maxOverflowRetries,
@@ -178,12 +190,14 @@ export function resolveCompactSpec(
       + "the adapter model's contextWindow above the effective request maxTokens",
     )
   }
-  const pressureBudgetTokens = messageBudgetTokens - policy.headroomTokens
+  const retainTokens = resolveRetainTokens(policy, messageBudgetTokens)
+  const headroomTokens = resolveHeadroomTokens(policy, messageBudgetTokens, retainTokens)
+  const pressureBudgetTokens = messageBudgetTokens - headroomTokens
   if (pressureBudgetTokens <= 0) {
     throw new TargetPressureConfigError(
       targetKey,
       `compaction-basic: ${targetKey} reserves ${reservedCompletionTokens} completion tokens `
-      + `and ${policy.headroomTokens} headroom tokens of its ${contextWindow}-token context `
+      + `and ${headroomTokens} headroom tokens of its ${contextWindow}-token context `
       + 'window, leaving no pressure budget; reduce the effective request maxTokens or '
       + 'compaction headroomTokens, or configure a larger adapter model contextWindow',
     )
@@ -192,9 +206,6 @@ export function resolveCompactSpec(
     contextWindow * policy.thresholdRatio,
     pressureBudgetTokens,
   ))
-  const retainTokens = policy.retainTokens === undefined
-    ? Math.floor(messageBudgetTokens * policy.retainRatio)
-    : policy.retainTokens
   if (retainTokens >= thresholdTokens) {
     throw new TargetPressureConfigError(
       targetKey,
@@ -210,10 +221,31 @@ export function resolveCompactSpec(
     retainTokens,
     summarizationProvider: policy.summarizationProvider,
     summarizationModel: policy.summarizationModel,
-    maxTokens: policy.maxTokens,
+    summarizationFallback: policy.summarizationFallback,
+    maxTokens: policy.adaptiveHeadroom === 'pressure-and-summary' ? Math.max(1, headroomTokens) : policy.maxTokens,
     compactionRetries: policy.compactionRetries,
     maxOverflowRetries: policy.maxOverflowRetries,
   })
+}
+
+/** Reduce an omitted summary cap on the conversation route using its actual message budget. */
+export function resolveSummaryMaxTokens(policy: ResolvedTargetPolicy, messageBudgetTokens: number): number {
+  if (messageBudgetTokens <= 0 || policy.adaptiveHeadroom !== 'pressure-and-summary') return policy.maxTokens
+  const retainTokens = resolveRetainTokens(policy, messageBudgetTokens)
+  return Math.max(1, resolveHeadroomTokens(policy, messageBudgetTokens, retainTokens))
+}
+
+/** Retained history is priced against the message budget before headroom. */
+function resolveRetainTokens(policy: ResolvedTargetPolicy, messageBudgetTokens: number): number {
+  return policy.retainTokens ?? Math.floor(messageBudgetTokens * policy.retainRatio)
+}
+
+/** Fit omitted headroom when the default would consume the pressure budget. */
+function resolveHeadroomTokens(policy: ResolvedTargetPolicy, messageBudgetTokens: number, retainTokens: number): number {
+  if (policy.adaptiveHeadroom !== undefined && messageBudgetTokens - policy.headroomTokens <= retainTokens) {
+    return Math.floor(messageBudgetTokens / 8)
+  }
+  return policy.headroomTokens
 }
 
 /** Choose an explicit retention form or inherit the already-resolved fallback. */
@@ -301,6 +333,10 @@ function validatePolicy(
   }
 
   validateSummarizationPair(config, name)
+  const fallback = config.summarizationFallback
+  if (fallback !== undefined && fallback !== 'latest-route' && fallback !== 'error') {
+    throw new Error(`${name}.summarizationFallback must be "latest-route" or "error"`)
+  }
 }
 
 /** Require one scope to omit, clear, or replace the summarization target as a pair. */

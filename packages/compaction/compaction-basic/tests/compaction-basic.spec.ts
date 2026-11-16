@@ -4,7 +4,7 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
-import { frameSummary } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
+import { frameSummary, summarizeWithLlm } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import type { SummarizationInput, SummaryResult } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
 import {
@@ -318,6 +318,7 @@ describe('compact configuration and defaults', () => {
       retainRatio: 0.16,
       summarizationProvider: '',
       summarizationModel: '',
+      summarizationFallback: 'latest-route',
       maxTokens: 65_536,
       compactionRetries: 1,
       maxOverflowRetries: 1,
@@ -539,6 +540,8 @@ describe('compact configuration and defaults', () => {
       [{ summarizationModel: MODEL }, /must be set together/],
       [{ summarizationProvider: '' }, /must be set together/],
       [{ summarizationModel: '' }, /must be set together/],
+      [{ summarizationFallback: 'fallback' }, /summarizationFallback must be "latest-route" or "error"/],
+      [{ modelPolicies: [{ provider: MODEL, model: MODEL, summarizationFallback: 'fallback' }] }, /summarizationFallback must be "latest-route" or "error"/],
       [{ thresholdRatio: 0 }, /number in \(0, 1\]/],
       [{ thresholdRatio: 1.1 }, /number in \(0, 1\]/],
       [{ retainRatio: 0.9 }, /retainRatio \(0.9\) must be less than the resolved thresholdRatio \(0.8\)/],
@@ -1581,7 +1584,10 @@ describe('default one-shot summarizer', () => {
     const resolve = vi.spyOn(ctx.llm, 'resolveModelInfo')
     const output = await compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL))
 
-    expect(resolve).not.toHaveBeenCalled()
+    // The unavailable historical route is never resolved; only the configured
+    // alternate is verified before it writes the summary.
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(resolve).toHaveBeenCalledWith('summary', 'summary', undefined)
     expect(adapter.lastOptions).toMatchObject({ provider: 'summary', model: 'summary', maxTokens: 65_536 })
     expect(output.summary).toEqual([{ type: 'text', text: 'summary' }])
   })
@@ -1910,6 +1916,32 @@ describe('model-switch pressure', () => {
     })
   })
 
+  it('reports both routes, the effective summarizer and the stage on a failed switch', async () => {
+    const { ctx } = harness({}, {
+      kind: 'error', failure: { code: 'AUTH', message: 'summary credentials expired' },
+    })
+    const switching = request(ctx, conversation(4), { provider: 'small', model: 'small' })
+    await expect(switching).rejects.toThrow(
+      /Cannot switch from test-model\/test-model to small\/small: compaction failed during summary generation or apply/,
+    )
+    await expect(switching).rejects.toThrow(/summarizer latest routed request\).*summary credentials expired/)
+  })
+
+  it('labels a fail-closed missing summarizer as a summarizer preflight', async () => {
+    const { ctx } = harness({ summarizationFallback: 'error' })
+    const switching = request(ctx, conversation(4), { provider: 'small', model: 'small' })
+    await expect(switching).rejects.toThrow(
+      /compaction failed during summarizer preflight \(summarizer unconfigured \(fallback disabled\)\)/,
+    )
+  })
+
+  it('labels a destination model lookup failure as its own stage', async () => {
+    const { ctx } = harness()
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockRejectedValueOnce(new Error('no such route'))
+    const switching = request(ctx, conversation(4), { provider: 'small', model: 'small' })
+    await expect(switching).rejects.toThrow(/compaction failed during destination model lookup/)
+  })
+
   it('rejects an oversized indivisible tail instead of accepting the switch', async () => {
     const { ctx } = harness()
     const session = conversation(1, 'large '.repeat(800))
@@ -1961,6 +1993,90 @@ describe('model-switch pressure', () => {
     await fiber.dispose()
     const selected = { provider: 'missing', model: 'missing' }
     await expect(request(ctx, conversation(4), selected)).resolves.toEqual(selected)
+  })
+})
+
+describe('summary target preflight', () => {
+  class InfoAdapter extends LlmAdapter {
+    streamCalls = 0
+
+    constructor(private readonly info: LlmResolvedModelInfo) {
+      super()
+    }
+
+    override resolveModel(): Promise<LlmResolvedModelInfo> {
+      return Promise.resolve(this.info)
+    }
+
+    override async * stream(): AsyncIterable<StreamChunk> {
+      this.streamCalls += 1
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+
+  function probe(info: LlmResolvedModelInfo): { ctx: Context; adapter: InfoAdapter } {
+    const ctx = createContext()
+    const adapter = new InfoAdapter(info)
+    ctx.llm.registerAdapter(['probe'], adapter)
+    return { ctx, adapter }
+  }
+
+  const CONFIG = {
+    summarizationProvider: 'probe',
+    summarizationModel: 'probe',
+    summarizationFallback: 'error' as const,
+    maxTokens: 100,
+  }
+
+  it('fails an empty binding explicitly when fallback is disabled', async () => {
+    const { ctx, adapter } = probe({ provider: 'probe', id: 'probe', name: 'probe' })
+    await expect(summarizeWithLlm(
+      ctx,
+      { ...CONFIG, summarizationProvider: '', summarizationModel: '' },
+      promptInput('history'),
+      agent(conversation(1), MODEL),
+      SIGNAL,
+    )).rejects.toMatchObject({ code: 'SUMMARY_TARGET_UNCONFIGURED' })
+    expect(adapter.streamCalls).toBe(0)
+  })
+
+  it('rejects a non-chat summarization protocol before streaming', async () => {
+    const { ctx, adapter } = probe({
+      provider: 'probe',
+      id: 'probe',
+      name: 'probe',
+      requestProtocol: 'kinf-decision-v1',
+      context: { contextWindow: 262_144 },
+    })
+    await expect(summarizeWithLlm(
+      ctx, CONFIG, promptInput('history'), agent(conversation(1), MODEL), SIGNAL,
+    )).rejects.toMatchObject({ code: 'SUMMARY_TARGET_NOT_CHAT' })
+    expect(adapter.streamCalls).toBe(0)
+  })
+
+  it('rejects a replayed request that cannot fit the summarizer window', async () => {
+    const { ctx, adapter } = probe({
+      provider: 'probe',
+      id: 'probe',
+      name: 'probe',
+      context: { contextWindow: 100 },
+    })
+    const input = promptInput('x'.repeat(2_000))
+    const summary = summarizeWithLlm(
+      ctx, CONFIG, input, agent(conversation(1), MODEL), SIGNAL,
+    )
+    await expect(summary).rejects.toMatchObject({ code: 'SUMMARY_CAPACITY_EXCEEDED' })
+    await expect(summary).rejects.toThrow(/estimated \d+ input .* exceed/)
+    expect(adapter.streamCalls).toBe(0)
+  })
+
+  it('fails closed when the summarizer protocol cannot be verified', async () => {
+    const { ctx, adapter } = probe({ provider: 'probe', id: 'probe', name: 'probe' })
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockRejectedValueOnce(new Error('metadata unavailable'))
+    await expect(summarizeWithLlm(
+      ctx, CONFIG, promptInput('history'), agent(conversation(1), MODEL), SIGNAL,
+    )).rejects.toMatchObject({ code: 'SUMMARY_TARGET_UNVERIFIED' })
+    expect(adapter.streamCalls).toBe(0)
   })
 })
 

@@ -209,6 +209,35 @@ Types: [CommandId](commands.md) · [SessionSeq](session.md)
 
 Source: [`packages/compaction/compaction/src/index.ts`](../../packages/compaction/compaction/src/index.ts)
 
+<a id="ctxdecisionrelevance--decisionrelevancefilter"></a>
+
+### `ctx.decisionRelevance` — `DecisionRelevanceFilter`
+
+Bounded background relevance filter.
+
+The filter never selects or mutates the conversation model: it resolves its own explicit Decision route and fails open on every uncertainty, error or cancellation, so a background judgment can only ever remove content that was positively judged irrelevant.
+
+```ts cordis-catalog
+/**
+ * Shape one outbound request by eliding tool results judged irrelevant.
+ *
+ * Returns the original list untouched when the feature is inactive, when no
+ * eligible candidate exists, when the session is not live, or when every
+ * evaluation failed open. Message identity is preserved for every retained
+ * message.
+ * @param messages - the resolved outbound message list.
+ * @param sessionId - the session identity the loop stamped on the request.
+ * @param conversation - the conversation route, recorded with the evidence.
+ * @param signal - caller cancellation, fused with each evaluation deadline.
+ * @returns the projected list and the bounded judgments recorded.
+ */
+async project( messages: readonly RequestMessage[], sessionId: string, conversation: { provider: string; model: string }, signal: AbortSignal | undefined, ): Promise<{ messages: readonly RequestMessage[] } & ProjectionResult>
+```
+
+Types: [RequestMessage](llm-streaming.md)
+
+Source: [`packages/context/decision-relevance/src/index.ts`](../../packages/context/decision-relevance/src/index.ts)
+
 <a id="ctxtoolresultpruner--toolresultpruner"></a>
 
 ### `ctx.toolResultPruner` — `ToolResultPruner`

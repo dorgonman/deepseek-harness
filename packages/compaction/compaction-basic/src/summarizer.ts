@@ -7,14 +7,17 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { contentHasImage, BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
+// Type-only: makes the token meter service available to `ctx.get()`.
+import type {} from '@deepseek-ai/dsh-token-meter'
 import type {
-  ContentBlock, FinishReason, GenerateOptions, Message, RequestMessage, TokenUsage, ToolSchema,
+  ContentBlock, FinishReason, GenerateOptions, LlmResolvedModelInfo, Message, RequestMessage, TokenUsage, ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
 interface SummaryConfig {
   readonly summarizationProvider: string
   readonly summarizationModel: string
+  readonly summarizationFallback: 'latest-route' | 'error'
   readonly maxTokens: number
 }
 
@@ -135,6 +138,16 @@ export async function summarizeWithLlm(
     ? { provider: agent.options.provider, model: agent.options.model }
     : undefined
   const target = configured ?? latest ?? agentTarget
+  if (configured === undefined && config.summarizationFallback === 'error') {
+    const candidate = latest ?? agentTarget
+    const source = latest === undefined ? 'the Agent target' : 'the last routed request'
+    throw new LlmError(
+      'compaction: no configured summarization target and fallback is disabled'
+      + (candidate === undefined ? '' : ` (refusing ${source} ${candidate.provider}/${candidate.model})`)
+      + '; set both summarization fields on the compaction policy',
+      'SUMMARY_TARGET_UNCONFIGURED',
+    )
+  }
   if (target === undefined) {
     throw new Error(
       'no provider/model available for summarization: set both BasicCompactionConfig summarization fields, route one request, or set both AgentOptions fields',
@@ -160,6 +173,51 @@ export async function summarizeWithLlm(
     purpose: 'compaction',
     ...signal === undefined ? {} : { signal },
   }
+
+  // The summarizer is an ordinary text-generating Chat deployment. Verify the
+  // exact route's protocol and capacity before spending a provider call, so an
+  // incompatible or oversized summary fails with the summarizer named instead
+  // of surfacing as a generic provider error or an accepted structured readout.
+  // Under the fail-closed policy an unverifiable route is rejected; without
+  // that policy, an adapter that exposes no exact metadata keeps the upstream
+  // best-effort behavior.
+  let info: LlmResolvedModelInfo | undefined
+  try {
+    info = await ctx.llm.resolveModelInfo(target.provider, target.model, signal)
+  } catch (error: unknown) {
+    signal?.throwIfAborted()
+    if (config.summarizationFallback === 'error') {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new LlmError(
+        `compaction: cannot verify summarizer ${target.provider}/${target.model}: ${message}`,
+        'SUMMARY_TARGET_UNVERIFIED',
+        { cause: error },
+      )
+    }
+    info = undefined
+  }
+  if (info?.requestProtocol !== undefined) {
+    throw new LlmError(
+      `compaction: summarizer ${target.provider}/${target.model} uses the `
+      + `${info.requestProtocol} request protocol, not ordinary chat text generation`,
+      'SUMMARY_TARGET_NOT_CHAT',
+    )
+  }
+  const meter = ctx.get('tokenMeter')
+  if (info?.context !== undefined && meter !== undefined) {
+    const inputTokens = messages.reduce((total, message) => total + meter.estimateMessage(message), 0)
+      + meter.estimateTools(input.tools)
+    const required = inputTokens + config.maxTokens
+    if (required > info.context.contextWindow) {
+      throw new LlmError(
+        `compaction: summarizer ${target.provider}/${target.model} estimated ${inputTokens} input + `
+        + `${config.maxTokens} output tokens exceed its ${info.context.contextWindow}-token context window; `
+        + 'increase the retained tail, lower maxTokens, or use a larger-context summarizer',
+        'SUMMARY_CAPACITY_EXCEEDED',
+      )
+    }
+  }
+
   for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)
   const error = finishError(assembler.finish)
   if (error !== undefined) throw error
