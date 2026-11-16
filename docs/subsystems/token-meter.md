@@ -142,10 +142,18 @@ measure(session: Session, requestHeader?: EpochHeader): TokenMeasurement
  * @param message - message to price without mutation.
  * @returns content and role-framing tokens under the fixed service heuristic.
  */
-estimateMessage(message: Message): number
+estimateMessage(message: RequestMessage): number
+
+/**
+ * Heuristically price model-visible tool schemas (instance face of the pure
+ * `estimateToolSchemasTokens` export from `estimate.ts`).
+ * @param tools - tool schemas to price without mutation.
+ * @returns tool-schema tokens under the fixed service heuristic.
+ */
+estimateTools(tools: readonly ToolSchema[] | undefined): number
 ```
 
-Types: [EpochHeader](session.md) · [Message](llm-streaming.md) · [Session](session.md)
+Types: [EpochHeader](session.md) · [RequestMessage](llm-streaming.md) · [Session](session.md) · [ToolSchema](tools.md)
 
 Source: [`packages/llm/token-meter/src/index.ts`](../../packages/llm/token-meter/src/index.ts)
 <!-- END GENERATED cordis-surface -->

@@ -123,6 +123,8 @@ export interface Config {
    * omission defaults to {@link DEFAULT_MAX_PARALLEL_TOOL_CALLS}.
    */
   maxParallelToolCalls: Volatile<number>
+  /** Stop attempts that emit sustained exact periodic text or reasoning. Defaults to false. */
+  stopOnRepeatedOutput: Volatile<boolean>
   /** Agents created or resumed at plugin startup; a resumed agent records its configured route as the Session's model selection. */
   agents: (AgentOptions & {
     /** Stable config label used in logs and as the fresh combined-id prefix. */
@@ -783,7 +785,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-compaction-basic`
 
 - `inject`: `llm` · `tokenMeter` · `sessions`
-- `source`: [`packages/compaction/compaction-basic/src/types.ts:46`](../packages/compaction/compaction-basic/src/types.ts)
+- `source`: [`packages/compaction/compaction-basic/src/types.ts:57`](../packages/compaction/compaction-basic/src/types.ts)
 
 ```ts config-catalog
 /** Basic compaction configuration with an optional exact-target policy table. */
@@ -798,7 +800,11 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
 export interface CompactionPolicyConfig {
   /** Window fraction for pressure; capped at context window minus reserved output and `headroomTokens`. Defaults to `0.8`. */
   thresholdRatio?: number
-  /** Additional pressure headroom beyond the routed output reservation. Non-negative integer; defaults to `65536`. */
+  /**
+   * Additional pressure headroom beyond the routed output reservation.
+   * Non-negative integer; defaults to `65536` where it fits or one eighth of
+   * the remaining message budget.
+   */
   headroomTokens?: number
   /** Recent context retained as a fraction of context window minus reserved output tokens. Defaults to `0.16`. */
   retainRatio?: number
@@ -808,6 +814,13 @@ export interface CompactionPolicyConfig {
   summarizationProvider?: string
   /** Summary model; set together with `summarizationProvider`, or inherit the conversation target. */
   summarizationModel?: string
+  /**
+   * Behavior when neither summarization field is set. `latest-route` keeps the
+   * upstream fallback to the last routed request and then the Agent options;
+   * `error` fails the summary with an explicit cause instead of contacting a
+   * possibly exhausted conversation provider. Defaults to `latest-route`.
+   */
+  summarizationFallback?: 'latest-route' | 'error'
   /** Provider generation cap for summarization. Defaults to the resolved `headroomTokens`; an explicit cap must be positive. */
   maxTokens?: number
   /** Extra attempts after the first compaction when pressure remains above threshold. Defaults to `1`. */
@@ -846,6 +859,47 @@ export interface ToolResultPruneConfig {
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-compaction-tool-result-pruner -->
+
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-context-decision-relevance -->
+<a id="deepseek-aidsh-context-decision-relevance"></a>
+
+## `@deepseek-ai/dsh-context-decision-relevance`
+
+- `inject`: `llm` · `sessions`
+- `source`: [`packages/context/decision-relevance/src/types.ts:47`](../packages/context/decision-relevance/src/types.ts)
+
+```ts config-catalog
+/**
+ * Sparse relevance-filter configuration as a composition declares it.
+ *
+ * Every field is optional and falls back to {@link DEFAULTS}; `provider` and
+ * `model` must be configured together, and the feature stays inactive unless
+ * `mode` is `on` **and** both route fields are present.
+ */
+export interface DecisionRelevanceConfig {
+  /** `off` disables the feature; `on` applies validated selections to the outbound projection. */
+  readonly mode?: 'off' | 'on'
+  /** Canonical provider of the Decision route. */
+  readonly provider?: string
+  /** Canonical model of the Decision route. */
+  readonly model?: string
+  /** Minimum relevance score required to retain a tool result. */
+  readonly retainThreshold?: number
+  /** Half-width of the symmetric uncertainty band around `retainThreshold`. */
+  readonly uncertaintyMargin?: number
+  /** Maximum eligible tool results evaluated per request. */
+  readonly maxCandidatesPerRequest?: number
+  /** Minimum text size in Unicode code points before a tool result is eligible. */
+  readonly minCandidateChars?: number
+  /** Maximum text size in Unicode code points sent to the Decision model. */
+  readonly maxInputChars?: number
+  /** End-to-end deadline for one Decision evaluation in milliseconds. */
+  readonly timeoutMs?: number
+  /** Replacement text for an elided tool-result body. */
+  readonly elisionText?: string
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-context-decision-relevance -->
 
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-cordis-host-runner -->
 <a id="deepseek-aidsh-cordis-host-runner"></a>
@@ -3023,6 +3077,15 @@ export interface Config {
   /** Tool-name patterns transparent to the chain (neither count nor reset). */
   exclude?: string[]
   /**
+   * Maximum consecutive identical repeats tolerated before the chain is
+   * treated as a stuck loop (default 8). At that count the guard blocks the
+   * call — the same `PostToolDecision` blocking a `tools/pre-execute` listener
+   * uses — instead of only reminding, because past the highest reminder
+   * threshold a chain goes silent and the loop runs unbounded. `0` keeps the
+   * guard advisory-only.
+   */
+  blockAfter?: number
+  /**
    * Maximum characters of canonical arguments quoted in the DETAILED reminder
    * (default 500). Large payloads (a `write` body, a long command) would
    * otherwise ride into the next request unbounded — precisely in a loop
@@ -4304,7 +4367,10 @@ export interface Config {
   grepMaxLineBytes?: number
   /** Max bytes of one search's serialized `presentationMeta`; trailing groups/paths drop past it so the persisted card stays bounded. */
   searchMetaMaxBytes?: number
-  /** Max complete raw `rg` stdout bytes a search will parse; larger raw output fails with `SEARCH_RAW_OUTPUT_OVERFLOW`. */
+  /**
+   * Max bytes of complete raw `rg` stdout or glob output with restored root prefixes;
+   * larger output fails with `SEARCH_RAW_OUTPUT_OVERFLOW`.
+   */
   rawOutputMaxBytes?: number
   /** Terminate-escalation grace (ms), handed to the subprocess seam and bounded by `MAX_TIMER_DELAY_MS`. */
   graceMs?: number

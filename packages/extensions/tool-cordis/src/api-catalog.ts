@@ -977,6 +977,24 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'decisionRelevance',
+    summary: 'Bounded background relevance filter.',
+    description: 'Bounded background relevance filter.\n\nThe filter never selects or mutates the conversation model: it resolves its own explicit Decision route and fails open on every uncertainty, error or cancellation, so a background judgment can only ever remove content that was positively judged irrelevant.',
+    methods: [
+      {
+        signature: 'readonly config: ResolvedConfig',
+        description: 'Resolved and immutable execution controls.',
+        parameters: [],
+      },
+      {
+        signature: 'async project( messages: readonly RequestMessage[], sessionId: string, conversation: { provider: string; model: string }, signal: AbortSignal | undefined, ): Promise<{ messages: readonly RequestMessage[] } & ProjectionResult>',
+        description: 'Shape one outbound request by eliding tool results judged irrelevant.\n\nReturns the original list untouched when the feature is inactive, when no eligible candidate exists, when the session is not live, or when every evaluation failed open. Message identity is preserved for every retained message.',
+        parameters: [{ name: 'messages', description: 'the resolved outbound message list.' }, { name: 'sessionId', description: 'the session identity the loop stamped on the request.' }, { name: 'conversation', description: 'the conversation route, recorded with the evidence.' }, { name: 'signal', description: 'caller cancellation, fused with each evaluation deadline.' }],
+        returns: 'the projected list and the bounded judgments recorded.',
+      },
+    ],
+  },
+  {
     key: 'deepseekAccount',
     summary: 'Account login, credentials, and client-safe Remote operations.',
     description: 'Account login, credentials, and client-safe Remote operations.',
@@ -4285,10 +4303,16 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a detached deeply immutable pressure and surface measurement.',
       },
       {
-        signature: 'estimateMessage(message: Message): number',
+        signature: 'estimateMessage(message: RequestMessage): number',
         description: 'Heuristically price one model-visible message (instance face of the pure `estimateMessage` export from `estimate.ts`).',
         parameters: [{ name: 'message', description: 'message to price without mutation.' }],
         returns: 'content and role-framing tokens under the fixed service heuristic.',
+      },
+      {
+        signature: 'estimateTools(tools: readonly ToolSchema[] | undefined): number',
+        description: 'Heuristically price model-visible tool schemas (instance face of the pure `estimateToolSchemasTokens` export from `estimate.ts`).',
+        parameters: [{ name: 'tools', description: 'tool schemas to price without mutation.' }],
+        returns: 'tool-schema tokens under the fixed service heuristic.',
       },
     ],
   },
@@ -7466,7 +7490,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmResolvedModelInfo',
-    declaration: 'export interface LlmResolvedModelInfo extends LlmModelInfo {\n    nativeTools?: boolean;\n    inputProjectionPolicy?: \'reject\';\n    context?: LlmModelContext;\n    defaultMaxTokens?: number;\n    reasoning?: LlmModelReasoningInfo;\n    systemPromptUpdate?: SystemPromptUpdate;\n    toolUpdate?: ToolUpdate;\n}',
+    declaration: 'export interface LlmResolvedModelInfo extends LlmModelInfo {\n    nativeTools?: boolean;\n    inputProjectionPolicy?: \'reject\';\n    requestProtocol?: \'kinf-decision-v1\';\n    context?: LlmModelContext;\n    defaultMaxTokens?: number;\n    reasoning?: LlmModelReasoningInfo;\n    systemPromptUpdate?: SystemPromptUpdate;\n    toolUpdate?: ToolUpdate;\n}',
   },
   {
     name: 'LlmRuntime',
@@ -8229,6 +8253,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ProjectionKeySelection = readonly Extract<keyof SessionProjectionMap, string>[] | ReadonlySet<Extract<keyof SessionProjectionMap, string>>;',
   },
   {
+    name: 'ProjectionResult',
+    declaration: 'export interface ProjectionResult {\n    readonly applied: boolean;\n    readonly judgments: readonly RelevanceJudgment[];\n}',
+  },
+  {
     name: 'ProjectionSnapshot',
     declaration: 'export interface ProjectionSnapshot {\n    asOfSeq: SessionSeqCursor;\n    values: Partial<SessionProjectionMap>;\n}',
   },
@@ -8379,6 +8407,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RelayPublishView',
     declaration: 'export interface RelayPublishView {\n    readonly ok: boolean;\n    readonly blocking: boolean;\n    readonly error?: string;\n}',
+  },
+  {
+    name: 'RelevanceDisposition',
+    declaration: 'export type RelevanceDisposition = \'retained-relevant\' | \'elided-irrelevant\' | \'retained-limit\' | \'retained-uncertain\' | \'retained-error\';',
+  },
+  {
+    name: 'RelevanceJudgment',
+    declaration: 'export interface RelevanceJudgment {\n    readonly messageId: MessageId;\n    readonly callId: ToolCallId;\n    readonly candidateChars: number;\n    readonly inputChars: number;\n    readonly disposition: RelevanceDisposition;\n    readonly reason: string;\n    readonly requested: {\n        readonly provider: string;\n        readonly model: string;\n    };\n    readonly served?: {\n        readonly model: string;\n        readonly mode: string;\n        readonly instance: string;\n    };\n    readonly score?: number;\n    readonly label?: \'yes\' | \'no\';\n}',
   },
   {
     name: 'Reload',
