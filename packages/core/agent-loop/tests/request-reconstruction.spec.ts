@@ -351,12 +351,17 @@ describe('request stability across the loop', () => {
     await ctx.plugin(AgentLoop, { agents: [] })
     const started = Promise.withResolvers<undefined>()
     const reasoning = Promise.withResolvers<LlmModelReasoningInfo>()
+    let resolutions = 0
     const first = new class extends MockAdapter {
       override async resolveModel(
         provider: string,
         model: string,
         _signal?: AbortSignal,
       ): Promise<LlmResolvedModelInfo> {
+        resolutions++
+        // Tool admission resolves the selected model before step/start; only the request's
+        // own resolution is the in-flight call this case disposes the adapter during.
+        if (resolutions === 1) return { provider, id: model, name: model }
         started.resolve(undefined)
         return {
           provider,

@@ -319,7 +319,9 @@ describe('prepared-route prompt admission', () => {
     expect(adapter.requests).toHaveLength(5)
     expect(assemblies).toBe(1)
     expect(preSteps).toBe(1)
-    expect(resolve).toHaveBeenCalledTimes(5)
+    // Each of the 5 requests resolves its route once; step preparation additionally resolves
+    // the selected model for tool admission (3 steps), and both stay on one adapter registration.
+    expect(resolve).toHaveBeenCalledTimes(8)
     expectPlain(adapter.requests[3]!, 'prompt three')
     expect(adapter.requests[4]!.messages).toEqual(adapter.requests[3]!.messages)
     expect(adapter.requests[3]!.messages.at(-1)?.content).toEqual([{ type: 'text', text: 'third' }])
@@ -445,7 +447,13 @@ describe('prepared-route prompt admission', () => {
     if (stage === 'request') h.ctx.on('agent/request', async (_payload, next) => { await observe(); return next() })
     else {
       const resolve = h.capable.resolveModel.bind(h.capable)
-      vi.spyOn(h.capable, 'resolveModel').mockImplementation(async (...args) => { await observe(); return resolve(...args) })
+      // Tool admission resolves the model before step/start; the request's own resolution is the
+      // in-step prepare phase this case cancels.
+      vi.spyOn(h.capable, 'resolveModel').mockImplementation(async (...args) => {
+        if (!h.agent.session.snapshotEvents().some(event => event.type === 'step/start')) return resolve(...args)
+        await observe()
+        return resolve(...args)
+      })
     }
     h.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'cancelled' }], source: { kind: 'user' } }))
     await entered.promise
