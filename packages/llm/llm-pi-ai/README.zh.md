@@ -94,6 +94,8 @@ kind: "package-reference"
 
 每个 `models` 条目或 `modelOverrides` 值均可设置 `baseURL`、`headers` 和 `requestModel`。端点必须是不含 URL 凭据的绝对 HTTP(S) URL。`requestModel` 修改请求中的模型 id；条目的 `id` 仍是选择器和 Session 身份。显式模型请求头按不区分大小写的名称覆盖提供方请求头，Harness 归因请求头仍具有最高优先级。
 
+在模型条目或覆盖值上设置 `streamIdleTimeoutMs`，只更改该选择器的流空闲上限。该值必须为正有限数，且最多为 `2147483647` 毫秒。省略时继承提供方的间隔，其默认值为 `300000` 毫秒。已准备的调用保留其捕获的间隔；新调用使用更新后的配置。
+
 在模型条目或覆盖中设置 `nativeTools: false`，可禁用该确切选择器的原生工具声明、执行器指引和执行。`true` 显式保留正常的工具准入；省略时保持原样。此元数据保留普通 Chat 协议，不会投影历史工具消息。Decision 模型不能设置 `nativeTools: true`。
 
 显式的逐模型 `requestProtocol: kinf-decision-v1` 选择 KINF 的首 token Decision 操作。它要求 `api: openai-completions`、`maxTokens: 1`、`input: [text]` 和 `reasoningEfforts: false`；省略时保留普通 pi-ai 分派。请求发送 `kinf_decision: label_scores`，禁用原生流式传输，仅接受纯文本 system、user 和 assistant 历史。原生工具、推理、停止控制、非零 temperature 及非一的输出上限均被拒绝。完整 JSON 响应限制为 64 KiB，并校验两个 logit、两个未校准标签分数、token 用量和确切服务身份。其原生 `length` 结束状态表示 Decision 成功完成。对话文本仅包含经过校验的 `model`、`decision`、`served_identity` 和 `usage` 字段；私有或未知响应字段被省略。不会尝试普通聊天或其他提供方回退。
@@ -131,6 +133,8 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无法服务的 profile 会在写入处被拒绝，并点名路由与模型。失败携带稳定 code：无法使用的凭据以 `INVALID_CREDENTIAL` 失败并点名路由与引用，`apiKeyEnv` 引用解析为空的路由以 `MISSING_CREDENTIAL` 失败，未配置模型以 `UNKNOWN_MODEL` 失败，终止性提供方失败则区分 `QUOTA` 与暂时性 `RATE_LIMIT`。`GenerateOptions.stop` 以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式 UI 无法跨提供方保证它。
 
 提供方的 HTTP 408 响应与携带 `code: request_timeout` 的错误映射为 `TIMEOUT`，即使提供方的通用错误类型是 `invalid_request_error`。仅有取消措辞不会使失败变为可重试；恢复行为由路由的重试策略决定。
+
+该空闲间隔限制 Chat 和 Decision 请求中每次等待转换后流块的读取，不计消费方的处理时间。SSE 注释、被丢弃的 start 事件和仅含 usage 的帧不会延长该间隔。超时以 `TIMEOUT` 失败并中止提供方请求；调用方取消仍为 `ABORTED`。该间隔与 `timeoutMs` 相互独立。
 
 Config 更新严格验证发生变化的 provider。初始加载将已存储的目录故障保留为可编辑的 provider 诊断；未更改的故障 provider 不阻止其他编辑。可用模型仍可选择，无法解析的模型在网络 I/O 前失败。修复或删除问题配置会清除其诊断。
 

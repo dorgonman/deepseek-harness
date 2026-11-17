@@ -27,6 +27,7 @@ class StubAdapter extends LlmAdapter {
 const cleanups: Array<() => Promise<void>> = []
 
 afterEach(async () => {
+  vi.useRealTimers()
   while (cleanups.length > 0) await cleanups.pop()!()
   await closeMockServers()
   vi.unstubAllEnvs()
@@ -76,6 +77,59 @@ describe('login flows in a real composition', () => {
 })
 
 describe('request-level dynamic profiles', () => {
+  it('keeps a prepared model idle budget immutable while fresh calls use the reloaded model budget', async () => {
+    const previous = await mockServer([{ holdOpen: true }])
+    const current = await mockServer([{ holdOpen: true }])
+    const profile = (baseURL: string, streamIdleTimeoutMs: number): LlmPiAi.Options => ({ providers: { gateway: {
+      api: 'openai-completions', headers: { Authorization: 'Bearer fixture-key' }, streamIdleTimeoutMs: 1000,
+      models: [{ id: 'chat', baseURL, streamIdleTimeoutMs }],
+    } } })
+    const ctx = await boot(await home(), profile(previous.url, 80))
+    const prepared = await ctx.llm.prepareCall({ provider: 'gateway', model: 'chat' }, undefined, controls => controls)
+    await configurations.get(ctx)!.update(profile(current.url, 20))
+    const controller = new AbortController()
+    let pending: Promise<unknown>[] = []
+    cleanups.push(async () => {
+      controller.abort('test cleanup')
+      vi.useRealTimers()
+      await Promise.allSettled(pending)
+      await Promise.all([previous, current].filter(server => server.requests.length > 0).map(server => server.responseClosed))
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const settled: string[] = []
+    pending = [
+      (async () => {
+        const chunks = []
+        for await (const chunk of prepared.stream({ ...prepared.config, messages: [], signal: controller.signal })) chunks.push(chunk)
+        settled.push('prepared')
+        return chunks.at(-1)
+      })(),
+      assemble(ctx, { provider: 'gateway', model: 'chat', messages: [], signal: controller.signal }).then((result) => {
+        settled.push('fresh')
+        return result.finish
+      }),
+    ]
+    try {
+      await Promise.all([previous.requestReceived, current.requestReceived])
+      await vi.advanceTimersByTimeAsync(20)
+      expect(settled).toEqual(['fresh'])
+      await vi.advanceTimersByTimeAsync(59)
+      expect(settled).toEqual(['fresh'])
+      await vi.advanceTimersByTimeAsync(1)
+      const results = await Promise.all(pending)
+      expect(settled).toEqual(['fresh', 'prepared'])
+      expect(results[0]).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: { code: 'TIMEOUT' } } })
+      expect(results[1]).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+    } finally {
+      controller.abort('test complete')
+      vi.useRealTimers()
+      await Promise.allSettled(pending)
+      await Promise.all([previous, current].filter(server => server.requests.length > 0).map(server => server.responseClosed))
+    }
+    expect([previous.requests.length, current.requests.length]).toEqual([1, 1])
+    expect([previous.closedResponses, current.closedResponses]).toEqual([1, 1])
+  })
+
   it('freezes native tool capability with a prepared call while fresh calls use reloaded settings', async () => {
     const server = await mockServer([{ events: textEvents }])
     const profile = (nativeTools: boolean): LlmPiAi.Options => ({ providers: { gateway: {

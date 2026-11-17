@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader, { type ModuleLoaderV2 } from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -32,6 +32,7 @@ let root: string | undefined
 let context: Context | undefined
 
 afterEach(async () => {
+  vi.useRealTimers()
   await context?.fiber.dispose()
   context = undefined
   if (root !== undefined) await rm(root, { recursive: true, force: true })
@@ -132,6 +133,66 @@ describe('llm-pi-ai real dormant composition', () => {
     expect(server.requests[0]).not.toHaveProperty('tools')
     expect(server.requests[0]).not.toHaveProperty('kinf_decision')
     expect(executions).toBe(0)
+  })
+
+  it('applies a model stream idle timeout from live profile settings and preserves its sibling default', async () => {
+    const selectedServer = await mockServer([{ holdOpen: true }])
+    const siblingServer = await mockServer([{ holdOpen: true }])
+    const { ctx, settingsPath } = await loadComposition()
+    await writeFile(settingsPath, [
+      '- id: llm-pi-ai', '  config:', '    providers:', '      gateway:',
+      '        api: openai-completions',
+      '        headers:', '          Authorization: Bearer fixture-key',
+      '        streamIdleTimeoutMs: 20',
+      '        models:',
+      '          - id: selected', '            name: Selected timeout',
+      `            baseURL: ${selectedServer.url}`, '            streamIdleTimeoutMs: 80',
+      '          - id: sibling', '            name: Inherited timeout',
+      `            baseURL: ${siblingServer.url}`, '',
+    ].join('\n'))
+    await vi.waitFor(async () => {
+      expect(await ctx.llm.resolveModelInfo('gateway', 'selected')).toMatchObject({ name: 'Selected timeout' })
+      expect(await ctx.llm.resolveModelInfo('gateway', 'sibling')).toMatchObject({ name: 'Inherited timeout' })
+    }, { timeout: 5000 })
+
+    const caller = new AbortController()
+    const pending: ReturnType<typeof assemble>[] = []
+    const cleanup = async (): Promise<void> => {
+      caller.abort()
+      vi.useRealTimers()
+      await Promise.allSettled(pending)
+      await Promise.all([selectedServer, siblingServer]
+        .filter(server => server.requests.length > 0)
+        .map(server => server.responseClosed))
+    }
+    onTestFinished(cleanup)
+    let selectedSettled = false
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const selected = assemble(ctx, { provider: 'gateway', model: 'selected', messages: [], signal: caller.signal })
+        .finally(() => { selectedSettled = true })
+      const sibling = assemble(ctx, { provider: 'gateway', model: 'sibling', messages: [], signal: caller.signal })
+      pending.push(selected, sibling)
+      await Promise.all([selectedServer.requestReceived, siblingServer.requestReceived])
+
+      await vi.advanceTimersByTimeAsync(20)
+      expect((await sibling).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT', message: 'pi-ai stream idle timeout after 20ms' } })
+      await siblingServer.responseClosed
+      expect(selectedSettled).toBe(false)
+      expect(selectedServer.closedResponses).toBe(0)
+
+      await vi.advanceTimersByTimeAsync(59)
+      expect(selectedSettled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect((await selected).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT', message: 'pi-ai stream idle timeout after 80ms' } })
+      await selectedServer.responseClosed
+      expect(selectedServer.requests).toEqual([expect.objectContaining({ model: 'selected' })])
+      expect(siblingServer.requests).toEqual([expect.objectContaining({ model: 'sibling' })])
+      expect(selectedServer.closedResponses).toBe(1)
+      expect(siblingServer.closedResponses).toBe(1)
+    } finally {
+      await cleanup()
+    }
   })
 
   it('dispatches header contributors through the Loader-mounted adapter', async () => {

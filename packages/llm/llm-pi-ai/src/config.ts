@@ -253,6 +253,8 @@ export interface ResolvedPiAiProviderProfile
   nativeTools: ReadonlyMap<string, boolean>
   /** Explicit model request headers layered above provider headers. */
   modelHeaders: ReadonlyMap<string, Readonly<Record<string, string>>>
+  /** Explicit model stream-read idle intervals; absent selectors inherit {@link streamIdleTimeoutMs}. */
+  modelStreamIdleTimeouts: ReadonlyMap<string, number>
   /** Models whose endpoint override cannot inherit provider credentials. */
   crossOriginModels: ReadonlySet<string>
 }
@@ -347,6 +349,7 @@ const modelFields = {
   nativeTools: z.boolean(),
   // A bare dict materializes {}, which would change existing stored model rows.
   headers: z.union([z.dict(z.string())]),
+  streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS),
   contextWindow: z.number().step(1).min(1),
   maxTokens: z.number().step(1).min(1),
   // No explicit default, unlike the route's `defaultInput`: schemastery
@@ -562,6 +565,7 @@ export function resolveProfiles(
       requestProtocols: catalog?.requestProtocols ?? new Map(),
       nativeTools: catalog?.nativeTools ?? new Map(),
       modelHeaders: catalog?.modelHeaders ?? new Map(),
+      modelStreamIdleTimeouts: catalog?.modelStreamIdleTimeouts ?? new Map(),
       crossOriginModels: catalog?.crossOriginModels ?? new Set(),
       modelErrors: catalog?.modelErrors ?? new Map(),
       ...piProvider === undefined ? {} : { piProvider },

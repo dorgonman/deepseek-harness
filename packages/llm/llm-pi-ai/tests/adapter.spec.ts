@@ -17,11 +17,12 @@ import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { DEFAULT_IMAGE_OFFLOAD_COUNT_QUANTUM, DEFAULT_MAX_REQUEST_IMAGE_BYTES, DEFAULT_MAX_REQUEST_IMAGES, resolveProfiles } from '../src/config.ts'
 import { memoryAuth } from './auth-double.ts'
 import { assemble } from './assemble.ts'
-import { anthropicTextEvents, closeMockServers, mockServer, textEvents } from './mock-server.ts'
+import { anthropicTextEvents, closeMockServers, controlledSseResponse, mockServer, textEvents } from './mock-server.ts'
 
 afterEach(async () => {
   vi.useRealTimers()
   vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
   await closeMockServers()
 })
 
@@ -712,6 +713,287 @@ describe('PiAiAdapter provider routing', () => {
     await server.responseClosed
 
     expect(server.paths).toEqual(['/chat/completions'])
+    expect(server.closedResponses).toBe(1)
+  })
+
+  it('uses an explicit model idle budget instead of the longer provider budget', async () => {
+    const server = await mockServer([{ holdOpen: true }])
+    const ctx = await harness(server.url, {
+      streamIdleTimeoutMs: 1000,
+      models: [{ id: 'deepseek-flash', streamIdleTimeoutMs: 20 }],
+    })
+    const controller = new AbortController()
+    onTestFinished(async () => {
+      controller.abort('test cleanup')
+      vi.useRealTimers()
+      await pending
+      if (server.requests.length > 0) await server.responseClosed
+      await ctx.fiber.dispose()
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let settled = false
+    const pending = assemble(ctx, { model: 'deepseek-flash', messages: [], signal: controller.signal }).then((result) => {
+      settled = true
+      return result
+    })
+    try {
+      await server.requestReceived
+      await vi.advanceTimersByTimeAsync(20)
+      expect(settled).toBe(true)
+      expect((await pending).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+      await server.responseClosed
+      expect(server.closedResponses).toBe(1)
+    } finally {
+      controller.abort('test complete')
+      vi.useRealTimers()
+      await pending
+      await server.responseClosed
+    }
+    expect(server.closedResponses).toBe(1)
+  })
+
+  it('extends only the selected model budget while siblings retain their own provider deadlines', async () => {
+    const selected = await mockServer([{ holdOpen: true }])
+    const sibling = await mockServer([{ holdOpen: true }])
+    const other = await mockServer([{ holdOpen: true }])
+    const ctx = new Context()
+    const controller = new AbortController()
+    let requests: ReturnType<typeof assemble>[] = []
+    onTestFinished(async () => {
+      controller.abort('test cleanup')
+      vi.useRealTimers()
+      await Promise.all(requests)
+      await Promise.all([selected, sibling, other].filter(server => server.requests.length > 0).map(server => server.responseClosed))
+      await ctx.fiber.dispose()
+    })
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, { providers: {
+      gateway: {
+        api: 'openai-completions', headers: { Authorization: 'Bearer fixture-key' }, streamIdleTimeoutMs: 20,
+        models: [
+          { id: 'selected', baseURL: selected.url, streamIdleTimeoutMs: 80 },
+          { id: 'sibling', baseURL: sibling.url },
+        ],
+      },
+      other: {
+        api: 'openai-completions', baseURL: other.url, headers: { Authorization: 'Bearer fixture-key' },
+        streamIdleTimeoutMs: 50, models: [{ id: 'ordinary' }],
+      },
+    } })
+    const settled: string[] = []
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const routes = [['gateway', 'selected'], ['gateway', 'sibling'], ['other', 'ordinary']] as const
+    requests = routes.map(([provider, model]) =>
+      assemble(ctx, { provider, model, messages: [], signal: controller.signal }).then((result) => {
+        settled.push(model)
+        return result
+      }))
+    try {
+      await Promise.all([selected.requestReceived, sibling.requestReceived, other.requestReceived])
+      await vi.advanceTimersByTimeAsync(20)
+      expect(settled).toEqual(['sibling'])
+      expect((await requests[1]!).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+      await sibling.responseClosed
+      expect([selected.closedResponses, sibling.closedResponses, other.closedResponses]).toEqual([0, 1, 0])
+      await vi.advanceTimersByTimeAsync(30)
+      expect(settled).toEqual(['sibling', 'ordinary'])
+      expect((await requests[2]!).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+      await other.responseClosed
+      expect([selected.closedResponses, sibling.closedResponses, other.closedResponses]).toEqual([0, 1, 1])
+      await vi.advanceTimersByTimeAsync(30)
+      expect(settled).toEqual(['sibling', 'ordinary', 'selected'])
+      expect((await requests[0]!).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+      await selected.responseClosed
+      expect([selected.closedResponses, sibling.closedResponses, other.closedResponses]).toEqual([1, 1, 1])
+    } finally {
+      controller.abort('test complete')
+      vi.useRealTimers()
+      await Promise.all(requests)
+      await Promise.all([selected.responseClosed, sibling.responseClosed, other.responseClosed])
+    }
+    expect([selected.closedResponses, sibling.closedResponses, other.closedResponses]).toEqual([1, 1, 1])
+  })
+
+  it('preserves caller cancellation under a longer model idle budget', async () => {
+    const server = await mockServer([{ holdOpen: true }])
+    const ctx = await harness(server.url, {
+      streamIdleTimeoutMs: 20, models: [{ id: 'deepseek-flash', streamIdleTimeoutMs: 1000 }],
+    })
+    const controller = new AbortController()
+    onTestFinished(async () => {
+      controller.abort('test cleanup')
+      vi.useRealTimers()
+      await pending
+      if (server.requests.length > 0) await server.responseClosed
+      await ctx.fiber.dispose()
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const pending = assemble(ctx, { model: 'deepseek-flash', messages: [], signal: controller.signal })
+    try {
+      await server.requestReceived
+      controller.abort('caller stopped selected model')
+      expect((await pending).finish).toMatchObject({ kind: 'aborted', failure: { code: 'ABORTED' } })
+      await server.responseClosed
+      expect(server.closedResponses).toBe(1)
+      await vi.advanceTimersByTimeAsync(1000)
+    } finally {
+      controller.abort('test complete')
+      vi.useRealTimers()
+      await pending
+      await server.responseClosed
+    }
+    expect(server.requests).toHaveLength(1)
+    expect(server.closedResponses).toBe(1)
+  })
+
+  it.each([false, true])('counts only useful chunks as selected-model progress (text initially: %s)', async (initialText) => {
+    const wire = controlledSseResponse()
+    let detach = () => {}
+    const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input)
+      if (url !== 'http://idle-fixture.invalid/v1/chat/completions' || init?.method !== 'POST') {
+        throw new Error('Unexpected request outside the owned idle fixture')
+      }
+      const signal = init?.signal
+      if (signal === null || signal === undefined) throw new Error('Expected the SDK cancellation signal')
+      const aborted = () => { wire.abort(signal.reason) }
+      signal.addEventListener('abort', aborted, { once: true })
+      detach = () => { signal.removeEventListener('abort', aborted) }
+      return Promise.resolve(wire.response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const ctx = await harness('http://idle-fixture.invalid/v1', {
+      streamIdleTimeoutMs: 1000, models: [{ id: 'deepseek-flash', streamIdleTimeoutMs: 20 }],
+    })
+    const controller = new AbortController()
+    onTestFinished(async () => {
+      controller.abort('test cleanup')
+      wire.abort(new Error('test cleanup'))
+      vi.useRealTimers()
+      await pending
+      detach()
+      vi.unstubAllGlobals()
+      await ctx.fiber.dispose()
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let settled = false
+    const pending = assemble(ctx, { model: 'deepseek-flash', messages: [], signal: controller.signal }).then((result) => {
+      settled = true
+      return result
+    })
+    try {
+      let reads = 1
+      await wire.readRequested(reads)
+      if (initialText) {
+        await vi.advanceTimersByTimeAsync(15)
+        wire.write('data: {"choices":[{"delta":{"role":"assistant","content":"hello"},"index":0,"finish_reason":null}]}\n\n')
+        await wire.readRequested(++reads)
+      }
+      await vi.advanceTimersByTimeAsync(10)
+      wire.write(': keep-alive\n\n')
+      await wire.readRequested(++reads)
+      await vi.advanceTimersByTimeAsync(5)
+      wire.write('data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":0}}\n\n')
+      await wire.readRequested(++reads)
+      await vi.advanceTimersByTimeAsync(4)
+      wire.write('data: {"choices":[{"delta":{"role":"assistant","content":""},"index":0,"finish_reason":null}]}\n\n')
+      await wire.readRequested(++reads)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).toBe(true)
+      expect((await pending).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+      expect((await pending).message.content).toEqual(initialText ? [{ type: 'text', text: 'hello' }] : [])
+      expect(fetchMock).toHaveBeenCalledOnce()
+    } finally {
+      controller.abort('test complete')
+      wire.abort(new Error('test complete'))
+      vi.useRealTimers()
+      await pending
+      detach()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('applies the selected model idle budget to a native Decision body wait', async () => {
+    const server = await mockServer([{ holdOpen: true, headers: { 'content-type': 'application/json' } }])
+    const ctx = await harness(server.url, {
+      api: 'openai-completions', streamIdleTimeoutMs: 1000,
+      models: [{
+        id: 'decision', requestModel: 'decision-wire', requestProtocol: 'kinf-decision-v1',
+        maxTokens: 1, input: ['text'], reasoningEfforts: false, streamIdleTimeoutMs: 30,
+      }],
+    })
+    const controller = new AbortController()
+    onTestFinished(async () => {
+      controller.abort('test cleanup')
+      vi.useRealTimers()
+      await pending
+      if (server.requests.length > 0) await server.responseClosed
+      await ctx.fiber.dispose()
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let settled = false
+    const pending = assemble(ctx, { model: 'decision', signal: controller.signal, messages: [
+      createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Is this relevant?' }] }),
+    ] }).then((result) => { settled = true; return result })
+    try {
+      await server.requestReceived
+      await vi.advanceTimersByTimeAsync(29)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).toBe(true)
+      expect((await pending).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+      await server.responseClosed
+      expect(server.closedResponses).toBe(1)
+      expect(server.requests).toEqual([expect.objectContaining({
+        model: 'decision-wire', stream: false, max_tokens: 1, kinf_decision: 'label_scores',
+      })])
+    } finally {
+      controller.abort('test complete')
+      vi.useRealTimers()
+      await pending
+      await server.responseClosed
+    }
+    expect(server.closedResponses).toBe(1)
+  })
+
+  it('preserves native Decision caller cancellation under a longer model idle budget', async () => {
+    const server = await mockServer([{ holdOpen: true, headers: { 'content-type': 'application/json' } }])
+    const ctx = await harness(server.url, {
+      api: 'openai-completions', streamIdleTimeoutMs: 20,
+      models: [{
+        id: 'decision', requestModel: 'decision-wire', requestProtocol: 'kinf-decision-v1',
+        maxTokens: 1, input: ['text'], reasoningEfforts: false, streamIdleTimeoutMs: 1000,
+      }],
+    })
+    const controller = new AbortController()
+    onTestFinished(async () => {
+      controller.abort('test cleanup')
+      vi.useRealTimers()
+      await pending
+      if (server.requests.length > 0) await server.responseClosed
+      await ctx.fiber.dispose()
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const pending = assemble(ctx, { model: 'decision', signal: controller.signal, messages: [
+      createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Is this relevant?' }] }),
+    ] })
+    try {
+      await server.requestReceived
+      controller.abort('caller stopped selected Decision model')
+      expect((await pending).finish).toMatchObject({ kind: 'aborted', failure: { code: 'ABORTED' } })
+      await server.responseClosed
+      expect(server.closedResponses).toBe(1)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(server.requests).toEqual([expect.objectContaining({
+        model: 'decision-wire', stream: false, max_tokens: 1, kinf_decision: 'label_scores',
+      })])
+    } finally {
+      controller.abort('test complete')
+      vi.useRealTimers()
+      await pending
+      await server.responseClosed
+    }
     expect(server.closedResponses).toBe(1)
   })
 })

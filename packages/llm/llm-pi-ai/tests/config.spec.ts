@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import Schema from '@deepseek-ai/schemastery'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { assertServiceable, Config, resolveProfiles, type Options } from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
@@ -18,6 +21,18 @@ const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
 const configWith = (model: Record<string, unknown>): (() => unknown) =>
   routeWith({ models: [{ id: 'm', ...model }] })
 
+/** Materialize raw override data and detach the readonly Config snapshot for the resolver. */
+function overrideWith(streamIdleTimeoutMs: unknown): Options {
+  const [target] = getBuiltinModels('deepseek')
+  if (target === undefined) throw new Error('the installed catalog ships no deepseek model')
+  const rawInput: unknown = { providers: {
+    deepseek: { modelOverrides: { [target.id]: { streamIdleTimeoutMs } } },
+  } }
+  const materialized = Schema.resolve(rawInput, Config, {})[0] as ReturnType<typeof Config>
+  const normalized: Options = { providers: structuredClone(materialized.providers.get()) } as Options
+  return normalized
+}
+
 describe('model request routing', () => {
   it('leaves routing fields absent on existing stored model rows', () => {
     const materialized = routeWith({})() as Options
@@ -27,9 +42,11 @@ describe('model request routing', () => {
     expect(model).not.toHaveProperty('requestModel')
     expect(model).not.toHaveProperty('requestProtocol')
     expect(model).not.toHaveProperty('nativeTools')
+    expect(model).not.toHaveProperty('streamIdleTimeoutMs')
     const resolved = resolveProfiles(materialized.providers ?? {}).get('acme-gateway')
     expect(resolved?.requestProtocols.size).toBe(0)
     expect(resolved?.nativeTools.size).toBe(0)
+    expect(resolved?.modelStreamIdleTimeouts.size).toBe(0)
   })
 
   it('accepts explicit model endpoints and binding headers without a provider endpoint', () => {
@@ -72,6 +89,31 @@ describe('model request routing', () => {
     expect(profile?.modelErrors.get('invalid')).toMatch(/absolute HTTP/)
     expect(profile?.piProvider?.getModels().map(model => model.id)).toEqual(['usable'])
   })
+})
+
+describe('model stream idle budget schema', () => {
+  it.each([1, 25.5, MAX_TIMER_DELAY_MS])('retains an explicit model budget of %s milliseconds', (streamIdleTimeoutMs) => {
+    const materialized = configWith({ streamIdleTimeoutMs })() as Options
+    expect(materialized.providers?.['acme-gateway']?.models?.[0]?.streamIdleTimeoutMs).toBe(streamIdleTimeoutMs)
+    const profile = resolveProfiles(materialized.providers ?? {}).get('acme-gateway')
+    expect(profile?.modelStreamIdleTimeouts).toEqual(new Map([['m', streamIdleTimeoutMs]]))
+    expect(profile?.streamIdleTimeoutMs).toBe(300_000)
+  })
+
+  it('materializes a valid raw catalog override before serviceability validation', () => {
+    const options = overrideWith(25.5)
+    expect(() => { assertServiceable(options) }).not.toThrow()
+    const profile = resolveProfiles(options.providers).get('deepseek')
+    expect([...(profile?.modelStreamIdleTimeouts.values() ?? [])]).toEqual([25.5])
+  })
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, null, '25', MAX_TIMER_DELAY_MS + 1])(
+    'rejects a malformed budget %j on model declarations and overrides before persistence', (streamIdleTimeoutMs) => {
+      expect(() => { assertServiceable(configWith({ streamIdleTimeoutMs })() as Options) }).toThrow()
+
+      expect(() => { assertServiceable(overrideWith(streamIdleTimeoutMs)) }).toThrow()
+    },
+  )
 })
 
 describe('native tool capability schema boundary', () => {

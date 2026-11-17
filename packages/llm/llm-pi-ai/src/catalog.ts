@@ -13,6 +13,7 @@
  */
 
 import { builtinProviders, getAllBuiltinModels, getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { BuiltinProvider } from '@earendil-works/pi-ai/providers/all'
 import type {
   AnthropicMessagesCompat,
@@ -614,6 +615,8 @@ export interface PiAiModelProfile {
   baseURL?: string
   /** Request headers overriding provider headers by case-insensitive name; Harness attribution still wins. */
   headers?: Record<string, string>
+  /** Positive finite stream-read idle interval in milliseconds, at most MAX_TIMER_DELAY_MS; omission inherits the provider interval. */
+  streamIdleTimeoutMs?: number
   /** Display name for selectors; defaults to the catalog name, then the id. */
   name?: string
   /** Maximum combined request and response context in tokens. */
@@ -862,6 +865,8 @@ export interface RouteCatalog {
   nativeTools: ReadonlyMap<string, boolean>
   /** Explicit request-header overrides keyed by selector id. */
   modelHeaders: ReadonlyMap<string, Readonly<Record<string, string>>>
+  /** Explicit stream-read idle intervals keyed by selector id; absent entries inherit the provider interval. */
+  modelStreamIdleTimeouts: ReadonlyMap<string, number>
   /** Endpoint overrides whose origin differs from the provider endpoint, including an absent provider endpoint. */
   crossOriginModels: ReadonlySet<string>
 }
@@ -933,6 +938,7 @@ export function resolveRouteModels(
   const requestProtocols = new Map<string, 'kinf-decision-v1'>()
   const nativeTools = new Map<string, boolean>()
   const modelHeaders = new Map<string, Readonly<Record<string, string>>>()
+  const modelStreamIdleTimeouts = new Map<string, number>()
   const crossOriginModels = new Set<string>()
   const resolveEntry = (entry: PiAiModelProfile): Model<Api> => {
     assertOfferedCompatFields(provider, `model "${entry.id}"`, entry.compat)
@@ -950,6 +956,10 @@ export function resolveRouteModels(
     }
     if (entry.nativeTools !== undefined && typeof entry.nativeTools !== 'boolean') {
       invalid(provider, `model "${entry.id}" nativeTools must be a boolean`)
+    }
+    if (entry.streamIdleTimeoutMs !== undefined && (!Number.isFinite(entry.streamIdleTimeoutMs)
+      || entry.streamIdleTimeoutMs <= 0 || entry.streamIdleTimeoutMs > MAX_TIMER_DELAY_MS)) {
+      invalid(provider, `model "${entry.id}" streamIdleTimeoutMs must be a positive finite number no greater than ${MAX_TIMER_DELAY_MS}`)
     }
     if (entry.requestProtocol === 'kinf-decision-v1' && entry.nativeTools === true) {
       invalid(provider, `model "${entry.id}" kinf-decision-v1 cannot enable nativeTools`)
@@ -1001,6 +1011,7 @@ export function resolveRouteModels(
     if (entry.requestProtocol !== undefined) requestProtocols.set(entry.id, entry.requestProtocol)
     if (entry.nativeTools !== undefined) nativeTools.set(entry.id, entry.nativeTools)
     if (entry.headers !== undefined) modelHeaders.set(entry.id, { ...entry.headers })
+    if (entry.streamIdleTimeoutMs !== undefined) modelStreamIdleTimeouts.set(entry.id, entry.streamIdleTimeoutMs)
     return {
       // The installed entry lays the floor, and the fields below override it.
       // Enumerating instead would silently drop every `Model` field this
@@ -1047,6 +1058,6 @@ export function resolveRouteModels(
   }
   return {
     models: serviceableModels, configuredMaxTokens, requestModels, requestProtocols,
-    nativeTools, modelHeaders, crossOriginModels, modelErrors,
+    nativeTools, modelHeaders, modelStreamIdleTimeouts, crossOriginModels, modelErrors,
   }
 }

@@ -1,0 +1,51 @@
+# Keep the adapter and HTTP cancellation real during keyless replay.
+- id: llm-deepseek
+  disabled: true
+
+- id: agent-default-model
+  config:
+    provider: idle-snapshot
+    model: idle-selector
+
+- id: system-prompt
+  config:
+    includeRuntimeContext: false
+    personaPrefix: Idle timeout snapshot.
+
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
+
+- id: skill
+  disabled: true
+
+- id: skill-filesystem
+  disabled: true
+
+- id: tool-skill
+  disabled: true
+
+- id: llm-pi-ai
+  config:
+    providers:
+      idle-snapshot:
+        api: openai-completions
+        baseURL: http://127.0.0.1:43119/v1
+        headers:
+          Authorization: Bearer snapshot-placeholder
+        streamIdleTimeoutMs: 10000
+        retryPolicy:
+          mode: normal
+          maxRetries: 0
+        models:
+          - id: idle-selector
+            requestModel: idle-wire-model
+            nativeTools: false
+            contextWindow: 262144
+            streamIdleTimeoutMs: 2000
+
+- insert:
+    - id: pi-ai-idle-fixture
+      name: ./pi-ai-idle-fixture.mjs

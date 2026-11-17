@@ -14,6 +14,41 @@ export interface MockServer {
 
 const servers: Server[] = []
 
+/**
+ * Mock network body whose next reader demand proves the previous raw frame was consumed.
+ * @returns the response, frame/read barriers, and cancellation that releases pending barriers.
+ */
+export function controlledSseResponse() {
+  let controller: ReadableStreamDefaultController<Uint8Array>
+  let reads = 0
+  let closed = false
+  const waiters: { count: number; resolve: () => void; reject: (reason: unknown) => void }[] = []
+  const body = new ReadableStream<Uint8Array>({
+    start(value) { controller = value },
+    pull() {
+      reads++
+      for (let index = waiters.length - 1; index >= 0; index--) {
+        if (waiters[index]!.count <= reads) waiters.splice(index, 1)[0]!.resolve()
+      }
+    },
+  }, { highWaterMark: 0 })
+  return {
+    response: new Response(body, { headers: { 'content-type': 'text/event-stream' } }),
+    readRequested(count: number): Promise<void> {
+      if (reads >= count) return Promise.resolve()
+      if (closed) return Promise.reject(new Error('mock response already closed'))
+      return new Promise((resolve, reject) => waiters.push({ count, resolve, reject }))
+    },
+    write(frame: string): void { controller.enqueue(new TextEncoder().encode(frame)) },
+    abort(reason: unknown): void {
+      if (closed) return
+      closed = true
+      for (const waiter of waiters.splice(0)) waiter.reject(reason)
+      controller.error(reason)
+    },
+  }
+}
+
 /** Close every listener and connection opened since the last call; run from each spec's afterEach. */
 export async function closeMockServers(): Promise<void> {
   await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve) => {
@@ -103,7 +138,7 @@ export async function mockServer(script: {
         response.end(behavior.body)
         return
       }
-      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.writeHead(200, { 'content-type': 'text/event-stream', ...behavior.headers })
       response.flushHeaders()
       let index = 0
       const writeNext = (): void => {

@@ -1,0 +1,9 @@
+version: 1
+scenario: pi-ai-model-idle-timeout
+profile: headless
+composition: pi-ai-model-idle-timeout
+recording: authored
+header:
+  class: pi-ai-model-idle-timeout
+  pin: true
+  toolSchemasSource: kinf-decision

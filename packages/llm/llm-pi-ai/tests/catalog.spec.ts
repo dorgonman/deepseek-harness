@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import LlmRuntime, { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { liveConfig } from '../../../settings/settings/tests/live-config.ts'
@@ -439,6 +440,57 @@ describe('hand-declared providers', () => {
   })
 })
 
+describe('model stream idle budgets', () => {
+  it('keeps explicit budgets on selectors without changing provider or sibling defaults', () => {
+    const config = gateway('https://acme.test', {
+      streamIdleTimeoutMs: 1000,
+      models: [
+        { id: 'shared@local', requestModel: 'shared', streamIdleTimeoutMs: 25 },
+        { id: 'shared@remote', requestModel: 'shared' },
+      ],
+    })
+    config.providers!['other-gateway'] = {
+      api: 'openai-completions', baseURL: 'https://other.test', streamIdleTimeoutMs: 500,
+      models: [{ id: 'shared@local' }],
+    }
+    const before = structuredClone(config)
+    const profiles = resolveProfiles(config.providers)
+    const profile = profiles.get('acme-gateway')
+
+    expect(profile?.modelStreamIdleTimeouts).toEqual(new Map([['shared@local', 25]]))
+    expect(profile?.modelStreamIdleTimeouts.has('shared@remote')).toBe(false)
+    expect(profile?.modelStreamIdleTimeouts.has('shared')).toBe(false)
+    expect(profile?.streamIdleTimeoutMs).toBe(1000)
+    expect(profile?.piProvider?.getModels()).toHaveLength(2)
+    expect(profile?.piProvider?.getModels()[0]).not.toHaveProperty('streamIdleTimeoutMs')
+    expect(profiles.get('other-gateway')?.modelStreamIdleTimeouts.size).toBe(0)
+    expect(profiles.get('other-gateway')?.streamIdleTimeoutMs).toBe(500)
+    expect(config).toEqual(before)
+  })
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, null, '25', MAX_TIMER_DELAY_MS + 1])(
+    'retains the invalid budget %j diagnostic while a valid sibling remains usable', (streamIdleTimeoutMs) => {
+      const config = gateway('https://acme.test', {
+        streamIdleTimeoutMs: 1000,
+        models: [
+          { id: 'invalid', streamIdleTimeoutMs },
+          { id: 'usable', streamIdleTimeoutMs: 25 },
+          { id: 'inherited' },
+        ],
+      })
+      const before = structuredClone(config)
+      expect(() => resolveProfiles(config.providers)).toThrow(/model "invalid" streamIdleTimeoutMs must be/)
+      const profile = resolveProfiles(config.providers, 'deferred').get('acme-gateway')
+
+      expect(profile?.modelErrors.get('invalid')).toMatch(/model "invalid" streamIdleTimeoutMs must be/)
+      expect(profile?.piProvider?.getModels().map(model => model.id)).toEqual(['usable', 'inherited'])
+      expect(profile?.modelStreamIdleTimeouts).toEqual(new Map([['usable', 25]]))
+      expect(profile?.streamIdleTimeoutMs).toBe(1000)
+      expect(config).toEqual(before)
+    },
+  )
+})
+
 describe('catalog routes with per-model configuration', () => {
   it('keeps both Azure protocols under the azure catalog route', () => {
     const provider = resolveProfiles({ azure: {} }).get('azure')?.piProvider
@@ -774,6 +826,22 @@ describe('modelOverrides', () => {
     if (model === undefined) throw new Error('the installed catalog ships no deepseek model')
     return model
   }
+
+  it('applies an idle budget only to the exact overridden catalog selector', () => {
+    const target = deepseekModel()
+    const config = { deepseek: {
+      streamIdleTimeoutMs: 1000,
+      modelOverrides: { [target.id]: { streamIdleTimeoutMs: 25 } },
+    } }
+    const before = structuredClone(config)
+    const profile = resolveProfiles(config).get('deepseek')
+
+    expect(profile?.modelStreamIdleTimeouts).toEqual(new Map([[target.id, 25]]))
+    expect(profile?.streamIdleTimeoutMs).toBe(1000)
+    expect(profile?.piProvider?.getModels()).toHaveLength(getBuiltinModels('deepseek').length)
+    expect(profile?.piProvider?.getModels().find(model => model.id === target.id)).not.toHaveProperty('streamIdleTimeoutMs')
+    expect(config).toEqual(before)
+  })
 
   it.each([false, true])('applies nativeTools=%s only to the overridden selector', (nativeTools) => {
     const target = deepseekModel()
