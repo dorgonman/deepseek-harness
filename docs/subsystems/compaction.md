@@ -13,7 +13,7 @@ Compaction extends [`SessionEventMap`](session.md) with three event types via de
 | Event | Payload | Role |
 |---|---|---|
 | `compaction/start` | `{ turn }` | acquires the log-recorded lock; a number identifies the open automatic turn, while `null` identifies a standalone manual attempt |
-| `compaction/summary` | `{ summary, rawOutput?, llmStreamCall?, shadowedRange, shadowedSeqs, shadowedTokenCount, provider, model, maxTokens?, usage? }` | the safe summary projection, optional complete provider output and usage, an `llmStreamCall: true` marker when producing the result consumed exactly one call through this context's `ctx.llm.stream()` (which requires complete `rawOutput`), the shadowed surface-boundary pair (`start`/`end` seqs — a position span, not a numeric interval), the shadowed seqs in surface order, the estimated token count, and the summarize call's envelope (`provider`, `model`, plus its generation cap when one applied) — logged so the one-shot request is reconstructable from log + code (the reconstructability Agent Note); unmarked `rawOutput` does not identify the call path |
+| `compaction/summary` | `{ summary, rawOutput?, llmStreamCall?, requestProjection?, shadowedRange, shadowedSeqs, shadowedTokenCount, provider, model, maxTokens?, usage? }` | the safe summary projection, optional complete provider output and usage, an `llmStreamCall: true` marker when producing the result consumed exactly one call through this context's `ctx.llm.stream()` (which requires complete `rawOutput`), the shadowed surface-boundary pair (`start`/`end` seqs — a position span, not a numeric interval), the shadowed seqs in surface order, the estimated token count, and the summarize call's envelope (`provider`, `model`, plus its generation cap when one applied) — logged so the one-shot request is reconstructable from log + code (the reconstructability Agent Note); unmarked `rawOutput` does not identify the call path |
 | `compaction/end` | `{ turn, error? }` | releases the lock with the same numeric-or-null owner (`error` records an unsuccessful attempt) |
 
 The lock brackets the **whole** operation: `compaction/start` is appended first, then summarization, the `compaction/summary` record, and the `user/message` replacement all land, and only then `compaction/end`. Releasing the lock last turns a crash mid-operation into a detectable orphaned lock (a `compaction/start` with no matching `compaction/end`) rather than a `compaction/end` that falsely claims compaction finished.
@@ -21,6 +21,18 @@ The lock brackets the **whole** operation: `compaction/start` is appended first,
 The markers are lock time points, not an exclusive container. An unrelated idle injection can appear between a standalone manual start and end while summarization is pending. The manual path revalidates only its selected positional span, so that injected context survives after the replacement checkpoint. A live unmatched start blocks every entry point; an unmatched start before a newer `session/end-seed` is stale evidence from a prior lifecycle and is ignored.
 
 These variants are merged inside a `declare module '@deepseek-ai/dsh-session/types'` block, so — unlike the top-level types on the other subsystem pages — they are not pasted as a drift-checked ` ```ts type-equiv ` block (the `verify-type-equiv` extractor matches only top-level declarations by name). The payload table above is the catalog entry; follow the source link for the authoritative fields.
+
+<a id="summary-request-projection"></a>
+### Summary request projection
+
+`requestProjection` records how the auxiliary request represented its selected history. The default `compaction-basic` LLM summarizer records one concrete tag on every new summary.
+
+| Tag | Request representation |
+|---|---|
+| `conversation-prefix-v1` | Replays the conversation prefix with its tool declarations and history, followed by the summary instruction. |
+| `text-transcript-v1` | Sends ordered inert text that preserves original roles, content, tool-call and result facts, and attachment handles; it omits tool declarations, tool history, structured tool content, and provider replay metadata. |
+
+An absent tag retains the historical recorded behavior. Readers must not infer a tag from current model capabilities. The projection affects only the auxiliary request; the original Session history and compaction transaction remain unchanged. The [basic backend](../../packages/compaction/compaction-basic/README.md) owns projection selection, capacity checks, and summary output validation.
 
 <a id="image-offload"></a>
 ## Image offload
@@ -208,6 +220,32 @@ abstract compactRegion( start: SessionSeq, end: SessionSeq, agent: CompactionAge
 Types: [CommandId](commands.md) · [SessionSeq](session.md)
 
 Source: [`packages/compaction/compaction/src/index.ts`](../../packages/compaction/compaction/src/index.ts)
+
+<a id="ctxcompactionpolicycontrol--compactionpolicycontrol"></a>
+
+### `ctx.compactionPolicyControl` — `CompactionPolicyControl`
+
+Host-only policy control mounted by the preset owner when persistent editing exists.
+
+```ts cordis-catalog
+/** Read one uniquely profile-owned preset without exposing other plugin configuration.
+ * @param entryId Exact declaration row id in the active profile.
+ * @returns Current summary fields and their revision.
+ * @throws RemoteError when the declaration cannot be addressed safely.
+ */
+@Remote read(entryId: string): PresetCompactionPolicy
+
+/** Persist one explicit summary target and verify the replacement preset before committing success.
+ * @param request Expected revision, target and explicitly owned existing overrides.
+ * @param signal Optional cancellation; absence permits the operation to finish without caller cancellation.
+ * @returns Persisted and activated policy for new preset bindings; existing Agents retain their revision.
+ * @throws RemoteError on stale policy, unverifiable target, persistence failure or failed activation.
+ *   Editor failures restore the previous patch.
+ */
+@Remote async setSummaryTarget(request: PresetCompactionPolicyUpdate, signal?: AbortSignal): Promise<PresetCompactionPolicyWrite>
+```
+
+Source: [`packages/compaction/compaction-basic/src/policy-control.ts`](../../packages/compaction/compaction-basic/src/policy-control.ts)
 
 <a id="ctxdecisionrelevance--decisionrelevancefilter"></a>
 

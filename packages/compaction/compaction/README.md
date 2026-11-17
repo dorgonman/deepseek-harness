@@ -114,6 +114,8 @@ One log-recorded lock is shared by all entry points. Tail inspection finds the l
 
 The `compaction/*` events extend `SessionEventMap` (merge-extensible) via declaration merging — session events, not Cordis `Events`, and all log-only. The generated [persistence log event catalog](../../../docs/persistence-catalog.md) owns the per-event payloads; `compaction/prune` documents the shadow-price protocol shared with the tool-result pruner.
 
+A summary can record `requestProjection` to identify how its auxiliary request represented the selected history. The [summary request projection reference](../../../docs/subsystems/compaction.md#summary-request-projection) defines the tags and historical absence; readers use the recorded fact rather than current model capabilities.
+
 </details>
 
 -----

@@ -67,7 +67,8 @@ async function harness(baseURL: string) {
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(LlmPiAi, { providers: { fixture: {
     api: 'openai-completions', baseURL, headers: { Authorization: `Bearer ${KEY}`, ...headers },
-    models: [model(), { id: 'ordinary', contextWindow: 65536 }],
+    models: [model(), { id: 'ordinary', contextWindow: 65536 },
+      { id: 'no-tools', nativeTools: false }, { id: 'with-tools', nativeTools: true }],
   } } })
   return ctx
 }
@@ -112,6 +113,31 @@ describe('KINF Decision adaptation', () => {
     expect(result.finish).toEqual({ kind: 'stop' })
     expect(server.requests[0]).toMatchObject({ model: 'ordinary', stream: true, tools: [{ type: 'function', function: { name: 'echo' } }] })
     expect(server.requests[0]).not.toHaveProperty('kinf_decision')
+  })
+
+  it('keeps no-tools Chat on ordinary streaming and refuses explicit tools before dispatch', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = await harness(server.url)
+    const info = await ctx.llm.resolveModelInfo('fixture', 'no-tools')
+    expect(info?.nativeTools).toBe(false)
+    expect(info).not.toHaveProperty('requestProtocol')
+    expect(info).not.toHaveProperty('inputProjectionPolicy')
+    const text = await assemble(ctx, options({ model: 'no-tools' }))
+    expect(text.finish).toEqual({ kind: 'stop' })
+    expect(server.requests[0]).toMatchObject({ model: 'no-tools', stream: true })
+    expect(server.requests[0]).not.toHaveProperty('kinf_decision')
+    const refused = await assemble(ctx, options({ model: 'no-tools', tools: [{ name: 'echo', description: 'Echo.', parameters: {} }] }))
+    expect(refused.finish).toMatchObject({ kind: 'error', failure: { code: 'UNSUPPORTED_TOOLS' } })
+    expect(server.requests).toHaveLength(1)
+  })
+
+  it('keeps explicit tool support independent of no-tools and Decision siblings', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = await harness(server.url)
+    expect(await ctx.llm.resolveModelInfo('fixture', 'with-tools')).toMatchObject({ nativeTools: true })
+    const result = await assemble(ctx, options({ model: 'with-tools', tools: [{ name: 'echo', description: 'Echo.', parameters: {} }] }))
+    expect(result.finish).toEqual({ kind: 'stop' })
+    expect(server.requests[0]).toMatchObject({ model: 'with-tools', stream: true, tools: [{ type: 'function', function: { name: 'echo' } }] })
   })
 
   it.each([
@@ -207,6 +233,7 @@ describe('KINF Decision adaptation', () => {
     const schema = JSON.stringify(Config.toJSON())
     expect(schema).toContain('requestProtocol')
     expect(schema).toContain('kinf-decision-v1')
+    expect(schema).toContain('nativeTools')
     const withoutReasoning: LlmPiAi.PiAiModelProfile = model()
     delete withoutReasoning.reasoningEfforts
     for (const invalidModel of [
@@ -215,5 +242,13 @@ describe('KINF Decision adaptation', () => {
       expect(() => resolveProfiles({ fixture: { api: 'openai-completions', baseURL: 'https://fixture.invalid/v1', models: [invalidModel] } }))
         .toThrow(/kinf-decision-v1 requires/)
     }
+  })
+
+  it('keeps Decision tools disabled and rejects contradictory capability metadata', () => {
+    const providers = (nativeTools: boolean) => ({ fixture: {
+      api: 'openai-completions' as const, baseURL: 'https://fixture.invalid/v1', models: [{ ...model(), nativeTools }],
+    } })
+    expect(resolveProfiles(providers(false)).get('fixture')?.nativeTools.get(SELECTOR)).toBe(false)
+    expect(() => resolveProfiles(providers(true))).toThrow(/kinf-decision-v1 cannot enable nativeTools/)
   })
 })

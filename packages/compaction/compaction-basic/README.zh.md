@@ -80,7 +80,16 @@ kind: "package-reference"
 
 配置错误会快速失败：未知设置、重复的按模型覆盖、无效 token 数、两种保留形式同时出现，或保留比例不小于阈值比例，都会在加载时拒绝插件。模型首次使用时，`W − O − B` 必须为正，且解析出的保留预算必须低于触发阈值。余量为零时，必须在全局或对应模型策略中显式设置正数 `maxTokens`。显式余量必须符合窗口容量。摘要沿用已声明窗口的对话路由时，省略的摘要上限跟随调整后的余量，至少为一个 token。显式摘要目标保留其配置或继承的上限。降低 `thresholdRatio` 可以提早压缩。
 
-显式摘要目标在发起提供方调用前会先校验：无法验证的路由以 `SUMMARY_TARGET_UNVERIFIED` 失败；非对话请求协议以 `SUMMARY_TARGET_NOT_CHAT` 失败；重放请求的估算输入加摘要上限超过摘要器自身上下文窗口时，以 `SUMMARY_CAPACITY_EXCEEDED` 失败。这些检查使用 LLM 服务的模型元数据与 token 计量，而不是对话路由的容量，并且都不会回退到其他提供方。
+显式摘要目标在调用提供方前校验：无法验证的路由以 `SUMMARY_TARGET_UNVERIFIED` 失败；非对话协议以 `SUMMARY_TARGET_NOT_CHAT` 失败；完整摘要请求加输出上限超过摘要器窗口时，以 `SUMMARY_CAPACITY_EXCEEDED` 失败。计价包含转录框架与最终指令。检查使用摘要器元数据与 token 计量，不会回退到其他提供方。
+
+<a id="persist-preset-summary-policy"></a>
+### 持久保存 preset 摘要策略
+
+策略控制寻址规范的 `@deepseek-ai/dsh-agent-preset` 声明，并要求 `compaction` 与 `compaction-basic` 行 ID 已启用。禁用或带条件的压缩行会被拒绝。
+
+当 profile 同时挂载 preset 注册表与配置编辑器时，Host 提供 `compactionPolicy.read(entryId)` 和 `setSummaryTarget(request)`。先读取精确声明行，再传入其 revision、显式提供方/模型/输出预算，以及你拥有的现有源路由覆盖。策略传输类型从 `@deepseek-ai/dsh-compaction-basic/types` 导出。操作将回退设为 `error`；省略的覆盖、对话默认值和同级插件值保持不变。缺失或歧义行、过期 revision 及无法验证的 Chat 目标会使操作被拒绝。
+
+每次调用通过编辑器已加锁并重新协调的事务编辑一个 preset。目标元数据在编辑前和替换 preset 协调后分别检查；激活或元数据校验失败会恢复原补丁与运行时。成功会报告供新绑定使用的已持久化并激活策略，现有 Agent 保留原 revision。这不保证提供方未来仍可用。多个 preset 的写入不构成共同原子事务。编辑器保存完整 preset 配置，将当前插件列表保留为显式 profile 覆盖。
 
 ### 压缩运行时会发生什么
 
@@ -116,7 +125,7 @@ kind: "package-reference"
 
 - **一个测量服务为每个决策定价。** 单例 `ctx.tokenMeter` 会在同一个已消费日志 revision 上测量最新规范已记录 envelope 与当前表层。路由适配器声明请求图片定价时，meter 会将其应用于图片历史。模型切换的压力、保留与范围选择使用目标定价；区域缩减验证使用上次已提交路由；已记录的替换影子价仍使用与路由无关的启发式规则，使纯投影 fold 保持一致。
 - **日志记录的标记对就是事务。** 所有入口点共享一个先记录标记的区域事务：验证范围与活动锁，同步追加 `compaction/start`，准备并等待摘要，重新验证，再追加 `compaction/summary` 与替换，最后恰好进行一次闭合尝试。自动调用与显式范围调用要求数字标识的开放轮次归属与整个表层稳定；`compactNow()` 会预留空闲接纳，使用 `turn: null`，允许所选 span 之外追加仅追加上下文，flush 每次已闭合尝试，并在 `finally` 中释放接纳预留。
-- **摘要复用提供方的热前缀。** 逐字回放 surface 节点 0 处 `system/message` 所承载的系统提示词、上次已路由请求的工具与已遮蔽区域消息，使辅助调用成为会话的真正前缀，因此只有尾随指令与摘要输出未缓存。
+- **摘要输入遵循精确路由能力。** 显式设置 `nativeTools: false` 的普通 Chat 目标接收惰性文本转录；其他普通 Chat 目标保留 `conversation-prefix-v1`，回放系统首部、工具与选定历史，在投影允许时复用热前缀。
 - **`summarize()` 是唯一的子类钩子。** 基于模板或远程摘要器的子类可以覆盖它，同时压力、保留、被引用的源事件、缩减验证与已遮蔽 token 计量仍由 token meter 负责。
 
 ### 自动触发与溢出恢复
@@ -129,7 +138,11 @@ kind: "package-reference"
 
 ### 摘要机制
 
-直接 `ctx.llm.stream()` 调用使用已配置的提供方／模型对与上限，回退到最新已记录请求目标，然后再回退到 `AgentOptions` 对，而不运行仅用于 agent loop 的 `agent/request` 扩展点。该调用将 surface 节点 0 处派生的 `system/message` 作为 `messages` 的首项回放，后接已遮蔽区域消息（包括位于其 surface 位置的被遮蔽历史内 `system/message`），并提供 header 的有效工具供路由特定投影使用。所选适配器必须解析回放消息中的图片引用或明确拒绝它们。调用将压缩指令作为最后一条 user 消息追加，在投影允许时保留提供方的热前缀 cache。空内容系统头节点不贡献消息，但仍处于压缩范围之外。最终指令是冻结的 `RequestUserInput`，不含持久身份或来源；回放历史和持久化检查点仍然使用持久消息。调用将 `GenerateOptions.purpose` 设为 `compaction`；只有返回文本进入检查点，推理与工具调用都会被排除。图片输出会以 `UNSUPPORTED_CONTENT` 失败，而不是消失。替换 user 消息用 `<compacted-summary>` 标签框定摘要；原始摘要保留在 `compaction/summary` 事件上。 调用还携带 `Session.toolHistory()`，供运行时投影延迟和保留定义；若前缀缺少更新消息，则使用有效声明且不发送 developer 更新。
+一次直接 `ctx.llm.stream()` 调用使用已解析的摘要目标与输出上限，不经过仅供循环使用的 `agent/request` 钩子。`conversation-prefix-v1` 回放派生的系统首部、选定消息与请求头工具，并用 `Session.toolHistory()` 提供延迟和保留的声明。适配器解析图片引用或明确拒绝。空系统首部不贡献消息，仍处于压缩范围之外。最终压缩指令是没有持久身份的冻结 `RequestUserInput`；源历史与检查点仍持久保存。调用目的为 `compaction`；只有文本进入检查点，推理仍被排除，工具调用或图片输出明确失败。替换用户消息使用 `<compacted-summary>` 框架；原始结果保留在 `compaction/summary` 上。
+
+`text-transcript-v1` 仅用于显式设置 `nativeTools: false` 的普通 Chat 目标。辅助请求按顺序引用源角色、文本/推理、工具名称、原始参数、调用 ID、结果/错误及附件句柄文本，不发送工具声明/历史、结构化工具块或提供方回放元数据。不支持的内容会被拒绝，不会消失。这项转换不改写原始 Session，也不改变区域选择、提交或取消归属。
+
+新的 `compaction/summary` 记录将 `requestProjection` 声明为 `conversation-prefix-v1` 或 `text-transcript-v1`，使辅助输入选择可从已记录源事件与代码重建。字段缺失表示历史的对话前缀行为。
 
 ### 区域事务
 
@@ -150,6 +163,8 @@ kind: "package-reference"
 | [`src/summarizer.ts`](src/summarizer.ts) | 默认 `ctx.llm.stream()` 摘要、检查点框定、安全摘要投影 |
 | [`src/config.ts`](src/config.ts) | 加载时验证与路由模型策略解析 |
 | [`src/types.ts`](src/types.ts) | `BasicCompactionConfig` 与已解析策略词汇 |
+| [`src/policy-control.ts`](src/policy-control.ts) | 按 revision 检查的 profile 摘要策略编辑 |
+| [`src/policy-types.ts`](src/policy-types.ts) | 策略控制请求与结果字段 |
 
 包根入口的类型声明将 `compaction` 添加到 `LlmRequestPurposeMap`。直接构造压缩请求的调用方使用 `import type {} from '@deepseek-ai/dsh-compaction-basic'`，使 `GenerateOptions.purpose` 包含该键。
 
@@ -245,7 +260,7 @@ Rules:
 
 #### KV Cache 影响
 
-已回放系统提示词、工具与已遮蔽区域消息与会话最后一个已路由请求逐字匹配，因此提供方的热前缀 cache 可复用至尾随指令之前；只有该指令与摘要输出未缓存。将摘要器路由到不同提供方／模型，或压缩非头部范围，都会放弃该复用。
+`conversation-prefix-v1` 可在尾随指令之前复用与对话逐字相同的系统、工具和选定消息前缀。不同目标或非首部范围可能失去这项复用。`text-transcript-v1` 会改变前缀并增加框架 token，不承诺热缓存或速度优势。
 
 ## 已知限制与暂缓事项
 
@@ -260,6 +275,7 @@ Rules:
 - **`compactRegion` 要求存在未结束的轮次**——在完全关闭的会话上手动调用会抛出异常（「no open turn」），而不是执行压缩。
 - **摘要失败会保留最新持久表层**——步前压力检查会记录警告并继续；模型切换压力检查会拒绝目标请求。两种失败都会保留已完成的剪枝与之前的检查点。因达到 `maxTokens` 而发生的摘要截断（隐藏推理 token 可能会耗尽该额度）遵循同一规则。
 - **跨模型图片定价可能拒绝有效摘要**——切换时按目标定价选择范围，但按已提交路由验证缩减。不同的图片价格可能使摘要未通过缩减验证，即使它能降低目标压力。
+- **Preset 保存保留当前插件列表** — 新建的 profile 覆盖会记录继承插件；后续 bundle 新增项需要显式协调。现有 Agent 在释放前保留旧 preset revision。
 
 <a id="dev-note"></a>
 ### 开发备注

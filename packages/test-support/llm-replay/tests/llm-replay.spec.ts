@@ -1012,6 +1012,62 @@ describe('deriveReplayScript', () => {
     ])
   })
 
+  it.each([undefined, 'conversation-prefix-v1', 'text-transcript-v1'] as const)(
+    'retains the recorded summary projection %s without changing output replay',
+    (requestProjection) => {
+      const block = { type: 'text' as const, text: 'durable checkpoint' }
+      const events: SessionEvent[] = [
+        { type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } },
+        {
+          type: 'user/message', seq: SessionSeq(1), time: 0,
+          data: createUserMessage({ content: [{ type: 'text', text: 'original history' }], source: { kind: 'user' } }),
+          surfaceOp: 'append',
+        },
+        { type: 'compaction/start', seq: SessionSeq(2), time: 0, data: { compactionId: COMPACTION_ID, turn: 1 } },
+        {
+          type: 'compaction/summary', seq: SessionSeq(3), time: 0,
+          data: {
+            compactionId: COMPACTION_ID,
+            summary: [block],
+            rawOutput: [block],
+            llmStreamCall: true,
+            shadowedRange: { start: SessionSeq(1), end: SessionSeq(1) },
+            shadowedSeqs: [SessionSeq(1)],
+            shadowedTokenCount: 20,
+            provider: 'mutable-route',
+            model: 'mutable-model',
+            ...requestProjection === undefined ? {} : { requestProjection },
+          },
+        },
+        {
+          type: 'user/message', seq: SessionSeq(4), time: 0,
+          data: createUserMessage({ content: [block], source: { kind: 'compact-checkpoint', compactionId: COMPACTION_ID } }),
+          surfaceOp: { op: 'replace', startSeq: SessionSeq(1), endSeq: SessionSeq(1) },
+          sourceEventSeqs: [SessionSeq(2), SessionSeq(3), SessionSeq(1)],
+        },
+        { type: 'compaction/end', seq: SessionSeq(5), time: 0, data: { compactionId: COMPACTION_ID, turn: 1 } },
+        { type: 'turn/end', seq: SessionSeq(6), time: 0, data: { turn: 1, reason: { kind: 'completed' } } },
+      ]
+
+      const source = sessionJsonl(events, { version: SESSION_FORMAT_VERSION })
+      const decoded = parseSessionLog(source)
+      const summary = decoded.find(event => event.type === 'compaction/summary')
+      expect(summary?.type).toBe('compaction/summary')
+      expect(summary?.data).toEqual(events[3]?.data)
+      if (requestProjection === undefined) expect(summary?.data).not.toHaveProperty('requestProjection')
+      else expect(summary?.data).toHaveProperty('requestProjection', requestProjection)
+      expect(parseSessionLog(prepareSessionSnapshotFixtureForComparison(source))).toEqual(decoded)
+      expect(deriveReplayScript(decoded)).toEqual([{
+        kind: 'chunks',
+        chunks: [
+          { type: 'block-start', index: 0, blockType: 'text' },
+          { type: 'block-end', index: 0, block },
+          { type: 'finish', reason: { kind: 'stop' } },
+        ],
+      }])
+    },
+  )
+
   it('does not infer an LLM call from compaction/summary without raw output', () => {
     const event: SessionEvent<'compaction/summary'> = {
       type: 'compaction/summary',

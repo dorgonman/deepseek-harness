@@ -1,0 +1,233 @@
+/** Revision-checked summary-policy edits through the profile configuration owner. */
+import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
+import { Context } from '@deepseek-ai/cordis'
+import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
+import type {} from '@deepseek-ai/dsh-config-editor'
+import type {} from '@deepseek-ai/dsh-llm'
+import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { resolveConfig } from './config.ts'
+import type { BasicCompactionConfig, CompactionPolicyConfig, ResolvedConfig } from './types.ts'
+import type {
+  CompactionSummaryPolicy,
+  PresetCompactionPolicy,
+  PresetCompactionPolicyUpdate,
+  PresetCompactionPolicyWrite,
+} from './policy-types.ts'
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Revision-checked edits to profile-owned preset summary policies. */
+    compactionPolicyControl: CompactionPolicyControl
+  }
+}
+
+function invalid(entryId: string, reason: string): never {
+  throw new RemoteError('compaction-policy/invalid', reason, { entryId, reason })
+}
+
+function object(value: unknown, entryId: string, label: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(entryId, `${label} must be a literal object`)
+  return value as Record<string, unknown>
+}
+
+function row(value: unknown, id: string, entryId: string): Record<string, unknown> {
+  if (!Array.isArray(value)) invalid(entryId, `The ${id} parent must contain plugin rows`)
+  const matches = value.filter((item: unknown) => typeof item === 'object' && item !== null
+    && !Array.isArray(item) && 'id' in item && item.id === id)
+  if (matches.length !== 1) invalid(entryId, `Expected one ${id} plugin row`)
+  return object(matches[0], entryId, id)
+}
+
+function engine(current: Record<string, unknown>, entryId: string): {
+  presetId: string
+  node: Record<string, unknown>
+  config: BasicCompactionConfig
+} {
+  if (typeof current.id !== 'string' || current.id.trim().length === 0) invalid(entryId, 'The declaration has no preset id')
+  const group = row(current.plugins, 'compaction', entryId)
+  if (group.group !== true || group.name !== 'cordis:group') invalid(entryId, 'The compaction row must be a Cordis group')
+  if (group.disabled !== undefined && group.disabled !== false) invalid(entryId, 'The compaction group must be unconditionally enabled')
+  const node = row(group.config, 'compaction-basic', entryId)
+  if (node.name !== '@deepseek-ai/dsh-compaction-basic') invalid(entryId, 'The summary policy must belong to compaction-basic')
+  if (node.disabled !== undefined && node.disabled !== false) invalid(entryId, 'The compaction backend must be unconditionally enabled')
+  const config = object(node.config === undefined ? {} : node.config, entryId, 'compaction-basic config') as BasicCompactionConfig
+  try { resolveConfig(config) }
+  catch (error) {
+    invalid(entryId, error instanceof Error ? error.message : String(error))
+  }
+  return { presetId: current.id, node, config }
+}
+
+function policy(config: CompactionPolicyConfig): CompactionSummaryPolicy {
+  return {
+    ...config.summarizationProvider === undefined ? {} : { summarizationProvider: config.summarizationProvider },
+    ...config.summarizationModel === undefined ? {} : { summarizationModel: config.summarizationModel },
+    ...config.summarizationFallback === undefined ? {} : { summarizationFallback: config.summarizationFallback },
+    ...config.maxTokens === undefined ? {} : { maxTokens: config.maxTokens },
+  }
+}
+
+/** Read only summary fields from a validated literal preset declaration.
+ * @param entryId Profile row identifying this declaration.
+ * @param current Detached raw declaration configuration.
+ * @returns Default and exact-route summary fields with their content revision.
+ * @throws RemoteError if the declaration is missing or ambiguous.
+ */
+export function inspectPresetCompactionPolicy(entryId: string, current: Record<string, unknown>): PresetCompactionPolicy {
+  const selected = engine(current, entryId)
+  const fields = {
+    policy: policy(selected.config),
+    modelPolicies: (selected.config.modelPolicies ?? []).map(item => ({
+      provider: item.provider, model: item.model, policy: policy(item),
+    })),
+  }
+  return {
+    entryId, presetId: selected.presetId,
+    revision: createHash('sha256').update(JSON.stringify({ entryId, presetId: selected.presetId, ...fields })).digest('hex'),
+    ...fields,
+  }
+}
+
+/** Change summary leaves on an editor-owned clone after checking its fresh revision.
+ * @param current Fresh detached declaration supplied inside ConfigEditor's lock.
+ * @param request Explicit target and existing route overrides the caller owns.
+ * @returns The resulting summary fields; unrelated plugin and policy values remain unchanged.
+ * @throws RemoteError on stale revision, invalid fields or missing route overrides.
+ */
+export function updatePresetCompactionPolicy(
+  current: Record<string, unknown>, request: PresetCompactionPolicyUpdate,
+): PresetCompactionPolicy {
+  const before = inspectPresetCompactionPolicy(request.entryId, current)
+  if (before.revision !== request.expectedRevision) {
+    throw new RemoteError('compaction-policy/conflict', 'Preset summary policy changed; read it again before saving', {
+      entryId: request.entryId, expectedRevision: request.expectedRevision, actualRevision: before.revision,
+    })
+  }
+  if (request.target.provider.trim().length === 0 || request.target.model.trim().length === 0
+    || !Number.isSafeInteger(request.target.maxTokens) || request.target.maxTokens < 1) {
+    invalid(request.entryId, 'Summary target needs an exact provider/model and a positive integer output budget')
+  }
+  const selected = engine(current, request.entryId)
+  const target = {
+    summarizationProvider: request.target.provider,
+    summarizationModel: request.target.model,
+    summarizationFallback: 'error' as const,
+    maxTokens: request.target.maxTokens,
+  }
+  const keys = new Set<string>()
+  for (const route of request.modelPolicyRoutes) {
+    const key = JSON.stringify([route.provider, route.model])
+    if (keys.has(key)) invalid(request.entryId, 'Requested model-policy routes must be unique')
+    keys.add(key)
+    const matches = (selected.config.modelPolicies ?? []).filter(item => item.provider === route.provider && item.model === route.model)
+    const match = matches[0]
+    if (matches.length !== 1 || match === undefined) invalid(request.entryId, 'Requested model-policy route is absent or ambiguous')
+    Object.assign(match, target)
+  }
+  Object.assign(selected.config, target)
+  resolveConfig(selected.config)
+  selected.node.config = selected.config
+  return inspectPresetCompactionPolicy(request.entryId, current)
+}
+
+/** Host-only policy control mounted by the preset owner when persistent editing exists. */
+export class CompactionPolicyControl extends TypertRemoteService {
+  static inject = ['configEditor']
+
+  /**
+   * @param ctx Host context providing the persistent profile editor.
+   * @param options Private preset-owner verification, awaited inside editor rollback.
+   */
+  constructor(ctx: Context, private readonly options: {
+    verifyActivation: (presetId: string, inspect: (policy: ResolvedConfig | undefined) => void) => Promise<void>
+  }) {
+    super(ctx, 'compactionPolicyControl', { namespace: 'compactionPolicy' })
+  }
+
+  /** Read one uniquely profile-owned preset without exposing other plugin configuration.
+   * @param entryId Exact declaration row id in the active profile.
+   * @returns Current summary fields and their revision.
+   * @throws RemoteError when the declaration cannot be addressed safely.
+   */
+  @Remote
+  read(entryId: string): PresetCompactionPolicy {
+    const entry = this.entry(entryId)
+    return inspectPresetCompactionPolicy(entryId, object(entry.options.config, entryId, 'Preset config'))
+  }
+
+  /** Persist one explicit summary target and verify the replacement preset before committing success.
+   * @param request Expected revision, target and explicitly owned existing overrides.
+   * @param signal Optional cancellation; absence permits the operation to finish without caller cancellation.
+   * @returns Persisted and activated policy for new preset bindings; existing Agents retain their revision.
+   * @throws RemoteError on stale policy, unverifiable target, persistence failure or failed activation.
+   *   Editor failures restore the previous patch.
+   */
+  @Remote
+  async setSummaryTarget(request: PresetCompactionPolicyUpdate, signal?: AbortSignal): Promise<PresetCompactionPolicyWrite> {
+    const entry = this.entry(request.entryId)
+    signal?.throwIfAborted()
+    await this.verifyTarget(request, signal)
+    let result: PresetCompactionPolicy | undefined
+    let expectedPolicy: ResolvedConfig | undefined
+    try {
+      await this.ctx.configEditor.edit(entry, (current) => {
+        signal?.throwIfAborted()
+        if (this.entry(request.entryId) !== entry) throw new Error('Preset declaration changed before the policy edit')
+        result = updatePresetCompactionPolicy(current, request)
+        expectedPolicy = resolveConfig(engine(current, request.entryId).config)
+        return current
+      }, async () => {
+        signal?.throwIfAborted()
+        if (result === undefined) throw new Error('Preset summary policy was not derived')
+        await this.options.verifyActivation(result.presetId, (actualPolicy) => {
+          if (actualPolicy === undefined || !isDeepStrictEqual(actualPolicy, expectedPolicy)) {
+            throw new Error('The replacement preset does not provide the requested active compaction policy')
+          }
+        })
+        signal?.throwIfAborted()
+        const actual = this.read(request.entryId)
+        if (actual.revision !== result.revision) throw new Error('Activated summary policy differs from the persisted request')
+        await this.verifyTarget(request, signal)
+      })
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
+      if (code === 'compaction-policy/conflict' || code === 'compaction-policy/invalid' || code === 'compaction-policy/not-found') throw error
+      throw new RemoteError('compaction-policy/rejected', 'Preset summary policy was not activated; inspect the profile before retrying', {
+        entryId: request.entryId,
+      }, { cause: error })
+    }
+    if (result === undefined) throw new Error('Preset summary policy result is unavailable')
+    return { ...result, persisted: true, activated: true }
+  }
+
+  private async verifyTarget(request: PresetCompactionPolicyUpdate, signal?: AbortSignal): Promise<void> {
+    const llm = this.ctx.get('llm')
+    try {
+      if (llm === undefined) throw new Error('The LLM service is not available')
+      const info = await llm.resolveModelInfo(request.target.provider, request.target.model, signal)
+      if (info.requestProtocol !== undefined || info.context === undefined
+        || (info.inputModalities !== undefined && !info.inputModalities.includes('text'))
+        || !Number.isSafeInteger(request.target.maxTokens) || request.target.maxTokens < 1
+        || request.target.maxTokens >= info.context.contextWindow) {
+        throw new Error('The summary target must be ordinary Chat with context remaining after its output budget')
+      }
+      signal?.throwIfAborted()
+    } catch (error) {
+      signal?.throwIfAborted()
+      throw new RemoteError('compaction-policy/unverified', 'The requested summary target cannot be verified', {
+        entryId: request.entryId, provider: request.target.provider, model: request.target.model,
+      }, { cause: error })
+    }
+  }
+
+  private entry(entryId: string): Entry {
+    const entries = this.ctx.configEditor.entries().filter(item => item.options.id === entryId
+      && item.options.name === '@deepseek-ai/dsh-agent-preset')
+    const selected = entries[0]
+    if (entries.length !== 1 || selected === undefined) {
+      throw new RemoteError('compaction-policy/not-found', 'Preset declaration is absent or not uniquely profile-owned', { entryId })
+    }
+    return selected
+  }
+}

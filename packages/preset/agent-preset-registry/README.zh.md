@@ -47,6 +47,8 @@ Web 内置定义来自 `dsh-web-app` bundle。定义使用普通插件行；注�
 
 注册表不写入任何声明。`read` Remote 把一条声明的子插件列表按 entry-list YAML 方言（含 `!!js` 条件）渲染回来，供客户端展示 preset 的组成；没有任何接口接受 YAML 写回。新建 preset 或覆盖内置 preset 都是 bundle 补丁：插入一行 `@deepseek-ai/dsh-agent-preset`，或按该行 id 写覆盖补丁，再用 `plugin_manager` 安装到 profile；创造模式在对话中编写这类 bundle。
 
+配置编辑器可用时，本插件还挂载独立的[压缩策略控制](../../compaction/compaction-basic/README.zh.md#persist-preset-summary-policy)。该所有者通过 profile 编辑器修改带类型的摘要策略字段，并在回滚范围内验证替换 preset。注册表仍负责声明与 revision；没有编辑器的 profile 不挂载该控制。
+
 <a id="understand-the-implementation"></a>
 ## 理解实现
 

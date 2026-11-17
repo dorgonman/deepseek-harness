@@ -14,6 +14,9 @@ import type { CompactionId } from './brand.ts'
 
 export type { CompactionId }
 
+/** The selected input representation of one auxiliary summarization call. */
+export type SummaryRequestProjection = 'conversation-prefix-v1' | 'text-transcript-v1'
+
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
@@ -49,6 +52,11 @@ declare module '@deepseek-ai/dsh-session/types' {
       model: string
       /** The generation cap the summarize call sent, when one applied. */
       maxTokens?: number
+      /**
+       * Selected auxiliary input representation. Absence retains recorded historical
+       * or unspecified custom-summarizer behavior; never infer it from current capabilities.
+       */
+      requestProjection?: SummaryRequestProjection
       /** Provider-reported token usage for the summarization request, when emitted. */
       usage?: TokenUsage
     } & (

@@ -76,6 +76,29 @@ describe('login flows in a real composition', () => {
 })
 
 describe('request-level dynamic profiles', () => {
+  it('freezes native tool capability with a prepared call while fresh calls use reloaded settings', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const profile = (nativeTools: boolean): LlmPiAi.Options => ({ providers: { gateway: {
+      api: 'openai-completions', baseURL: server.url, headers: { Authorization: 'Bearer fixture-key' },
+      models: [{ id: 'chat', nativeTools }],
+    } } })
+    const ctx = await boot(await home(), profile(true))
+    const prepared = await ctx.llm.prepareCall({ provider: 'gateway', model: 'chat' }, undefined, (controls, info) => {
+      expect(info.nativeTools).toBe(true)
+      return controls
+    })
+    await configurations.get(ctx)!.update(profile(false))
+    expect(await ctx.llm.resolveModelInfo('gateway', 'chat')).toMatchObject({ nativeTools: false })
+    const tools = [{ name: 'echo', description: 'Echo.', parameters: {} }]
+    const chunks = []
+    for await (const chunk of prepared.stream({ ...prepared.config, messages: [], tools })) chunks.push(chunk)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(server.requests[0]).toMatchObject({ tools: [{ type: 'function', function: { name: 'echo' } }] })
+    const fresh = await assemble(ctx, { provider: 'gateway', model: 'chat', messages: [], tools })
+    expect(fresh.finish).toMatchObject({ kind: 'error', failure: { code: 'UNSUPPORTED_TOOLS' } })
+    expect(server.requests).toHaveLength(1)
+  })
+
   it('keeps stored catalog failures editable while isolating requests and validating changed providers', async () => {
     vi.stubEnv('PI_DYNAMIC_KEY', '')
     const dir = await home()

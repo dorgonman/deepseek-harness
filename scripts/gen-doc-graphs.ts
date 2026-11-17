@@ -476,7 +476,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'config-editor',
     title: 'Profile configuration edits',
     mode: 'core',
-    consumers: ['settings', 'agent-default-model'],
+    consumers: ['settings', 'agent-default-model', 'compaction-basic'],
     note: 'Persists profile config patches under the application file lock and HMR queue, then reconciles Loader entries.',
   },
   {
@@ -846,6 +846,15 @@ const SERVICE_ROLES: ServiceRole[] = [
     implementations: ['compaction-basic'],
     consumers: ['compaction-basic'],
     note: 'The basic backend consumes post-step pressure and request-error recovery events; there is no model-facing compact tool.',
+  },
+  {
+    key: 'compactionPolicyControl',
+    pkg: 'compaction-basic',
+    title: 'Preset summary policy Remote control',
+    mode: 'service',
+    implementations: ['agent-preset-registry'],
+    consumers: ['api-gateway'],
+    note: 'Defined by compaction-basic and mounted by agent-preset-registry when configEditor is available; owner Remote calls edit one preset summary policy through config-editor with revision checks and activation rollback.',
   },
   {
     key: 'subagents',

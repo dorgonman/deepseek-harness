@@ -6,7 +6,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { CompactionId, isCompactCheckpointSource, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
-import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
+import type { CompactionResult, SummaryRequestProjection } from '@deepseek-ai/dsh-compaction'
 import {
   createAssistantMessage,
   createUserMessage,
@@ -48,6 +48,7 @@ class GatedCompactionEngine extends BasicCompactionEngine {
   summary: ContentBlock[] = [{ type: 'text', text: 'checkpoint' }]
   rawOutput: ContentBlock[] | undefined
   usage: TokenUsage | undefined
+  requestProjection: SummaryRequestProjection | undefined
   error: unknown
   gate: Promise<undefined> | undefined
   duringSummary: (() => void) | undefined
@@ -68,6 +69,7 @@ class GatedCompactionEngine extends BasicCompactionEngine {
       provider: 'summary-provider',
       model: 'summary-model',
       ...this.usage === undefined ? {} : { usage: this.usage },
+      ...this.requestProjection === undefined ? {} : { requestProjection: this.requestProjection },
     }
   }
 }
@@ -859,22 +861,27 @@ describe('compactNow transaction and failure classification', () => {
     expect(released).toBe(1)
   })
 
-  it('preserves raw output and usage in the manual summary event', async () => {
-    const { compact } = detachedService()
-    const session = closedConversation(2)
-    const agent = fakeAgent(session, () => () => undefined)
-    compact.rawOutput = [
-      { type: 'text', text: 'checkpoint' },
-      { type: 'reasoning', text: 'hidden reasoning' },
-    ]
-    compact.usage = { inputTokens: 40, outputTokens: 5 }
+  it.each([undefined, 'conversation-prefix-v1', 'text-transcript-v1'] as const)(
+    'preserves raw output, usage and genuine requestProjection=%s in the manual summary event', async (requestProjection) => {
+      const { compact } = detachedService()
+      const session = closedConversation(2)
+      const agent = fakeAgent(session, () => () => undefined)
+      compact.rawOutput = [
+        { type: 'text', text: 'checkpoint' },
+        { type: 'reasoning', text: 'hidden reasoning' },
+      ]
+      compact.usage = { inputTokens: 40, outputTokens: 5 }
+      compact.requestProjection = requestProjection
 
-    await compact.compactNow(agent, SIGNAL)
+      await compact.compactNow(agent, SIGNAL)
 
-    const summary = session.snapshotEvents().find(event => event.type === 'compaction/summary')
-    expect(summary?.type === 'compaction/summary' && summary.data.rawOutput).toEqual(compact.rawOutput)
-    expect(summary?.type === 'compaction/summary' && summary.data.usage).toEqual(compact.usage)
-  })
+      const summary = session.snapshotEvents().find(event => event.type === 'compaction/summary')
+      expect(summary?.type === 'compaction/summary' && summary.data.rawOutput).toEqual(compact.rawOutput)
+      expect(summary?.type === 'compaction/summary' && summary.data.usage).toEqual(compact.usage)
+      if (requestProjection === undefined) expect(summary?.data).not.toHaveProperty('requestProjection')
+      else expect(summary?.data).toHaveProperty('requestProjection', requestProjection)
+    },
+  )
 
   it('makes duration derivable from the opening and closing marker times', async () => {
     const { compact } = detachedService()

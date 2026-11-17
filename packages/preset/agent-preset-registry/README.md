@@ -47,6 +47,8 @@ The Web definitions come from the `dsh-web-app` bundle. Definitions are ordinary
 
 The registry writes no declarations. The `read` Remote renders one declaration’s child list back as entry-list YAML (`!!js` conditions included) so a client can show what a preset composes; nothing accepts YAML back. A new preset or an override of a shipped one is a bundle patch: an `insert` of a `@deepseek-ai/dsh-agent-preset` row, or a patch keyed by that row’s id, installed into the profile with `plugin_manager`; Creator mode authors such bundles in conversation.
 
+When a configuration editor is available, this plugin also mounts the separate [compaction policy control](../../compaction/compaction-basic/README.md#persist-preset-summary-policy). That owner edits typed summary-policy fields through the profile editor and verifies the replacement preset inside rollback. The registry retains its declaration and revision responsibilities; profiles without the editor do not mount this control.
+
 <a id="understand-the-implementation"></a>
 ## Understand the implementation
 

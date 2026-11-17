@@ -36,6 +36,8 @@ import type {
   ResolvedConfig,
 } from './types.ts'
 
+export { CompactionPolicyControl } from './policy-control.ts'
+
 export type {
   BasicCompactionConfig,
   CompactionPolicyConfig,
@@ -291,9 +293,9 @@ export class BasicCompactionEngine extends CompactionEngine {
   }
 
   /**
-   * Summarize the replayed conversation region through a direct one-shot
-   * `ctx.llm.stream()` call whose prefix reuses the conversation's own system
-   * prompt, tools, and messages so the provider's KV cache is not invalidated.
+   * Summarize the selected region through a direct one-shot `ctx.llm.stream()`
+   * call. Ordinary Chat targets with nativeTools:false receive quoted text
+   * history; other routes retain the conversation prefix.
    * Override this sole hook for a template or remote summarizer.
    * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.
    * @param agent - supplies routed-model history, fallback model, and session id.

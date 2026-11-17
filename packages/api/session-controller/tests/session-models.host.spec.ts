@@ -614,7 +614,7 @@ describe('Web session model selection', () => {
     await ctx.fiber.dispose()
   })
 
-  it('accepts consecutive model switches while default persistence is blocked', async () => {
+  it.each([undefined, true])('accepts consecutive model switches while persistDefault=%s storage is blocked', async (persistDefault) => {
     const { ctx, sessionId } = await harness()
     const release = Promise.withResolvers<undefined>()
     const saves: Promise<void>[] = []
@@ -635,13 +635,47 @@ describe('Web session model selection', () => {
 
     for (const model of ['deepseek-reasoner', 'deepseek-chat']) {
       let returned = false
-      const operation = remote.selectModel({ sessionId, provider: 'deepseek-official', model })
+      const operation = remote.selectModel({ sessionId, provider: 'deepseek-official', model,
+        ...persistDefault === undefined ? {} : { persistDefault } })
         .then((result) => { expectValue(result); returned = true })
       operations.push(operation)
       await expect.poll(() => returned).toBe(true)
       expect(currentSelection(ctx, sessionId)).toMatchObject({ provider: 'deepseek-official', model })
     }
     expect(saves).toHaveLength(2)
+  })
+
+  it('changes only the Session when default persistence is explicitly disabled', async () => {
+    const { ctx, agent, sessionId } = await harness()
+    onTestFinished(() => ctx.fiber.dispose())
+    const stored = { provider: 'deepseek-official', model: 'deepseek-chat' }
+    const save = vi.fn(() => Promise.resolve())
+    const remote = await createSessionTestRemote(ctx, {
+      defaultModelSelection: () => stored,
+      saveDefaultModelSelection: save,
+      cwd: '/tmp',
+    })
+    const selected = expectValue(await remote.selectModel({
+      sessionId, provider: 'deepseek-official', model: 'deepseek-reasoner', reasoningEffort: 'max', persistDefault: false,
+    }))
+    expect(selected).toEqual({ selected: {
+      provider: 'deepseek-official', model: 'deepseek-reasoner', reasoningEffort: 'max',
+    } })
+    expect(agent.model.current()).toEqual(selected.selected)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'model/selection', data: selected.selected })
+    expect(agent.session.snapshotEvents().at(-1)?.data).not.toHaveProperty('persistDefault')
+    const before = agent.session.snapshotEvents()
+    for (const selection of [
+      { provider: 'missing', model: 'model' },
+      { provider: 'deepseek-official', model: 'deepseek-reasoner', reasoningEffort: 'medium' },
+    ]) {
+      expect(await remote.selectModel({ sessionId, ...selection, persistDefault: false }))
+        .toMatchObject({ ok: false, error: { code: 'session/model-unavailable' } })
+      expect(agent.model.current()).toEqual(selected.selected)
+      expect(agent.session.snapshotEvents()).toEqual(before)
+    }
+    expect(save).not.toHaveBeenCalled()
+    expect(ctx.agentDefaultModel.currentSelection()).toEqual(stored)
   })
 
   it('saves an accepted selection as the default and survives a storage failure', async () => {

@@ -775,6 +775,14 @@ describe('modelOverrides', () => {
     return model
   }
 
+  it.each([false, true])('applies nativeTools=%s only to the overridden selector', (nativeTools) => {
+    const target = deepseekModel()
+    const profile = resolveProfiles({ deepseek: { modelOverrides: { [target.id]: { nativeTools } } } }).get('deepseek')
+    expect(profile?.nativeTools).toEqual(new Map([[target.id, nativeTools]]))
+    expect(profile?.piProvider?.getModels().length).toBe(getBuiltinModels('deepseek').length)
+    expect(profile?.piProvider?.getModels().find(model => model.id === target.id)).not.toHaveProperty('nativeTools')
+  })
+
   it('reshapes one catalog model while the rest of the catalog keeps serving', () => {
     const catalogSize = getBuiltinModels('deepseek').length
     const target = deepseekModel()

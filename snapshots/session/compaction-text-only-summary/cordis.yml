@@ -1,0 +1,41 @@
+# Authored keyless scenario: native-tool conversation and text-only summary.
+
+- id: agent-instructions
+  disabled: true
+
+- id: llm-deepseek
+  disabled: true
+
+- id: compaction-basic
+  config:
+    thresholdRatio: 0.8
+    headroomTokens: 1800
+    retainTokens: 20
+    summarizationProvider: summary-text
+    summarizationModel: ordinary-text
+    summarizationFallback: error
+    maxTokens: 1800
+
+- insert:
+    - id: llm-replay
+      name: '@deepseek-ai/dsh-llm-replay'
+      config:
+        providers:
+          - id: deepseek-official
+            name: DeepSeek
+            models:
+              - id: deepseek-v4-flash
+                contextWindow: 8980
+                defaultMaxTokens: 1000
+          - id: summary-text
+            name: Text summary
+            models:
+              - id: ordinary-text
+                contextWindow: 262144
+                nativeTools: false
+    - id: compaction-working-directory
+      name: '../../../packages/test-support/session-snapshot/tests/fixtures/compaction-working-directory.ts'
+
+- id: tool-fs
+  config:
+    applyPatch: false

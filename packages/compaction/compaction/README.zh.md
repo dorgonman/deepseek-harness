@@ -114,6 +114,8 @@ kind: "package-reference"
 
 `compaction/*` 事件通过 declaration merging 扩展 `SessionEventMap`（可合并扩展）——它们是会话事件，不是 Cordis `Events`，且都仅写入日志。生成的[持久化日志事件目录](../../../docs/persistence-catalog.zh.md)拥有每个事件的 payload；`compaction/prune` 记录了与工具结果修剪器共享的影子价格协议。
 
+摘要可以记录 `requestProjection`，以标识其辅助请求如何表示所选历史。[摘要请求投影参考](../../../docs/subsystems/compaction.zh.md#summary-request-projection)定义这些标签及历史记录中缺失字段的含义；读取方使用已记录事实，不依赖当前模型能力。
+
 </details>
 
 -----

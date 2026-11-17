@@ -80,7 +80,16 @@ All settings are optional. With context window `W`, effective request output cap
 
 Misconfiguration fails fast: unknown settings, duplicate per-model overrides, invalid token counts, both retention forms together, or a retention ratio at least as large as the threshold ratio reject the plugin at load. When the model is first used, `W − O − B` must be positive and the resolved retained budget must be below the trigger. Zero headroom requires an explicit positive `maxTokens`, globally or in that model policy. Explicit headroom must fit the window. An omitted summary cap follows the adjusted headroom on the conversation route when it declares a window, with a minimum of one token. Explicit summary targets keep their configured or inherited cap. Lower `thresholdRatio` to compact earlier.
 
-A configured summary target is validated before its provider call: an unverifiable route fails with `SUMMARY_TARGET_UNVERIFIED`, a non-chat request protocol fails with `SUMMARY_TARGET_NOT_CHAT`, and a replayed request whose estimated input plus summary cap exceeds the summarizer's own context window fails with `SUMMARY_CAPACITY_EXCEEDED`. The checks use the LLM service's model metadata and the token meter, not the conversation route's capacity, and none falls back to another provider.
+A configured summary target is validated before its provider call: an unverifiable route fails with `SUMMARY_TARGET_UNVERIFIED`, a non-chat request protocol fails with `SUMMARY_TARGET_NOT_CHAT`, and the complete selected summary envelope plus its output cap exceeding the summarizer context fails with `SUMMARY_CAPACITY_EXCEEDED`. Pricing includes transcript framing and the final instruction. These checks use the summarizer’s metadata and token meter; none falls back to another provider.
+
+<a id="persist-preset-summary-policy"></a>
+### Persist preset summary policy
+
+Policy control addresses canonical `@deepseek-ai/dsh-agent-preset` declarations with enabled `compaction` and `compaction-basic` row IDs. Disabled or conditional compaction rows are refused.
+
+When the profile mounts both the preset registry and configuration editor, the host exposes `compactionPolicy.read(entryId)` and `setSummaryTarget(request)`. Read the exact declaring row, then pass its revision, an explicit provider/model/output budget, and only the existing source-route overrides you own. Policy wire types are exported from `@deepseek-ai/dsh-compaction-basic/types`. The operation sets fallback to `error`; omitted overrides, conversation defaults and sibling plugin values remain unchanged. Missing or ambiguous rows, stale revisions and unverifiable Chat targets reject the operation.
+
+Each call edits one preset through the editor’s locked, freshly reconciled transaction. Target metadata is checked before editing and again after replacement-preset reconciliation; activation or metadata failure restores the prior patch and runtime. Success reports persisted and activated policy for new bindings, while existing Agents retain their previous revision. This does not guarantee future provider availability. Separate preset writes are not atomic together. The editor stores the complete preset configuration, retaining its current plugin list as an explicit profile override.
 
 ### What happens when condensation runs
 
@@ -116,7 +125,7 @@ The backend is built on four commitments:
 
 - **One measurement service prices every decision.** The singleton `ctx.tokenMeter` measures the latest canonical logged envelope and current surface at one consumed-log revision. When the routed adapter declares request-image pricing, the meter applies it to image history. Model-switch pressure, retention, and range selection use destination pricing; region shrink validation uses the last committed route; logged replacement shadow prices stay on the route-independent heuristic so pure projection folds remain consistent.
 - **The log-recorded bracket is the transaction.** All entry points share one bracket-first region transaction: validate the range and live lock, append `compaction/start` synchronously, prepare and await the summary, revalidate, append `compaction/summary` plus the replacement, and make exactly one closing attempt. Automatic and explicit-region calls require a numeric open-turn owner and whole-surface stability; `compactNow()` reserves idle admission, uses `turn: null`, accepts append-only context outside its selected span, flushes every closed attempt, and releases admission in `finally`.
-- **Summarization reuses the provider's warm prefix.** Replaying the system prompt held by the `system/message` at surface node 0, the last routed request's tools, and the shadowed-region messages byte-for-byte makes the auxiliary call a genuine prefix of the conversation, so only the trailing instruction and the summary output are uncached.
+- **Summary input follows exact-route capability.** Ordinary Chat targets with explicit `nativeTools: false` receive an inert text transcript. Other ordinary Chat targets retain `conversation-prefix-v1`, replaying the system head, tools and selected history for warm-prefix reuse where projection permits.
 - **`summarize()` is the sole subclass hook.** A template- or remote-summarizer subclass can override it while pressure, retention, cited source events, shrink validation, and shadowed-token accounting stay on the token meter.
 
 ### Automatic triggers and overflow recovery
@@ -129,7 +138,11 @@ Pressure policy resolves capacity from the adapter that owns the durable route. 
 
 ### Summarization mechanics
 
-A direct `ctx.llm.stream()` call uses the configured provider/model pair and cap, falling back to the latest logged request target and then the `AgentOptions` pair, without running the loop-only `agent/request` extension point. The call replays the derived `system/message` at surface node 0 as the leading entry of `messages`, followed by the shadowed-region messages (including a shadowed in-history `system/message` in its surface position), and supplies the header's active tools for route-specific projection. The selected adapter must resolve image references in the replayed messages or explicitly reject them. The call appends the compaction instruction as the final user message, preserving the provider's warm prefix where projection permits. An empty-content system head contributes no message but remains outside the compacted range. The final instruction is a frozen `RequestUserInput` without durable identity or source; the replayed history and persisted checkpoint remain durable messages. The call sets `GenerateOptions.purpose` to `compaction`; only returned text enters the checkpoint, excluding reasoning and tool calls. Image output fails with `UNSUPPORTED_CONTENT` rather than disappearing. The replacement user message frames the summary with `<compacted-summary>` tags; the raw summary remains on the `compaction/summary` event. The call also carries `Session.toolHistory()` so the runtime can project deferred and retained definitions; a prefix missing update messages uses active declarations without developer updates.
+One direct `ctx.llm.stream()` call uses the resolved summary target and output cap without running the loop-only `agent/request` hook. `conversation-prefix-v1` replays the derived system head, selected messages and header tools, with `Session.toolHistory()` for deferred and retained declarations. The selected adapter resolves image references or rejects them. An empty system head stays outside the compacted range but contributes no message. The final compaction instruction is a frozen `RequestUserInput` without durable identity; source history and the checkpoint remain durable. The call uses purpose `compaction`; only text enters the checkpoint, reasoning stays excluded, and tool-call or image output fails explicitly. The replacement user message carries `<compacted-summary>` framing; the raw result remains on `compaction/summary`.
+
+`text-transcript-v1` is selected only for an ordinary Chat target with explicit `nativeTools: false`. The auxiliary request quotes source roles, text/reasoning, tool names, raw arguments, call IDs, results/errors and attachment handle text in order. It sends no tool declarations/history, structured tool blocks or provider replay metadata. Unsupported content rejects instead of disappearing. This conversion does not rewrite the original Session or change region selection, commit or cancellation ownership.
+
+New `compaction/summary` records declare `requestProjection` as `conversation-prefix-v1` or `text-transcript-v1`, so the auxiliary input choice is reconstructable from the recorded source events and code. Absence retains the historical conversation-prefix behavior.
 
 ### The region transaction
 
@@ -150,6 +163,8 @@ The transaction validates the surface span and the durable lock, appends `compac
 | [`src/summarizer.ts`](src/summarizer.ts) | Default `ctx.llm.stream()` summarization, checkpoint framing, safe-summary projection |
 | [`src/config.ts`](src/config.ts) | Load-time validation and routed-model policy resolution |
 | [`src/types.ts`](src/types.ts) | `BasicCompactionConfig` and resolved policy vocabulary |
+| [`src/policy-control.ts`](src/policy-control.ts) | Revision-checked profile summary-policy edits |
+| [`src/policy-types.ts`](src/policy-types.ts) | Policy control request and result fields |
 
 The package root's type declarations add `compaction` to `LlmRequestPurposeMap`. Direct callers constructing compaction requests use `import type {} from '@deepseek-ai/dsh-compaction-basic'` so `GenerateOptions.purpose` includes that key.
 
@@ -245,7 +260,7 @@ This is a separate model call: the replayed conversation prefix plus the fixed i
 
 #### KV Cache effect
 
-The replayed system prompt, tools, and shadowed-region messages match the conversation's last routed request byte-for-byte, so the provider's warm prefix cache is reused up to the trailing instruction; only that instruction, and the summary output, is uncached. Routing the summarizer to a different provider/model, or compacting a non-head range, forgoes this reuse.
+`conversation-prefix-v1` can reuse the conversation’s byte-for-byte system, tool and selected-message prefix up to the trailing instruction. A different target or non-head range can lose that reuse. `text-transcript-v1` changes the prefix and adds framing tokens; it makes no warm-cache or speed promise.
 
 ## Known Limitations and Deferred Work
 
@@ -260,6 +275,7 @@ These limits define when automatic condensation is a poor fit or needs special c
 - **`compactRegion` requires an open turn** — a manual call on a fully-closed session throws ("no open turn") rather than compacting.
 - **Summarization failure preserves the latest durable surface** — pre-step pressure logs a warning and continues; model-switch pressure rejects the destination request. Completed pruning and earlier checkpoints survive either failure. Summarization truncation at `maxTokens`, which hidden reasoning tokens can consume, follows the same rule.
 - **Cross-model image pricing can reject a useful summary** — switch range selection uses destination pricing, while shrink validation uses the committed route. Different image prices can make a summary fail shrink validation even when it would reduce destination pressure.
+- **Preset saves retain the current plugin list** — a newly saved profile override captures inherited plugins; later bundle additions need explicit reconciliation. Existing Agents keep their old preset revision until released.
 
 <a id="dev-note"></a>
 ### Dev Note

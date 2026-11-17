@@ -1,0 +1,12 @@
+version: 1
+scenario: compaction-text-only-summary
+profile: headless
+composition: compaction-text-only-summary
+recording: authored
+platform: posix
+header:
+  class: compaction-text-only-summary
+  pin: true
+  systemPromptSource: compaction-recovery
+  toolSchemasSource: compaction-recovery
+  changes: 1

@@ -13,7 +13,7 @@
 | 事件 | 载荷 | 作用 |
 |---|---|---|
 | `compaction/start` | `{ turn }` | 获取日志记录的锁；数字标识尚未结束的自动轮次，`null` 标识独立手动尝试 |
-| `compaction/summary` | `{ summary, rawOutput?, llmStreamCall?, shadowedRange, shadowedSeqs, shadowedTokenCount, provider, model, maxTokens?, usage? }` | 安全摘要投影、可选的完整提供方输出与 usage、生成结果时恰好通过此上下文的 `ctx.llm.stream()` 发起一次调用所带的 `llmStreamCall: true` 标记（此时必须提供完整的 `rawOutput`）、被遮蔽的 surface 边界对（`start`/`end` seq——位置跨度，而非数值区间）、按 surface 顺序排列的被遮蔽 seq、估算 token 数，以及摘要调用的 envelope（`provider`、`model`，若有生成上限则还包括该上限）——写入日志后，该一次性请求可由日志 + 代码重建（见可重建性 Agent Note）；未带标记的 `rawOutput` 并不能判定调用路径 |
+| `compaction/summary` | `{ summary, rawOutput?, llmStreamCall?, requestProjection?, shadowedRange, shadowedSeqs, shadowedTokenCount, provider, model, maxTokens?, usage? }` | 安全摘要投影、可选的完整提供方输出与 usage、生成结果时恰好通过此上下文的 `ctx.llm.stream()` 发起一次调用所带的 `llmStreamCall: true` 标记（此时必须提供完整的 `rawOutput`）、被遮蔽的 surface 边界对（`start`/`end` seq——位置跨度，而非数值区间）、按 surface 顺序排列的被遮蔽 seq、估算 token 数，以及摘要调用的 envelope（`provider`、`model`，若有生成上限则还包括该上限）——写入日志后，该一次性请求可由日志 + 代码重建（见可重建性 Agent Note）；未带标记的 `rawOutput` 并不能判定调用路径 |
 | `compaction/end` | `{ turn, error? }` | 使用相同的数字或 `null` 归属值释放锁（`error` 记录失败尝试） |
 
 锁括住**整个**操作：先追加 `compaction/start`，然后执行摘要生成、写入 `compaction/summary` 记录与 `user/message` 替换，最后才追加 `compaction/end`。最后释放锁意味着操作中途崩溃会表现为可检测的遗留锁（有 `compaction/start` 而无匹配的 `compaction/end`），而非一个虚假声称压缩已完成的 `compaction/end`。
@@ -21,6 +21,18 @@
 这些标记表示锁的时间点，而不是排他的容器。摘要等待期间，不相关的空闲注入可以出现在独立的手动 start 与 end 之间。手动路径只重新验证所选位置 span，因此替换检查点之后仍保留该注入上下文。活动的未匹配 start 会阻塞所有入口点；较新 `session/end-seed` 之前的未匹配 start 是先前生命周期留下的陈旧证据，会被忽略。
 
 这些变体在 `declare module '@deepseek-ai/dsh-session/types'` 块内合并，因此——与其他子系统页面上的顶层类型不同——它们不以漂移检查的 ` ```ts type-equiv ` 块粘贴（`verify-type-equiv` 提取器只按名称匹配顶层声明）。上方的载荷表即为目录条目；权威字段请循源码链接查看。
+
+<a id="summary-request-projection"></a>
+### 摘要请求投影
+
+`requestProjection` 记录辅助请求如何表示其所选历史。默认的 `compaction-basic` LLM 摘要器为每条新摘要记录一个明确标签。
+
+| 标签 | 请求表示 |
+|---|---|
+| `conversation-prefix-v1` | 回放带有工具声明与历史的对话前缀，随后追加摘要指令。 |
+| `text-transcript-v1` | 发送有序的惰性文本，保留原始角色、内容、工具调用与结果事实，以及附件句柄；省略工具声明、工具历史、结构化工具内容和提供方回放元数据。 |
+
+缺失标签时保留历史记录的既有行为。读取方不得根据当前模型能力推断标签。投影只影响辅助请求；原始 Session 历史和压缩事务保持不变。[基础后端](../../packages/compaction/compaction-basic/README.zh.md)负责投影选择、容量检查与摘要输出验证。
 
 <a id="image-offload"></a>
 ## 图片省略
@@ -208,6 +220,32 @@ abstract compactRegion( start: SessionSeq, end: SessionSeq, agent: CompactionAge
 Types: [CommandId](commands.zh.md) · [SessionSeq](session.zh.md)
 
 Source: [`packages/compaction/compaction/src/index.ts`](../../packages/compaction/compaction/src/index.ts)
+
+<a id="ctxcompactionpolicycontrol--compactionpolicycontrol"></a>
+
+### `ctx.compactionPolicyControl` — `CompactionPolicyControl`
+
+Host-only policy control mounted by the preset owner when persistent editing exists.
+
+```ts cordis-catalog
+/** Read one uniquely profile-owned preset without exposing other plugin configuration.
+ * @param entryId Exact declaration row id in the active profile.
+ * @returns Current summary fields and their revision.
+ * @throws RemoteError when the declaration cannot be addressed safely.
+ */
+@Remote read(entryId: string): PresetCompactionPolicy
+
+/** Persist one explicit summary target and verify the replacement preset before committing success.
+ * @param request Expected revision, target and explicitly owned existing overrides.
+ * @param signal Optional cancellation; absence permits the operation to finish without caller cancellation.
+ * @returns Persisted and activated policy for new preset bindings; existing Agents retain their revision.
+ * @throws RemoteError on stale policy, unverifiable target, persistence failure or failed activation.
+ *   Editor failures restore the previous patch.
+ */
+@Remote async setSummaryTarget(request: PresetCompactionPolicyUpdate, signal?: AbortSignal): Promise<PresetCompactionPolicyWrite>
+```
+
+Source: [`packages/compaction/compaction-basic/src/policy-control.ts`](../../packages/compaction/compaction-basic/src/policy-control.ts)
 
 <a id="ctxdecisionrelevance--decisionrelevancefilter"></a>
 

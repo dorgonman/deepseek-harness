@@ -24,8 +24,11 @@
   en: 4cb73d7a57908948
   zh: 7ba2ddc4c76e4957
 /deepseek-ai-dsh-compaction-basic/use-this-package/tuning-when-condensation-starts:
-  en: d26c0b1092f8788d
-  zh: f431d1e0c1787ffd
+  en: 30633c9d9f085df5
+  zh: df757c56a8d84636
+/deepseek-ai-dsh-compaction-basic/use-this-package/persist-preset-summary-policy:
+  en: 298b2b4d527b32ee
+  zh: e4771587b213c8a2
 /deepseek-ai-dsh-compaction-basic/use-this-package/what-happens-when-condensation-runs:
   en: c872a8ef069596f0
   zh: b3a48e309ae830d4
@@ -42,14 +45,14 @@
   en: deb655b3b1860576
   zh: 79f56e41a9dfe01f
 /deepseek-ai-dsh-compaction-basic/understand-the-implementation/design-philosophy:
-  en: ed2d43610d4eaa83
-  zh: b46a1eaad396cdd7
+  en: 752e91fd4d59dbab
+  zh: 89bc1cdd93d0b2b7
 /deepseek-ai-dsh-compaction-basic/understand-the-implementation/automatic-triggers-and-overflow-recovery:
   en: 9e6e472b0f3977d3
   zh: fdc0e827c19ba401
 /deepseek-ai-dsh-compaction-basic/understand-the-implementation/summarization-mechanics:
-  en: 967531b71453eb88
-  zh: c7919b46e36763e6
+  en: 01efc60ba934303b
+  zh: 3dbf09902f3ab1b7
 /deepseek-ai-dsh-compaction-basic/understand-the-implementation/the-region-transaction:
   en: f4330f6bff22d400
   zh: 46e16c51bb66a0f7
@@ -57,8 +60,8 @@
   en: 313e019b1a9f8aa8
   zh: 3c75d11b02adb693
 /deepseek-ai-dsh-compaction-basic/understand-the-implementation/source-map:
-  en: 747bad235fbb04ad
-  zh: 02e6562f3d745d4f
+  en: 9b0ea30ea38a0439
+  zh: 65844ceb7b88e7cf
 /deepseek-ai-dsh-compaction-basic/further-exploration:
   en: 84b5b81eb9b5965d
   zh: 7000af0fa502fcc1
@@ -93,11 +96,11 @@
   en: 5e0679cb7cb4291a
   zh: c9df8ebc526b05d9
 /deepseek-ai-dsh-compaction-basic/model-experience/auxiliary-summarizer-request/kv-cache-effect:
-  en: d31d3e3d46542c91
-  zh: 5a42f873993e0c79
+  en: 22fc6aded55b5b38
+  zh: c6753314bdc454ae
 /deepseek-ai-dsh-compaction-basic/known-limitations-and-deferred-work:
-  en: e2514d868dd5abbb
-  zh: a84fd6428d5c245a
+  en: a6a9dcb9e2bdd36d
+  zh: b50d415c5122fddc
 /deepseek-ai-dsh-compaction-basic/known-limitations-and-deferred-work/dev-note:
   en: 1fec7b90c3b68c49
   zh: ad9ae54a598846d0

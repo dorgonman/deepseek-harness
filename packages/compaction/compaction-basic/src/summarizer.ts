@@ -5,7 +5,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { contentHasImage, BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
+import type { SummaryRequestProjection } from '@deepseek-ai/dsh-compaction'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 // Type-only: makes the token meter service available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-token-meter'
@@ -13,6 +14,7 @@ import type {
   ContentBlock, FinishReason, GenerateOptions, LlmResolvedModelInfo, Message, RequestMessage, TokenUsage, ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { projectSummaryTranscript } from './request-projection.ts'
 
 interface SummaryConfig {
   readonly summarizationProvider: string
@@ -27,10 +29,9 @@ const SUMMARY_CLOSE_TAG = '</compacted-summary>'
 
 /**
  * The summarization directive, delivered as the FINAL user message after the
- * replayed conversation rather than as a distinct summarizer system prompt.
- * Keeping the conversation's own system prompt, tools, and message prefix in
- * front of it makes the auxiliary call a genuine prefix of the last routed
- * request, so the provider's KV cache is reused instead of invalidated.
+ * selected history representation rather than as a separate system prompt.
+ * Routes using the conversation prefix retain its cache alignment; text-only
+ * transcript routes quote that history before this instruction.
  */
 const COMPACTION_INSTRUCTION = [
   'You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.',
@@ -74,10 +75,9 @@ const CHECKPOINT_PREAMBLE =
   'This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.'
 
 /**
- * The replayed conversation surface the summarizer condenses. Reproducing the
- * last routed request's system prompt, tools, and leading messages verbatim
- * lets the auxiliary call reuse the provider's warm prefix cache; the trailing
- * compaction instruction is then the only novel input.
+ * The selected conversation surface before auxiliary request projection.
+ * Routes with native tools retain its prefix; explicit no-tools Chat routes
+ * quote it as text without changing these durable messages.
  */
 export interface SummarizationInput {
   /** The conversation's tool schemas, reused for prefix-cache alignment; absent when the request carried none. */
@@ -92,6 +92,8 @@ export type SummaryResult = {
   provider: string
   model: string
   maxTokens?: number
+  /** Selected input representation; absent for a custom summarizer that does not report it. */
+  requestProjection?: SummaryRequestProjection
   /** Provider-reported usage for this summarization request. */
   usage?: TokenUsage
 } & (
@@ -110,9 +112,9 @@ export type SummaryResult = {
 )
 
 /**
- * Run the default cache-reusing `ctx.llm.stream()` summarization call: replay
- * the conversation prefix, then append the compaction instruction as the final
- * user message so the provider's warm prefix cache is reused.
+ * Summarize through the exact ordinary Chat route. Explicit no-tools routes
+ * receive quoted text history; other routes retain the conversation prefix.
+ * Both append the final compaction instruction and report their selected input.
  * @param ctx - context providing the LLM service.
  * @param config - resolved backend configuration.
  * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.
@@ -154,26 +156,6 @@ export async function summarizeWithLlm(
     )
   }
 
-  const assembler = new BlockAssembler()
-  const messages: RequestMessage[] = [
-    ...input.messages,
-    deepFreeze({
-      role: 'user',
-      content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
-    }),
-  ]
-  const options: GenerateOptions = {
-    provider: target.provider,
-    model: target.model,
-    messages,
-    toolHistory: agent.session.toolHistory(),
-    ...input.tools === undefined ? {} : { tools: [...input.tools] },
-    maxTokens: config.maxTokens,
-    sessionId: agent.session.id,
-    purpose: 'compaction',
-    ...signal === undefined ? {} : { signal },
-  }
-
   // The summarizer is an ordinary text-generating Chat deployment. Verify the
   // exact route's protocol and capacity before spending a provider call, so an
   // incompatible or oversized summary fails with the summarizer named instead
@@ -203,10 +185,37 @@ export async function summarizeWithLlm(
       'SUMMARY_TARGET_NOT_CHAT',
     )
   }
+  signal?.throwIfAborted()
+  const requestProjection: SummaryRequestProjection = info?.nativeTools === false
+    ? 'text-transcript-v1'
+    : 'conversation-prefix-v1'
+  const prefix = requestProjection === 'text-transcript-v1'
+    ? projectSummaryTranscript(input.messages, ref => ctx.llm.fileRequestText(ref))
+    : input.messages
+  const messages: RequestMessage[] = [
+    ...prefix,
+    deepFreeze({
+      role: 'user',
+      content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
+    }),
+  ]
+  const options: GenerateOptions = {
+    provider: target.provider,
+    model: target.model,
+    messages,
+    ...requestProjection === 'conversation-prefix-v1' ? {
+      toolHistory: agent.session.toolHistory(),
+      ...input.tools === undefined ? {} : { tools: [...input.tools] },
+    } : {},
+    maxTokens: config.maxTokens,
+    sessionId: agent.session.id,
+    purpose: 'compaction',
+    ...signal === undefined ? {} : { signal },
+  }
   const meter = ctx.get('tokenMeter')
   if (info?.context !== undefined && meter !== undefined) {
     const inputTokens = messages.reduce((total, message) => total + meter.estimateMessage(message), 0)
-      + meter.estimateTools(input.tools)
+      + meter.estimateTools(options.tools)
     const required = inputTokens + config.maxTokens
     if (required > info.context.contextWindow) {
       throw new LlmError(
@@ -218,6 +227,7 @@ export async function summarizeWithLlm(
     }
   }
 
+  const assembler = new BlockAssembler()
   for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)
   const error = finishError(assembler.finish)
   if (error !== undefined) throw error
@@ -234,6 +244,7 @@ export async function summarizeWithLlm(
     provider: options.provider,
     model: options.model,
     maxTokens: config.maxTokens,
+    requestProjection,
     ...(assembler.usage === undefined ? {} : { usage: assembler.usage }),
   }
 }
@@ -263,17 +274,21 @@ function finishError(finish: FinishReason): Error | undefined {
       error.code = 'MAX_TOKENS'
       return error
     }
+    case 'tool-calls':
+      return new LlmError('compaction summary must not call tools', 'UNSUPPORTED_CONTENT')
     default:
       return undefined
   }
 }
 
-/** Reject visual output and keep only text before synthesizing a user message. */
+/** Reject unsupported output and omit reasoning before synthesizing a user message. */
 function summaryText(
   blocks: readonly ContentBlock[],
 ): Array<Extract<ContentBlock, { type: 'text' }>> {
-  if (contentHasImage(blocks)) {
-    throw new LlmError('compaction summary cannot contain image output', 'UNSUPPORTED_CONTENT')
+  for (const block of blocks) {
+    if (block.type !== 'text' && block.type !== 'reasoning') {
+      throw new LlmError(`compaction summary cannot contain ${block.type} output`, 'UNSUPPORTED_CONTENT')
+    }
   }
   return blocks.filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
 }

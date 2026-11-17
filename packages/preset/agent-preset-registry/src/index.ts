@@ -17,6 +17,7 @@ import type { AgentPreset, Config } from './preset.ts'
 import { agentPresetProjectionDefinition } from './session.ts'
 import { auditRows, leakedServices, mountPreset, serviceForMount, type PresetMount } from './mount.ts'
 import { activeCompositionModules, definitionComposition, mountedCompositionRows, type AgentPresetComposition, type AgentPresetInspection } from './composition-inventory.ts'
+import BasicCompactionEngine, { CompactionPolicyControl } from '@deepseek-ai/dsh-compaction-basic'
 
 export { agentPresetProjectionDefinition } from './session.ts'
 export { entryListProblem, type PresetDefinition } from './definition.ts'
@@ -73,6 +74,16 @@ export class AgentPresetRegistry extends TypertRemoteService {
     const ctx = this.owner
     this.agentPresetProjectionHandle = await ctx.sessionProjections.register(agentPresetProjectionDefinition)
     ctx.inject(['settings'], (child) => { child.effect(() => child.settings.configure({ auto: false }, ctx.fiber)) })
+    ctx.inject(['configEditor'], (child) => {
+      child.plugin(CompactionPolicyControl, {
+        verifyActivation: async (presetId: string, inspect: (policy: BasicCompactionEngine['config'] | undefined) => void) => {
+          await using lease = await this.acquireScope(presetId)
+          const mount = this.generations.get(lease.key)?.mount
+          const backend = mount === undefined ? undefined : serviceForMount(this.owner, mount, 'compaction')
+          inspect(backend instanceof BasicCompactionEngine ? backend.config : undefined)
+        },
+      })
+    })
     ctx.on('session/event', (session, event) => {
       if (event.type === 'agent-preset/selected') ctx.emit('agent-preset/selected', session.id, event.data.agentPreset)
     })

@@ -6,8 +6,11 @@
   en: 2b372c8f979dfc0e
   zh: 818c50976481b90b
 /compaction/the-compaction-session-events:
-  en: bc9bbbe82efc308c
-  zh: 0b2b7f70f5df5d99
+  en: 55040d8a66ca6997
+  zh: 2b71c9f93eeaa995
+/compaction/the-compaction-session-events/summary-request-projection:
+  en: b7e389b71e40aad1
+  zh: 63f1729d043f3c70
 /compaction/image-offload:
   en: 19632b674911826b
   zh: b29ef7ff4ae58e58

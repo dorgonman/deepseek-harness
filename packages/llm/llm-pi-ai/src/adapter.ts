@@ -386,6 +386,7 @@ export class PiAiAdapter extends LlmAdapter {
     // catalog's `maxTokens` sizes the model and stops there.
     const configuredMaxTokens = profile.configuredMaxTokens.get(model)
     const requestProtocol = profile.requestProtocols.get(model)
+    const nativeTools = requestProtocol === 'kinf-decision-v1' ? false : profile.nativeTools.get(model)
     return {
       provider,
       id: model,
@@ -393,9 +394,9 @@ export class PiAiAdapter extends LlmAdapter {
       inputModalities: [...resolvedModel.input],
       context: { contextWindow: resolvedModel.contextWindow },
       ...configuredMaxTokens === undefined ? {} : { defaultMaxTokens: configuredMaxTokens },
+      ...nativeTools === undefined ? {} : { nativeTools },
       ...requestProtocol === 'kinf-decision-v1' ? {
         requestProtocol,
-        nativeTools: false,
         inputProjectionPolicy: 'reject' as const,
       } : {},
       ...reasoningInfo(resolvedModel, defaultLevel),

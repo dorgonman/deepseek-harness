@@ -64,6 +64,9 @@
     },
     {
       "path": "../../interaction/user-approval"
+    },
+    {
+      "path": "../../compaction/compaction-basic"
     }
   ]
 }

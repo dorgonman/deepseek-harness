@@ -26,8 +26,10 @@ describe('model request routing', () => {
     expect(model).not.toHaveProperty('headers')
     expect(model).not.toHaveProperty('requestModel')
     expect(model).not.toHaveProperty('requestProtocol')
+    expect(model).not.toHaveProperty('nativeTools')
     const resolved = resolveProfiles(materialized.providers ?? {}).get('acme-gateway')
     expect(resolved?.requestProtocols.size).toBe(0)
+    expect(resolved?.nativeTools.size).toBe(0)
   })
 
   it('accepts explicit model endpoints and binding headers without a provider endpoint', () => {
@@ -69,6 +71,23 @@ describe('model request routing', () => {
     } }, 'deferred').get('gateway')
     expect(profile?.modelErrors.get('invalid')).toMatch(/absolute HTTP/)
     expect(profile?.piProvider?.getModels().map(model => model.id)).toEqual(['usable'])
+  })
+})
+
+describe('native tool capability schema boundary', () => {
+  it.each([false, true])('retains an explicit nativeTools=%s declaration', (nativeTools) => {
+    const materialized = configWith({ nativeTools })() as Options
+    expect(materialized.providers?.['acme-gateway']?.models?.[0]?.nativeTools).toBe(nativeTools)
+    expect(resolveProfiles(materialized.providers ?? {}).get('acme-gateway')?.nativeTools.get('m')).toBe(nativeTools)
+  })
+
+  it.each(['false', 0, {}, []])('rejects malformed nativeTools=%j before persistence', (nativeTools) => {
+    expect(configWith({ nativeTools })).toThrow()
+  })
+
+  it('rejects a valueless YAML capability instead of treating it as absent', () => {
+    expect(() => { assertServiceable(configWith({ nativeTools: null })() as Options) })
+      .toThrow(/nativeTools must be a boolean/)
   })
 })
 

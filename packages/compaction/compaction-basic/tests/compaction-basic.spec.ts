@@ -1378,14 +1378,7 @@ class ExposedCompactionEngine extends BasicCompactionEngine {
     input: SummarizationInput,
     owner: Agent,
     signal?: AbortSignal,
-  ): Promise<{
-    summary: ContentBlock[]
-    rawOutput?: ContentBlock[]
-    provider: string
-    model: string
-    maxTokens?: number
-    usage?: TokenUsage
-  }> {
+  ): Promise<SummaryResult> {
     return this.summarize(input, owner, signal)
   }
 }
@@ -1446,7 +1439,6 @@ describe('default one-shot summarizer', () => {
     const { adapter, compact } = await summarizerHarness([
       { type: 'reasoning', text: 'private' },
       { type: 'text', text: 'public summary' },
-      { type: 'tool-call', id: ToolCallId('unexpected'), name: 'x', arguments: '{}' },
     ], undefined, MODEL, {
       auto: false,
       summarizationProvider: MODEL,
@@ -1462,12 +1454,12 @@ describe('default one-shot summarizer', () => {
       rawOutput: [
         { type: 'reasoning', text: 'private' },
         { type: 'text', text: 'public summary' },
-        { type: 'tool-call', id: ToolCallId('unexpected'), name: 'x', arguments: '{}' },
       ],
       llmStreamCall: true,
       provider: MODEL,
       model: MODEL,
       maxTokens: 321,
+      requestProjection: 'conversation-prefix-v1',
       usage: adapter.usage,
     })
     expect(adapter.lastOptions).toMatchObject({
@@ -1481,6 +1473,104 @@ describe('default one-shot summarizer', () => {
     })
     const instruction = adapter.lastOptions?.messages.at(-1)?.content[0]
     expect(instruction?.type === 'text' ? instruction.text : '').toContain('## Primary Request and Intent')
+  })
+
+  it.each(['block', 'finish'] as const)('rejects tool-call summary %s without replacing history', async (form) => {
+    const { compact } = await summarizerHarness([
+      { type: 'text', text: 'incomplete checkpoint' },
+      ...form === 'block'
+        ? [{ type: 'tool-call' as const, id: ToolCallId('unexpected'), name: 'x', arguments: '{}' }]
+        : [],
+    ], form === 'finish' ? { kind: 'tool-calls' } : { kind: 'stop' }, MODEL, { auto: false, maxTokens: 32 })
+    const session = conversation(2)
+    const before = session.snapshotEvents()
+    const nodes = [...session.surface.nodes]
+    await expect(compact.compactRegion(nodes[0]!, nodes[1]!, agent(session, MODEL), SIGNAL))
+      .rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+    expect(session.surface.nodes).toEqual(nodes)
+    expect(session.snapshotEvents().slice(0, before.length)).toEqual(before)
+    expect(session.snapshotEvents().slice(before.length).map(event => event.type))
+      .toEqual(['compaction/start', 'compaction/end'])
+  })
+
+  it('quotes tool history only for an explicit no-tools ordinary summary route', async () => {
+    const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }], undefined, MODEL, {
+      auto: false, maxTokens: 32,
+    })
+    vi.spyOn(adapter, 'resolveModel').mockResolvedValue({
+      provider: MODEL, id: MODEL, name: MODEL, nativeTools: false, context: { contextWindow: 65_536 },
+    })
+    const session = toolConversation()
+    const before = session.snapshotEvents()
+    const nodes = [...session.surface.nodes]
+    await compact.compactRegion(nodes[0]!, nodes[2]!, agent(session, MODEL), SIGNAL)
+
+    const options = adapter.lastOptions
+    expect(options).toMatchObject({ provider: MODEL, model: MODEL, purpose: 'compaction', sessionId: session.id })
+    expect(options).not.toHaveProperty('tools')
+    expect(options).not.toHaveProperty('toolHistory')
+    expect(options?.messages).toHaveLength(2)
+    expect(options?.messages.every(message => message.role === 'user'
+      && message.content.every(block => block.type === 'text'))).toBe(true)
+    expect(options?.messages[0]).not.toHaveProperty('source')
+    expect(options?.messages[0]).not.toHaveProperty('id')
+    const block = options?.messages[0]?.content[0]
+    const transcript = block?.type === 'text' ? block.text : ''
+    expect(transcript).toContain('"role":"assistant"')
+    expect(transcript).toContain('"id":"call-1","name":"read","arguments":"{}"')
+    expect(transcript).toContain('"toolCallId":"call-1","isError":false')
+    expect(session.snapshotEvents().slice(0, before.length)).toEqual(before)
+    expect(session.snapshotEvents().findLast(event => event.type === 'compaction/summary')?.data)
+      .toMatchObject({ requestProjection: 'text-transcript-v1', llmStreamCall: true })
+  })
+
+  it.each([undefined, true])('keeps the prefix for nativeTools=%s and records the selected representation', async (nativeTools) => {
+    const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }])
+    vi.spyOn(adapter, 'resolveModel').mockResolvedValue({
+      provider: MODEL, id: MODEL, name: MODEL,
+      ...nativeTools === undefined ? {} : { nativeTools },
+    })
+    const input = promptInput('unchanged prefix')
+    const output = await compact.runSummarize(input, agent(conversation(1), MODEL))
+    expect(adapter.lastOptions?.messages.slice(0, -1)).toEqual(input.messages)
+    expect(adapter.lastOptions).toHaveProperty('toolHistory')
+    expect(output.requestProjection).toBe('conversation-prefix-v1')
+  })
+
+  it('prices transcript framing and the instruction at the exact context boundary without tool schemas', async () => {
+    const { ctx, adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }], undefined, MODEL, {
+      auto: false, maxTokens: 32,
+    })
+    const info = { provider: MODEL, id: MODEL, name: MODEL, nativeTools: false }
+    const resolve = vi.spyOn(adapter, 'resolveModel').mockResolvedValue({ ...info, context: { contextWindow: 65_536 } })
+    const stream = vi.spyOn(adapter, 'stream')
+    const input = {
+      ...promptInput('precision history'),
+      tools: [{ name: 'unused', description: 'large '.repeat(10_000), parameters: { type: 'object' } }],
+    }
+    const owner = agent(conversation(1), MODEL)
+    await compact.runSummarize(input, owner)
+    const required = (adapter.lastOptions?.messages ?? [])
+      .reduce((total, message) => total + ctx.tokenMeter.estimateMessage(message), 0) + 32
+    resolve.mockResolvedValue({ ...info, context: { contextWindow: required } })
+    await expect(compact.runSummarize(input, owner)).resolves.toMatchObject({ requestProjection: 'text-transcript-v1' })
+    resolve.mockResolvedValue({ ...info, context: { contextWindow: required - 1 } })
+    await expect(compact.runSummarize(input, owner)).rejects.toMatchObject({ code: 'SUMMARY_CAPACITY_EXCEEDED' })
+    expect(stream).toHaveBeenCalledTimes(2)
+    expect(required).toBeGreaterThan(ctx.tokenMeter.estimateMessage(input.messages[0]!) + 32)
+  })
+
+  it('preserves cancellation during no-tools capability resolution without committing a summary', async () => {
+    const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }])
+    const controller = new AbortController()
+    const reason = new Error('cancel summary capability lookup')
+    vi.spyOn(adapter, 'resolveModel').mockImplementation(async () => {
+      controller.abort(reason)
+      return { provider: MODEL, id: MODEL, name: MODEL, nativeTools: false }
+    })
+    await expect(compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL), controller.signal))
+      .rejects.toBe(reason)
+    expect(adapter.lastOptions).toBeUndefined()
   })
 
   it('replays the conversation prefix and appends the instruction as the final message', async () => {
@@ -2046,6 +2136,7 @@ describe('summary target preflight', () => {
       id: 'probe',
       name: 'probe',
       requestProtocol: 'kinf-decision-v1',
+      nativeTools: false,
       context: { contextWindow: 262_144 },
     })
     await expect(summarizeWithLlm(

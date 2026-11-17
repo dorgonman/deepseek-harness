@@ -12,6 +12,8 @@ import LlmRuntime, { createMessage, createUserMessage, userAgent } from '@deepse
 import { SessionId } from '@deepseek-ai/dsh-session'
 import AuthorizationService from '@deepseek-ai/dsh-authorization'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
+import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { profileComposition } from '../../../settings/settings/tests/profile-composition.ts'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { assemble } from './assemble.ts'
@@ -38,8 +40,13 @@ afterEach(async () => {
   vi.unstubAllEnvs()
 })
 
-/** Boot the dormant composition: a bare `llm-pi-ai` row with no config at all. */
-async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }> {
+/** Mount real AgentLoop services through the composition's LLM module slot. */
+async function agentLoopServices(ctx: Context): Promise<void> {
+  await mountAgentLoopTestDependencies(ctx)
+}
+
+/** Boot the dormant composition, optionally with real AgentLoop dependencies. */
+async function loadComposition(options: { agentLoop?: boolean } = {}): Promise<{ ctx: Context; settingsPath: string }> {
   root = await mkdtemp(join(tmpdir(), 'dsh-pi-composition-'))
   await writeFile(join(root, '.credentials.yaml'), 'version: 1\nrefs:\n  PI_COMPOSITION_KEY: key-from-store\n', { mode: 0o600 })
 
@@ -65,7 +72,7 @@ async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }
   await ctx.plugin(Loader)
   ctx.loader.builtins.include = Include
   const modules = new Map<string, unknown>([
-    ['test-llm-service', LlmRuntime],
+    ['test-llm-service', options.agentLoop === true ? agentLoopServices : LlmRuntime],
     ['@deepseek-ai/dsh-credentials-local', LocalCredentialProvider],
     ['@deepseek-ai/dsh-authorization', AuthorizationService],
     ['@deepseek-ai/dsh-llm-pi-ai', LlmPiAi],
@@ -88,6 +95,45 @@ async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }
 }
 
 describe('llm-pi-ai real dormant composition', () => {
+  it('loads an ordinary no-tools Chat row and suppresses global tools in the real agent loop', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const { ctx, settingsPath } = await loadComposition({ agentLoop: true })
+    const loop = await mountAgentLoopTestHarness(ctx)
+    let executions = 0
+    ctx.effect(() => ctx.tools.register(defineContentToolFixture({
+      name: 'echo', description: 'Echo.', parameters: {},
+      async execute() { executions++; return [{ type: 'text', text: 'echoed' }] },
+    })))
+    await writeFile(settingsPath, [
+      '- id: llm-pi-ai', '  config:', '    providers:', '      gateway:',
+      '        api: openai-completions', `        baseURL: ${server.url}`,
+      '        headers:', '          Authorization: Bearer fixture-key',
+      '        models:', '          - id: chat', '            nativeTools: false',
+      '          - id: ordinary', '',
+    ].join('\n'))
+    await vi.waitFor(async () => {
+      expect(await ctx.llm.resolveModelInfo('gateway', 'chat')).toMatchObject({ nativeTools: false })
+    }, { timeout: 5000 })
+    const agent = await loop.create(SessionId('loader-no-tools-chat'), { provider: 'gateway', model: 'chat' })
+    const signal = new AbortController().signal
+    const ordinary = await ctx.tools.resolve({ agent, signal, modelSelection: { provider: 'gateway', model: 'ordinary' } })
+    expect(ordinary).not.toHaveProperty('nativeTools')
+    expect(ctx.tools.schemas(agent, ordinary).map(tool => tool.name)).toEqual(['echo'])
+    ordinary.dispose()
+    const idle = new Promise<void>((resolve) => {
+      const dispose = ctx.on('agent/status', ({ agent: subject, status }) => {
+        if (subject === agent && status === 'idle') { dispose(); resolve() }
+      })
+    })
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Say hello.' }] }))
+    await idle
+    expect(server.requests).toHaveLength(1)
+    expect(server.requests[0]).toMatchObject({ model: 'chat', stream: true })
+    expect(server.requests[0]).not.toHaveProperty('tools')
+    expect(server.requests[0]).not.toHaveProperty('kinf_decision')
+    expect(executions).toBe(0)
+  })
+
   it('dispatches header contributors through the Loader-mounted adapter', async () => {
     const server = await mockServer([{ events: textEvents }])
     const { ctx, settingsPath } = await loadComposition()

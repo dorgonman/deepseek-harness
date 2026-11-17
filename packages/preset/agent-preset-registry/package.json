@@ -70,7 +70,8 @@
     "@deepseek-ai/dsh-app-boot": "workspace:*",
     "@deepseek-ai/schemastery": "workspace:~",
     "zod": "4.6.6",
-    "js-yaml": "^4.3.2"
+    "js-yaml": "^4.3.2",
+    "@deepseek-ai/dsh-compaction-basic": "workspace:*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis-plugin-group": "workspace:~",
@@ -99,6 +100,12 @@
     "@deepseek-ai/dsh-user-approval": "workspace:*",
     "@deepseek-ai/dsh-agent-preset": "workspace:*",
     "@deepseek-ai/dsh-working-directory": "workspace:*",
-    "@types/js-yaml": "^4.0.9"
+    "@types/js-yaml": "^4.0.9",
+    "@deepseek-ai/dsh-config-editor": "workspace:*",
+    "@deepseek-ai/dsh-token-meter": "workspace:*",
+    "@deepseek-ai/dsh-typert-registry": "workspace:*",
+    "@deepseek-ai/dsh-api-remote-access": "workspace:*",
+    "@deepseek-ai/dsh-api-gateway": "workspace:*",
+    "@deepseek-ai/dsh-client-connection": "workspace:*"
   }
 }

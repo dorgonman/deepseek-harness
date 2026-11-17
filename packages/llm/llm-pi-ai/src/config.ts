@@ -249,6 +249,8 @@ export interface ResolvedPiAiProviderProfile
   requestModels: ReadonlyMap<string, string>
   /** Explicit native request adapters keyed by selector id. */
   requestProtocols: ReadonlyMap<string, 'kinf-decision-v1'>
+  /** Explicit native tool support by selector; omission retains normal tool admission. */
+  nativeTools: ReadonlyMap<string, boolean>
   /** Explicit model request headers layered above provider headers. */
   modelHeaders: ReadonlyMap<string, Readonly<Record<string, string>>>
   /** Models whose endpoint override cannot inherit provider credentials. */
@@ -342,6 +344,7 @@ const modelFields = {
   baseURL: z.string(),
   requestModel: z.string(),
   requestProtocol: z.const('kinf-decision-v1'),
+  nativeTools: z.boolean(),
   // A bare dict materializes {}, which would change existing stored model rows.
   headers: z.union([z.dict(z.string())]),
   contextWindow: z.number().step(1).min(1),
@@ -557,6 +560,7 @@ export function resolveProfiles(
       configuredMaxTokens: catalog?.configuredMaxTokens ?? new Map(),
       requestModels: catalog?.requestModels ?? new Map(),
       requestProtocols: catalog?.requestProtocols ?? new Map(),
+      nativeTools: catalog?.nativeTools ?? new Map(),
       modelHeaders: catalog?.modelHeaders ?? new Map(),
       crossOriginModels: catalog?.crossOriginModels ?? new Set(),
       modelErrors: catalog?.modelErrors ?? new Map(),

@@ -501,6 +501,7 @@ function commitCompactionBody(
     provider,
     model,
     ...maxTokens === undefined ? {} : { maxTokens },
+    ...summarized.requestProjection === undefined ? {} : { requestProjection: summarized.requestProjection },
     ...usage === undefined ? {} : { usage },
   })
   session.append('user/message', checkpointMessage, {

@@ -94,6 +94,8 @@ kind: "package-reference"
 
 每个 `models` 条目或 `modelOverrides` 值均可设置 `baseURL`、`headers` 和 `requestModel`。端点必须是不含 URL 凭据的绝对 HTTP(S) URL。`requestModel` 修改请求中的模型 id；条目的 `id` 仍是选择器和 Session 身份。显式模型请求头按不区分大小写的名称覆盖提供方请求头，Harness 归因请求头仍具有最高优先级。
 
+在模型条目或覆盖中设置 `nativeTools: false`，可禁用该确切选择器的原生工具声明、执行器指引和执行。`true` 显式保留正常的工具准入；省略时保持原样。此元数据保留普通 Chat 协议，不会投影历史工具消息。Decision 模型不能设置 `nativeTools: true`。
+
 显式的逐模型 `requestProtocol: kinf-decision-v1` 选择 KINF 的首 token Decision 操作。它要求 `api: openai-completions`、`maxTokens: 1`、`input: [text]` 和 `reasoningEfforts: false`；省略时保留普通 pi-ai 分派。请求发送 `kinf_decision: label_scores`，禁用原生流式传输，仅接受纯文本 system、user 和 assistant 历史。原生工具、推理、停止控制、非零 temperature 及非一的输出上限均被拒绝。完整 JSON 响应限制为 64 KiB，并校验两个 logit、两个未校准标签分数、token 用量和确切服务身份。其原生 `length` 结束状态表示 Decision 成功完成。对话文本仅包含经过校验的 `model`、`decision`、`served_identity` 和 `usage` 字段；私有或未知响应字段被省略。不会尝试普通聊天或其他提供方回退。
 
 跨来源的模型端点覆盖必须使用自定义无密钥提供方路由。已解析的 API 密钥、已命名的凭据引用或已安装目录提供方的环境／OAuth 认证会在发送前拒绝该覆盖。同来源覆盖保留提供方认证。显式部署请求头会应用于所配置的端点；仅配置可信端点。

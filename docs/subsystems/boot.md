@@ -136,9 +136,12 @@ configuration(): Array<{ entry: Entry; inherited: Record<string, unknown>; overr
 /** Validate, persist, and reconcile a plugin's next config; ordinary fields keep normal lifecycle rules.
  * @param entry Current Loader entry, also used to detect replacement during the write.
  * @param change Derive a raw config from the current entry and its inherited layer.
- * @returns Fulfillment after Loader reconciliation completes.
+ * @param verify Optional activation check after reconciliation, still under the profile lock and HMR serialization.
+ *   Omission accepts Loader reconciliation. A rejection restores the prior document and patches before propagating;
+ *   the verifier must inspect activation without starting another profile edit.
+ * @returns Fulfillment after reconciliation and any supplied verification complete.
  */
-async edit( entry: Entry, change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>, ): Promise<void>
+async edit( entry: Entry, change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>, verify?: () => void | Promise<void>, ): Promise<void>
 ```
 
 Source: [`packages/boot/config-editor/src/index.ts`](../../packages/boot/config-editor/src/index.ts)

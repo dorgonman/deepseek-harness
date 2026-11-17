@@ -706,6 +706,27 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'compactionPolicyControl',
+    summary: 'Host-only policy control mounted by the preset owner when persistent editing exists.',
+    description: 'Host-only policy control mounted by the preset owner when persistent editing exists.',
+    methods: [
+      {
+        signature: '@Remote read(entryId: string): PresetCompactionPolicy',
+        description: 'Read one uniquely profile-owned preset without exposing other plugin configuration.',
+        parameters: [{ name: 'entryId', description: 'Exact declaration row id in the active profile.' }],
+        returns: 'Current summary fields and their revision.',
+        throws: ['RemoteError when the declaration cannot be addressed safely.'],
+      },
+      {
+        signature: '@Remote async setSummaryTarget(request: PresetCompactionPolicyUpdate, signal?: AbortSignal): Promise<PresetCompactionPolicyWrite>',
+        description: 'Persist one explicit summary target and verify the replacement preset before committing success.',
+        parameters: [{ name: 'request', description: 'Expected revision, target and explicitly owned existing overrides.' }, { name: 'signal', description: 'Optional cancellation; absence permits the operation to finish without caller cancellation.' }],
+        returns: 'Persisted and activated policy for new preset bindings; existing Agents retain their revision.',
+        throws: ['RemoteError on stale policy, unverifiable target, persistence failure or failed activation. Editor failures restore the previous patch.'],
+      },
+    ],
+  },
+  {
     key: 'computerUse',
     summary: 'Owns one optional provider registration in the shared computer-use service.',
     description: 'Owns one optional provider registration in the shared computer-use service.',
@@ -736,10 +757,10 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'Detached layer values alongside their Loader entries.',
       },
       {
-        signature: 'async edit( entry: Entry, change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>, ): Promise<void>',
+        signature: 'async edit( entry: Entry, change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>, verify?: () => void | Promise<void>, ): Promise<void>',
         description: 'Validate, persist, and reconcile a plugin\'s next config; ordinary fields keep normal lifecycle rules.',
-        parameters: [{ name: 'entry', description: 'Current Loader entry, also used to detect replacement during the write.' }, { name: 'change', description: 'Derive a raw config from the current entry and its inherited layer.' }],
-        returns: 'Fulfillment after Loader reconciliation completes.',
+        parameters: [{ name: 'entry', description: 'Current Loader entry, also used to detect replacement during the write.' }, { name: 'change', description: 'Derive a raw config from the current entry and its inherited layer.' }, { name: 'verify', description: 'Optional activation check after reconciliation, still under the profile lock and HMR serialization. Omission accepts Loader reconciliation. A rejection restores the prior document and patches before propagating; the verifier must inspect activation without starting another profile edit.' }],
+        returns: 'Fulfillment after reconciliation and any supplied verification complete.',
       },
     ],
   },
@@ -2945,8 +2966,8 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: '@Remote(\'selectModel\') selectModel(request: SessionSelectModelRequest): Promise<SessionSelectModelValue>',
-        description: 'Select one Session-local model after explicitly resuming the Session; save the default in the background.',
-        parameters: [{ name: 'request', description: 'Session identity and requested model selection.' }],
+        description: 'Select one Session-local model after explicitly resuming it; save the default unless explicitly disabled.',
+        parameters: [{ name: 'request', description: 'Session identity, requested model selection, and optional default-persistence choice.' }],
         returns: 'the normalized selection installed for the Session, without waiting for default persistence.',
       },
       {
@@ -6289,8 +6310,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type CompactionId = Branded<\'CompactionId\'>;',
   },
   {
+    name: 'CompactionPolicyRoute',
+    declaration: 'export interface CompactionPolicyRoute {\n    readonly provider: string;\n    readonly model: string;\n}',
+  },
+  {
     name: 'CompactionResult',
     declaration: 'export interface CompactionResult {\n    compactionId: CompactionId;\n    sourceCommandId?: CommandId;\n    startSeq: SessionSeq;\n    summarySeq: SessionSeq;\n    endSeq: SessionSeq;\n    summary: ContentBlock[];\n    shadowedRange: {\n        start: SessionSeq;\n        end: SessionSeq;\n    };\n    shadowedSeqs: SessionSeq[];\n    shadowedTokenCount: number;\n}',
+  },
+  {
+    name: 'CompactionSummaryPolicy',
+    declaration: 'export interface CompactionSummaryPolicy {\n    readonly summarizationProvider?: string;\n    readonly summarizationModel?: string;\n    readonly summarizationFallback?: \'latest-route\' | \'error\';\n    readonly maxTokens?: number;\n}',
   },
   {
     name: 'CompactionTrigger',
@@ -8177,6 +8206,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type PrepareSessionOptions = (CreateSessionOptions & {\n    readonly eventState?: undefined;\n}) | RestoredSessionOptions;',
   },
   {
+    name: 'PresetCompactionPolicy',
+    declaration: 'export interface PresetCompactionPolicy {\n    readonly entryId: string;\n    readonly presetId: string;\n    readonly revision: string;\n    readonly policy: CompactionSummaryPolicy;\n    readonly modelPolicies: readonly (CompactionPolicyRoute & {\n        readonly policy: CompactionSummaryPolicy;\n    })[];\n}',
+  },
+  {
+    name: 'PresetCompactionPolicyUpdate',
+    declaration: 'export interface PresetCompactionPolicyUpdate {\n    readonly entryId: string;\n    readonly expectedRevision: string;\n    readonly target: CompactionPolicyRoute & {\n        readonly maxTokens: number;\n    };\n    readonly modelPolicyRoutes: readonly CompactionPolicyRoute[];\n}',
+  },
+  {
+    name: 'PresetCompactionPolicyWrite',
+    declaration: 'export interface PresetCompactionPolicyWrite extends PresetCompactionPolicy {\n    readonly persisted: true;\n    readonly activated: true;\n}',
+  },
+  {
     name: 'PresetDefinition',
     declaration: 'export interface PresetDefinition {\n    readonly id: string;\n    readonly name?: string;\n    readonly description?: string;\n    readonly order?: number;\n    readonly plugins: readonly (Omit<EntryOptions, \'id\' | \'disabled\'> & {\n        id?: string;\n        disabled?: EntryOptions[\'disabled\'] | JsExpr;\n    })[];\n}',
   },
@@ -9302,7 +9343,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionSelectModelRequest',
-    declaration: 'export interface SessionSelectModelRequest extends ModelSelection {\n    readonly sessionId: SessionId;\n}',
+    declaration: 'export interface SessionSelectModelRequest extends ModelSelection {\n    readonly sessionId: SessionId;\n    readonly persistDefault?: boolean;\n}',
   },
   {
     name: 'SessionSelectModelValue',
