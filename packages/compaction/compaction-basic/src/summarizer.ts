@@ -115,6 +115,9 @@ export type SummaryResult = {
  * Summarize through the exact ordinary Chat route. Explicit no-tools routes
  * receive quoted text history; other routes retain the conversation prefix.
  * Both append the final compaction instruction and report their selected input.
+ * Cancellation wins after metadata resolution. Fail-closed policies require known
+ * context capacity; explicit text incompatibility is rejected under either policy.
+ * Unknown modalities retain ordinary Chat semantics.
  * @param ctx - context providing the LLM service.
  * @param config - resolved backend configuration.
  * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.
@@ -178,6 +181,7 @@ export async function summarizeWithLlm(
     }
     info = undefined
   }
+  signal?.throwIfAborted()
   if (info?.requestProtocol !== undefined) {
     throw new LlmError(
       `compaction: summarizer ${target.provider}/${target.model} uses the `
@@ -185,7 +189,19 @@ export async function summarizeWithLlm(
       'SUMMARY_TARGET_NOT_CHAT',
     )
   }
-  signal?.throwIfAborted()
+  if (info?.inputModalities !== undefined && !info.inputModalities.includes('text')) {
+    throw new LlmError(
+      `compaction: summarizer ${target.provider}/${target.model} does not accept text input required for compaction`,
+      'SUMMARY_TARGET_NOT_CHAT',
+    )
+  }
+  if (config.summarizationFallback === 'error' && info?.context === undefined) {
+    throw new LlmError(
+      `compaction: cannot verify summarizer ${target.provider}/${target.model}: `
+      + 'context capacity is unavailable; configure contextWindow on the adapter model',
+      'SUMMARY_TARGET_UNVERIFIED',
+    )
+  }
   const requestProjection: SummaryRequestProjection = info?.nativeTools === false
     ? 'text-transcript-v1'
     : 'conversation-prefix-v1'

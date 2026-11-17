@@ -1493,6 +1493,34 @@ describe('default one-shot summarizer', () => {
       .toEqual(['compaction/start', 'compaction/end'])
   })
 
+  it.each([
+    { label: 'missing capacity', metadata: { inputModalities: ['text'] as const }, code: 'SUMMARY_TARGET_UNVERIFIED' },
+    { label: 'explicit no-text capability', metadata: { inputModalities: ['image'] as const, context: { contextWindow: 65_536 } }, code: 'SUMMARY_TARGET_NOT_CHAT' },
+  ])('preserves tool-bearing history when summary metadata has $label', async ({ metadata, code }) => {
+    const { ctx, adapter, compact } = await summarizerHarness([{ type: 'text', text: 'must not be committed' }], undefined, MODEL, {
+      auto: false, maxTokens: 32, summarizationProvider: MODEL, summarizationModel: MODEL, summarizationFallback: 'error',
+    })
+    onTestFinished(() => ctx.fiber.dispose())
+    vi.spyOn(adapter, 'resolveModel').mockResolvedValue({
+      provider: MODEL, id: MODEL, name: MODEL, nativeTools: false, ...metadata,
+    })
+    const stream = vi.spyOn(adapter, 'stream')
+    const session = toolConversation()
+    const before = session.snapshotEvents()
+    const header = session.requestHeader()
+    const nodes = [...session.surface.nodes]
+
+    await expect(compact.compactRegion(nodes[0]!, nodes[2]!, agent(session, MODEL), SIGNAL))
+      .rejects.toMatchObject({ name: 'LlmError', code })
+
+    expect(stream).not.toHaveBeenCalled()
+    expect(session.requestHeader()).toEqual(header)
+    expect(session.surface.nodes).toEqual(nodes)
+    expect(session.snapshotEvents().slice(0, before.length)).toEqual(before)
+    expect(session.snapshotEvents().slice(before.length).map(event => event.type))
+      .toEqual(['compaction/start', 'compaction/end'])
+  })
+
   it('quotes tool history only for an explicit no-tools ordinary summary route', async () => {
     const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }], undefined, MODEL, {
       auto: false, maxTokens: 32,
@@ -2100,12 +2128,15 @@ describe('summary target preflight', () => {
 
     override async * stream(): AsyncIterable<StreamChunk> {
       this.streamCalls += 1
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'synthetic summary' }
       yield { type: 'finish', reason: { kind: 'stop' } }
     }
   }
 
   function probe(info: LlmResolvedModelInfo): { ctx: Context; adapter: InfoAdapter } {
     const ctx = createContext()
+    onTestFinished(() => ctx.fiber.dispose())
     const adapter = new InfoAdapter(info)
     ctx.llm.registerAdapter(['probe'], adapter)
     return { ctx, adapter }
@@ -2142,6 +2173,62 @@ describe('summary target preflight', () => {
     await expect(summarizeWithLlm(
       ctx, CONFIG, promptInput('history'), agent(conversation(1), MODEL), SIGNAL,
     )).rejects.toMatchObject({ code: 'SUMMARY_TARGET_NOT_CHAT' })
+    expect(adapter.streamCalls).toBe(0)
+  })
+
+  it.each([undefined, false])('rejects missing capacity before dispatch under fallback=error with nativeTools=%s', async (nativeTools) => {
+    const { ctx, adapter } = probe({
+      provider: 'probe', id: 'probe', name: 'probe', inputModalities: ['text'],
+      ...nativeTools === undefined ? {} : { nativeTools },
+    })
+    await expect(summarizeWithLlm(
+      ctx, CONFIG, promptInput('history'), agent(conversation(1), MODEL), SIGNAL,
+    )).rejects.toMatchObject({ name: 'LlmError', code: 'SUMMARY_TARGET_UNVERIFIED' })
+    expect(adapter.streamCalls).toBe(0)
+  })
+
+  it.each(['error', 'latest-route'] as const)('rejects explicit no-text capacity before dispatch with fallback=%s', async (summarizationFallback) => {
+    const { ctx, adapter } = probe({
+      provider: 'probe', id: 'probe', name: 'probe', nativeTools: false,
+      inputModalities: ['image'], context: { contextWindow: 65_536 },
+    })
+    await expect(summarizeWithLlm(
+      ctx, { ...CONFIG, summarizationFallback }, promptInput('history'), agent(conversation(1), MODEL), SIGNAL,
+    )).rejects.toMatchObject({ name: 'LlmError', code: 'SUMMARY_TARGET_NOT_CHAT' })
+    expect(adapter.streamCalls).toBe(0)
+  })
+
+  it('keeps configured best-effort summaries usable without known capacity', async () => {
+    const { ctx, adapter } = probe({ provider: 'probe', id: 'probe', name: 'probe', inputModalities: ['text'] })
+    await expect(summarizeWithLlm(
+      ctx, { ...CONFIG, summarizationFallback: 'latest-route' }, promptInput('history'), agent(conversation(1), MODEL), SIGNAL,
+    )).resolves.toMatchObject({ provider: 'probe', model: 'probe' })
+    expect(adapter.streamCalls).toBe(1)
+  })
+
+  it('keeps an ordinary Chat route with unknown modalities and known capacity usable', async () => {
+    const { ctx, adapter } = probe({ provider: 'probe', id: 'probe', name: 'probe', context: { contextWindow: 65_536 } })
+    await expect(summarizeWithLlm(
+      ctx, CONFIG, promptInput('history'), agent(conversation(1), MODEL), SIGNAL,
+    )).resolves.toMatchObject({ provider: 'probe', model: 'probe' })
+    expect(adapter.streamCalls).toBe(1)
+  })
+
+  it.each([
+    { provider: 'probe', id: 'probe', name: 'probe' },
+    { provider: 'probe', id: 'probe', name: 'probe', inputModalities: ['image'] as const },
+    { provider: 'probe', id: 'probe', name: 'probe', requestProtocol: 'kinf-decision-v1' as const },
+  ])('preserves Stop after successful metadata resolution for %j', async (info) => {
+    const { ctx, adapter } = probe(info)
+    const controller = new AbortController()
+    const reason = new DOMException('stop synthetic summary', 'AbortError')
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementationOnce(async () => {
+      controller.abort(reason)
+      return info
+    })
+    await expect(summarizeWithLlm(
+      ctx, CONFIG, promptInput('history'), agent(conversation(1), MODEL), controller.signal,
+    )).rejects.toBe(reason)
     expect(adapter.streamCalls).toBe(0)
   })
 
