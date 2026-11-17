@@ -11,6 +11,7 @@ import type { BasicCompactionConfig, CompactionPolicyConfig, ResolvedConfig } fr
 import type {
   CompactionSummaryPolicy,
   PresetCompactionPolicy,
+  PresetCompactionPolicyRestore,
   PresetCompactionPolicyUpdate,
   PresetCompactionPolicyWrite,
 } from './policy-types.ts'
@@ -59,32 +60,43 @@ function engine(current: Record<string, unknown>, entryId: string): {
   return { presetId: current.id, node, config }
 }
 
-function policy(config: CompactionPolicyConfig): CompactionSummaryPolicy {
-  return {
-    ...config.summarizationProvider === undefined ? {} : { summarizationProvider: config.summarizationProvider },
-    ...config.summarizationModel === undefined ? {} : { summarizationModel: config.summarizationModel },
-    ...config.summarizationFallback === undefined ? {} : { summarizationFallback: config.summarizationFallback },
-    ...config.maxTokens === undefined ? {} : { maxTokens: config.maxTokens },
+const SUMMARY_FIELDS = ['summarizationProvider', 'summarizationModel', 'summarizationFallback', 'maxTokens'] as const
+
+function policy(config: CompactionPolicyConfig, entryId: string): CompactionSummaryPolicy {
+  for (const field of SUMMARY_FIELDS) {
+    if (Object.hasOwn(config, field) && config[field] === undefined) {
+      invalid(entryId, `Summary field ${field} must be absent or contain a literal value`)
+    }
   }
+  return {
+    ...!Object.hasOwn(config, 'summarizationProvider') || config.summarizationProvider === undefined ? {} : { summarizationProvider: config.summarizationProvider },
+    ...!Object.hasOwn(config, 'summarizationModel') || config.summarizationModel === undefined ? {} : { summarizationModel: config.summarizationModel },
+    ...!Object.hasOwn(config, 'summarizationFallback') || config.summarizationFallback === undefined ? {} : { summarizationFallback: config.summarizationFallback },
+    ...!Object.hasOwn(config, 'maxTokens') || config.maxTokens === undefined ? {} : { maxTokens: config.maxTokens },
+  }
+}
+
+function revision(entryId: string, presetId: string, fields: Pick<PresetCompactionPolicy, 'policy' | 'modelPolicies'>): string {
+  return createHash('sha256').update(JSON.stringify({ entryId, presetId, ...fields })).digest('hex')
 }
 
 /** Read only summary fields from a validated literal preset declaration.
  * @param entryId Profile row identifying this declaration.
  * @param current Detached raw declaration configuration.
- * @returns Default and exact-route summary fields with their content revision.
+ * @returns Raw default and exact-route leaves with their content revision; omitted leaves remain absent.
  * @throws RemoteError if the declaration is missing or ambiguous.
  */
 export function inspectPresetCompactionPolicy(entryId: string, current: Record<string, unknown>): PresetCompactionPolicy {
   const selected = engine(current, entryId)
   const fields = {
-    policy: policy(selected.config),
+    policy: policy(selected.config, entryId),
     modelPolicies: (selected.config.modelPolicies ?? []).map(item => ({
-      provider: item.provider, model: item.model, policy: policy(item),
+      provider: item.provider, model: item.model, policy: policy(item, entryId),
     })),
   }
   return {
     entryId, presetId: selected.presetId,
-    revision: createHash('sha256').update(JSON.stringify({ entryId, presetId: selected.presetId, ...fields })).digest('hex'),
+    revision: revision(entryId, selected.presetId, fields),
     ...fields,
   }
 }
@@ -131,6 +143,62 @@ export function updatePresetCompactionPolicy(
   return inspectPresetCompactionPolicy(request.entryId, current)
 }
 
+/** Restore captured summary leaves on a fresh editor clone without checking target availability.
+ * @param current Fresh detached declaration supplied inside ConfigEditor's lock.
+ * @param request Current revision, unmodified prior snapshot and explicitly owned route keys.
+ * @returns Restored raw summary leaves; unrelated current configuration remains unchanged.
+ * @throws RemoteError on stale revision, changed identity, invalid snapshot or missing route overrides.
+ */
+export function restorePresetCompactionPolicy(
+  current: Record<string, unknown>, request: PresetCompactionPolicyRestore,
+): PresetCompactionPolicy {
+  const { snapshot } = request
+  const before = inspectPresetCompactionPolicy(snapshot.entryId, current)
+  if (before.revision !== request.expectedRevision || before.presetId !== snapshot.presetId) {
+    throw new RemoteError('compaction-policy/conflict', 'Preset summary policy or identity changed; read it again before restoring', {
+      entryId: snapshot.entryId, expectedRevision: request.expectedRevision, actualRevision: before.revision,
+    })
+  }
+  const captured = {
+    policy: policy(snapshot.policy, snapshot.entryId),
+    modelPolicies: snapshot.modelPolicies.map(item => ({
+      provider: item.provider, model: item.model, policy: policy(item.policy, snapshot.entryId),
+    })),
+  }
+  if (revision(snapshot.entryId, snapshot.presetId, captured) !== snapshot.revision) {
+    invalid(snapshot.entryId, 'The captured summary snapshot was modified')
+  }
+  const selected = engine(current, snapshot.entryId)
+  const proposed = structuredClone(selected.config)
+  const keys = new Set<string>()
+  const overrides = request.modelPolicyRoutes.map((route) => {
+    const key = JSON.stringify([route.provider, route.model])
+    if (keys.has(key)) invalid(snapshot.entryId, 'Requested model-policy routes must be unique')
+    keys.add(key)
+    const matches = (proposed.modelPolicies ?? []).filter(item => item.provider === route.provider && item.model === route.model)
+    const prior = captured.modelPolicies.filter(item => item.provider === route.provider && item.model === route.model)
+    const match = matches[0]
+    const previous = prior[0]
+    if (matches.length !== 1 || prior.length !== 1 || match === undefined || previous === undefined) {
+      invalid(snapshot.entryId, 'Requested model-policy route is absent or ambiguous in the current policy or captured snapshot')
+    }
+    return { current: match, prior: previous.policy }
+  })
+  const restore = (destination: CompactionPolicyConfig, source: CompactionSummaryPolicy): void => {
+    delete destination.summarizationProvider
+    delete destination.summarizationModel
+    delete destination.summarizationFallback
+    delete destination.maxTokens
+    Object.assign(destination, source)
+  }
+  restore(proposed, captured.policy)
+  for (const item of overrides) restore(item.current, item.prior)
+  try { resolveConfig(proposed) }
+  catch (error) { invalid(snapshot.entryId, error instanceof Error ? error.message : String(error)) }
+  selected.node.config = proposed
+  return inspectPresetCompactionPolicy(snapshot.entryId, current)
+}
+
 /** Host-only policy control mounted by the preset owner when persistent editing exists. */
 export class CompactionPolicyControl extends TypertRemoteService {
   static inject = ['configEditor']
@@ -168,14 +236,36 @@ export class CompactionPolicyControl extends TypertRemoteService {
     const entry = this.entry(request.entryId)
     signal?.throwIfAborted()
     await this.verifyTarget(request, signal)
+    return this.editPolicy(entry, request.entryId, current => updatePresetCompactionPolicy(current, request), signal,
+      () => this.verifyTarget(request, signal))
+  }
+
+  /** Restore captured raw summary leaves and verify the replacement preset before committing success.
+   * @param request Current revision, prior read snapshot and explicitly owned existing overrides.
+   * @param signal Optional cancellation; absence permits completion without caller cancellation.
+   * @returns Persisted and activated restored policy for new bindings; existing Agents retain their revision.
+   * @throws RemoteError on stale policy, changed identity, invalid snapshot, persistence or activation failure.
+   *   Restore validates configuration without requiring the captured target to be available and performs no inference.
+   */
+  @Remote
+  async restoreSummaryPolicy(request: PresetCompactionPolicyRestore, signal?: AbortSignal): Promise<PresetCompactionPolicyWrite> {
+    const entry = this.entry(request.snapshot.entryId)
+    signal?.throwIfAborted()
+    return this.editPolicy(entry, request.snapshot.entryId, current => restorePresetCompactionPolicy(current, request), signal)
+  }
+
+  private async editPolicy(
+    entry: Entry, entryId: string, change: (current: Record<string, unknown>) => PresetCompactionPolicy,
+    signal?: AbortSignal, verifyTarget?: () => Promise<void>,
+  ): Promise<PresetCompactionPolicyWrite> {
     let result: PresetCompactionPolicy | undefined
     let expectedPolicy: ResolvedConfig | undefined
     try {
       await this.ctx.configEditor.edit(entry, (current) => {
         signal?.throwIfAborted()
-        if (this.entry(request.entryId) !== entry) throw new Error('Preset declaration changed before the policy edit')
-        result = updatePresetCompactionPolicy(current, request)
-        expectedPolicy = resolveConfig(engine(current, request.entryId).config)
+        if (this.entry(entryId) !== entry) throw new Error('Preset declaration changed before the policy edit')
+        result = change(current)
+        expectedPolicy = resolveConfig(engine(current, entryId).config)
         return current
       }, async () => {
         signal?.throwIfAborted()
@@ -186,15 +276,15 @@ export class CompactionPolicyControl extends TypertRemoteService {
           }
         })
         signal?.throwIfAborted()
-        const actual = this.read(request.entryId)
+        const actual = this.read(entryId)
         if (actual.revision !== result.revision) throw new Error('Activated summary policy differs from the persisted request')
-        await this.verifyTarget(request, signal)
+        await verifyTarget?.()
       })
     } catch (error) {
       const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
       if (code === 'compaction-policy/conflict' || code === 'compaction-policy/invalid' || code === 'compaction-policy/not-found') throw error
       throw new RemoteError('compaction-policy/rejected', 'Preset summary policy was not activated; inspect the profile before retrying', {
-        entryId: request.entryId,
+        entryId,
       }, { cause: error })
     }
     if (result === undefined) throw new Error('Preset summary policy result is unavailable')

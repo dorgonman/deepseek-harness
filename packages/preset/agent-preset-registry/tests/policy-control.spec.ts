@@ -19,7 +19,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import AgentPreset from '@deepseek-ai/dsh-agent-preset'
 import BasicCompactionEngine, { CompactionPolicyControl, type BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
-import type { PresetCompactionPolicyUpdate } from '@deepseek-ai/dsh-compaction-basic/types'
+import type { CompactionPolicyRoute, PresetCompactionPolicy, PresetCompactionPolicyRestore, PresetCompactionPolicyUpdate } from '@deepseek-ai/dsh-compaction-basic/types'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import RemoteAccessService from '@deepseek-ai/dsh-api-remote-access'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
@@ -70,6 +70,11 @@ function declaration(id: string): PresetDefinition {
   }
 }
 
+function compactionConfig(value: PresetDefinition): BasicCompactionConfig {
+  const group = value.plugins.find(row => row.id === 'compaction')!
+  return (group.config as EntryOptions[]).find(row => row.id === 'compaction-basic')!.config as BasicCompactionConfig
+}
+
 function barrier() {
   const state = Promise.withResolvers<undefined>()
   return { promise: state.promise, resolve: () => { state.resolve(undefined) } }
@@ -114,10 +119,15 @@ async function fixture(options: {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'preset-policy-')))
   const contexts: Context[] = []
   const adapter = new MetadataAdapter()
-  const activation: { rejectModel?: string; refused: number } = { refused: 0 }
+  const activation: {
+    rejectModel?: string
+    block?: { model: string; entered: ReturnType<typeof barrier>; release: ReturnType<typeof barrier> }
+    refused: number
+  } = { refused: 0 }
   onTestFinished(async () => {
     try {
       adapter.block?.release.resolve()
+      activation.block?.release.resolve()
       for (const ctx of contexts.reverse()) await ctx.fiber.dispose()
       expect(adapter.inferenceCalls).toBe(0)
     } finally { rmSync(home, { recursive: true, force: true }) }
@@ -194,9 +204,13 @@ async function fixture(options: {
         },
         activation: {
           inject: ['compaction'],
-          apply(child: Context) {
+          async apply(child: Context) {
             const engine = child.compaction
             if (!(engine instanceof BasicCompactionEngine)) throw new Error('Expected the real basic compaction engine')
+            if (activation.block?.model === engine.config.summarizationModel) {
+              activation.block.entered.resolve()
+              await activation.block.release.promise
+            }
             if (activation.rejectModel !== undefined && engine.config.summarizationModel === activation.rejectModel) {
               activation.refused++
               throw new Error('Owned activation refusal')
@@ -230,6 +244,14 @@ function request(ctx: Context, id = 'standard', model = 'replacement'): PresetCo
     target: { provider: 'metadata', model, maxTokens: 96 },
     modelPolicyRoutes: [{ provider: 'conversation', model: 'owned' }],
   }
+}
+
+function restoration(
+  ctx: Context,
+  snapshot: PresetCompactionPolicy,
+  modelPolicyRoutes: readonly CompactionPolicyRoute[] = [{ provider: 'conversation', model: 'owned' }],
+): PresetCompactionPolicyRestore {
+  return { snapshot, expectedRevision: ctx.compactionPolicyControl.read(snapshot.entryId).revision, modelPolicyRoutes }
 }
 
 async function agent(ctx: Context, id: string, presetId = 'standard'): Promise<Agent> {
@@ -530,14 +552,23 @@ describe('profile-owned compaction policy control', () => {
     await reconcileProfilePatches(ctx, readProfilePatches('test', profile), 'test')
     expect(ctx.compactionPolicyControl).toBeInstanceOf(CompactionPolicyControl)
     const previous = ctx.compactionPolicyControl
+    const snapshot = previous.read('preset-standard')
+    const restore = { snapshot, expectedRevision: snapshot.revision, modelPolicyRoutes: [] }
+    const invokeRestore = () => ctx.typertGateway.invoke({
+      peer: new Peer(ctx, { principal: { kind: 'owner' } }),
+      namespace: 'compactionPolicy', method: 'restoreSummaryPolicy', args: { request: restore },
+    })
+    await expect(invokeRestore()).resolves.toMatchObject({ persisted: true, activated: true })
     writeFileSync(profile.patchPath, '- id: config-editor\n  disabled: true\n')
     await reconcileProfilePatches(ctx, readProfilePatches('test', profile), 'test')
     expect(ctx.get('compactionPolicyControl')).toBeUndefined()
+    await expect(invokeRestore()).rejects.toMatchObject({ code: 'gateway/invocation-unavailable' })
     writeFileSync(profile.patchPath, '- id: config-editor\n  disabled: false\n')
     await reconcileProfilePatches(ctx, readProfilePatches('test', profile), 'test')
     expect(ctx.compactionPolicyControl).toBeInstanceOf(CompactionPolicyControl)
     expect(ctx.compactionPolicyControl).not.toBe(previous)
     expect(ctx.compactionPolicyControl.read('preset-standard').policy.summarizationModel).toBe('original')
+    await expect(invokeRestore()).resolves.toMatchObject({ persisted: true, activated: true })
   })
 
   it('enforces owner authority through the actual Gateway for reads and writes', async () => {
@@ -546,15 +577,203 @@ describe('profile-owned compaction policy control', () => {
       peer: new Peer(ctx, { principal }), namespace: 'compactionPolicy', method, args,
     })
     const update = request(ctx)
+    const snapshot = ctx.compactionPolicyControl.read(update.entryId)
     const bytes = readFileSync(profile.patchPath, 'utf8')
     const guest: Principal = { kind: 'policy-control-guest' }
     await expect(invoke(guest, 'read', { entryId: update.entryId })).rejects.toMatchObject({
       code: 'remote-access/denied', details: { action: 'compactionPolicy/read', reason: 'no-allow' },
     })
     await expect(invoke(guest, 'setSummaryTarget', { request: update })).rejects.toMatchObject({ code: 'remote-access/denied' })
+    await expect(invoke(guest, 'restoreSummaryPolicy', { request: restoration(ctx, snapshot) })).rejects.toMatchObject({
+      code: 'remote-access/denied', details: { action: 'compactionPolicy/restoreSummaryPolicy', reason: 'no-allow' },
+    })
     expect(readFileSync(profile.patchPath, 'utf8')).toBe(bytes)
     await expect(invoke({ kind: 'owner' }, 'read', { entryId: update.entryId })).resolves.toEqual(ctx.compactionPolicyControl.read(update.entryId))
     await expect(invoke({ kind: 'owner' }, 'setSummaryTarget', { request: update })).resolves.toMatchObject({ persisted: true, activated: true })
     expect(ctx.compactionPolicyControl.read(update.entryId).policy.summarizationModel).toBe('replacement')
+    await expect(invoke({ kind: 'owner' }, 'restoreSummaryPolicy', { request: restoration(ctx, snapshot) })).resolves.toMatchObject({
+      ...snapshot, persisted: true, activated: true,
+    })
+    expect(ctx.compactionPolicyControl.read(update.entryId)).toEqual(snapshot)
+  })
+})
+
+describe('restoring captured preset summary policies', () => {
+  it.each(['ptc', 'minimal', 'cordis'])('persists absent %s default fields and restores their runtime inheritance', async (id) => {
+    const config = declaration(id)
+    const policy = compactionConfig(config)
+    delete policy.summarizationProvider
+    delete policy.summarizationModel
+    delete policy.summarizationFallback
+    delete policy.maxTokens
+    const { ctx, start, profile } = await fixture({ declarations: [{
+      id: `preset-${id}`, name: '@deepseek-ai/dsh-agent-preset', config,
+    }] })
+    const snapshot = ctx.compactionPolicyControl.read(`preset-${id}`)
+    expect(snapshot.policy).toEqual({})
+    await ctx.compactionPolicyControl.setSummaryTarget(request(ctx, id))
+    const old = await agent(ctx, `restore-${id}-old`, id)
+    const retained = engine(ctx, old).config
+    const receipt = await ctx.compactionPolicyControl.restoreSummaryPolicy(restoration(ctx, snapshot))
+    expect(receipt).toEqual({ ...snapshot, persisted: true, activated: true })
+    const actual = ctx.configEditor.entries().find(row => row.options.id === snapshot.entryId)!.options.config as PresetDefinition
+    for (const key of ['summarizationProvider', 'summarizationModel', 'summarizationFallback', 'maxTokens']) {
+      expect(Object.hasOwn(compactionConfig(actual), key)).toBe(false)
+    }
+    expect(engine(ctx, old).config).toBe(retained)
+    expect(retained.summarizationModel).toBe('replacement')
+    expect(engine(ctx, await agent(ctx, `restore-${id}-fresh`, id)).config).toMatchObject({
+      summarizationProvider: '', summarizationModel: '', summarizationFallback: 'latest-route',
+    })
+    const bytes = readFileSync(profile.patchPath, 'utf8')
+    await ctx.fiber.dispose()
+    const restarted = await start()
+    expect(restarted.compactionPolicyControl.read(snapshot.entryId)).toEqual(snapshot)
+    expect(readFileSync(profile.patchPath, 'utf8')).toBe(bytes)
+  })
+
+  it('restores heterogeneous raw leaves without checking old target availability or replacing fresh pressure and routes', async () => {
+    const { ctx, adapter, profile } = await fixture()
+    const snapshot = ctx.compactionPolicyControl.read('preset-standard')
+    await ctx.compactionPolicyControl.setSummaryTarget(request(ctx))
+    const current = structuredClone(
+      ctx.configEditor.entries().find(row => row.options.id === snapshot.entryId)!.options.config,
+    ) as PresetDefinition
+    const currentPolicy = compactionConfig(current)
+    currentPolicy.headroomTokens = 777
+    currentPolicy.retainTokens = 99
+    currentPolicy.modelPolicies![0]!.headroomTokens = 512
+    currentPolicy.modelPolicies![1]!.summarizationModel = 'newer-exception'
+    currentPolicy.modelPolicies!.push({ provider: 'conversation', model: 'new-route', maxTokens: 20, summarizationFallback: 'latest-route' })
+    writeFileSync(profile.patchPath, JSON.stringify([{ id: snapshot.entryId, config: current }]) + '\n')
+    await reconcileProfilePatches(ctx, readProfilePatches('test', profile), 'test')
+    const old = await agent(ctx, 'restore-pressure-old')
+    const retained = engine(ctx, old).config
+    await using previousScope = await ctx.agentPresets.acquireScope('standard')
+    adapter.availability.set('original', 'unavailable')
+    adapter.availability.set('owned-original', 'unavailable')
+    const lookups = new Map(adapter.lookups)
+    const receipt = await ctx.compactionPolicyControl.restoreSummaryPolicy(restoration(ctx, snapshot))
+    expect(adapter.lookups).toEqual(lookups)
+    expect(adapter.inferenceCalls).toBe(0)
+    expect(receipt.policy).toEqual(snapshot.policy)
+    expect(receipt.modelPolicies[0]).toEqual(snapshot.modelPolicies[0])
+    expect(receipt.modelPolicies[1]?.policy.summarizationModel).toBe('newer-exception')
+    expect(receipt.modelPolicies[2]?.policy).toEqual({ maxTokens: 20, summarizationFallback: 'latest-route' })
+    const expected = structuredClone(current)
+    const expectedPolicy = compactionConfig(expected)
+    Object.assign(expectedPolicy, snapshot.policy)
+    const selected = expectedPolicy.modelPolicies![0]!
+    delete selected.summarizationFallback
+    Object.assign(selected, snapshot.modelPolicies[0]!.policy)
+    const actual: unknown = ctx.configEditor.entries().find(row => row.options.id === snapshot.entryId)!.options.config
+    expect(actual).toEqual(expected)
+    await using nextScope = await ctx.agentPresets.acquireScope('standard')
+    expect(nextScope.key).not.toBe(previousScope.key)
+    expect(engine(ctx, old).config).toBe(retained)
+    expect(retained).toMatchObject({ summarizationModel: 'replacement', headroomTokens: 777 })
+    expect(engine(ctx, await agent(ctx, 'restore-pressure-fresh')).config).toMatchObject({
+      summarizationModel: 'original', summarizationFallback: 'latest-route', headroomTokens: 777, retainTokens: 99,
+    })
+  })
+
+  it('serializes overlapping restores and rejects the stale current revision without losing the winner', async () => {
+    const { ctx, activation, profile } = await fixture()
+    const snapshot = ctx.compactionPolicyControl.read('preset-standard')
+    await ctx.compactionPolicyControl.setSummaryTarget(request(ctx))
+    const restore = restoration(ctx, snapshot)
+    const entered = barrier()
+    const release = barrier()
+    activation.block = { model: 'original', entered, release }
+    const first = ctx.compactionPolicyControl.restoreSummaryPolicy(restore)
+    const pending = [first]
+    onTestFinished(async () => { release.resolve(); await Promise.allSettled(pending) })
+    await entered.promise
+    const second = ctx.compactionPolicyControl.restoreSummaryPolicy(restore)
+    pending.push(second)
+    const rejection = expect(second).rejects.toMatchObject({ code: 'compaction-policy/conflict' })
+    release.resolve()
+    await expect(first).resolves.toMatchObject({ ...snapshot, persisted: true, activated: true })
+    await rejection
+    const bytes = readFileSync(profile.patchPath, 'utf8')
+    await expect(ctx.compactionPolicyControl.restoreSummaryPolicy(restore)).rejects.toMatchObject({ code: 'compaction-policy/conflict' })
+    expect(ctx.compactionPolicyControl.read(snapshot.entryId)).toEqual(snapshot)
+    expect(readFileSync(profile.patchPath, 'utf8')).toBe(bytes)
+  })
+
+  it('rejects a tampered restore snapshot before changing the persisted policy or runtime', async () => {
+    const { ctx, profile } = await fixture()
+    const snapshot = ctx.compactionPolicyControl.read('preset-standard')
+    await ctx.compactionPolicyControl.setSummaryTarget(request(ctx))
+    const before = ctx.compactionPolicyControl.read(snapshot.entryId)
+    const bytes = readFileSync(profile.patchPath, 'utf8')
+    const tampered = { ...snapshot, policy: { ...snapshot.policy, maxTokens: 65 } }
+    await expect(ctx.compactionPolicyControl.restoreSummaryPolicy(restoration(ctx, tampered))).rejects.toMatchObject({ code: 'compaction-policy/invalid' })
+    expect(readFileSync(profile.patchPath, 'utf8')).toBe(bytes)
+    expect(ctx.compactionPolicyControl.read(snapshot.entryId)).toEqual(before)
+    expect(engine(ctx, await agent(ctx, 'restore-tampered-fresh')).config.summarizationModel).toBe('replacement')
+  })
+
+  it('refuses a higher overlay without claiming that the captured policy was restored', async () => {
+    const original = await fixture()
+    const snapshot = original.ctx.compactionPolicyControl.read('preset-standard')
+    const overlay = declaration('standard')
+    compactionConfig(overlay).summarizationModel = 'overlay-target'
+    const { ctx, profile } = await fixture({ overlays: [{ id: snapshot.entryId, config: overlay }] })
+    const before = ctx.compactionPolicyControl.read(snapshot.entryId)
+    const bytes = readFileSync(profile.patchPath, 'utf8')
+    await expect(ctx.compactionPolicyControl.restoreSummaryPolicy(restoration(ctx, snapshot))).rejects.toMatchObject({ code: 'compaction-policy/rejected' })
+    expect(readFileSync(profile.patchPath, 'utf8')).toBe(bytes)
+    expect(ctx.compactionPolicyControl.read(snapshot.entryId)).toEqual(before)
+    expect(engine(ctx, await agent(ctx, 'restore-overlay-fresh')).config.summarizationModel).toBe('overlay-target')
+  })
+
+  it('rolls back exact prior bytes and runtime when the restored generation fails actual child activation', async () => {
+    const { ctx, activation, profile } = await fixture()
+    const snapshot = ctx.compactionPolicyControl.read('preset-standard')
+    await ctx.compactionPolicyControl.setSummaryTarget(request(ctx))
+    const old = await agent(ctx, 'restore-activation-old')
+    const retained = engine(ctx, old).config
+    const before = ctx.compactionPolicyControl.read(snapshot.entryId)
+    const bytes = readFileSync(profile.patchPath, 'utf8')
+    activation.rejectModel = 'original'
+    await expect(ctx.compactionPolicyControl.restoreSummaryPolicy(restoration(ctx, snapshot))).rejects.toMatchObject({ code: 'compaction-policy/rejected' })
+    expect(activation.refused).toBeGreaterThan(0)
+    expect(readFileSync(profile.patchPath, 'utf8')).toBe(bytes)
+    expect(ctx.compactionPolicyControl.read(snapshot.entryId)).toEqual(before)
+    expect(engine(ctx, old).config).toBe(retained)
+    expect(engine(ctx, await agent(ctx, 'restore-activation-fresh')).config.summarizationModel).toBe('replacement')
+  })
+
+  it('rolls back a caller cancellation that arrives during restored-generation activation', async () => {
+    const { ctx, activation, profile } = await fixture()
+    const snapshot = ctx.compactionPolicyControl.read('preset-standard')
+    await ctx.compactionPolicyControl.setSummaryTarget(request(ctx))
+    const old = await agent(ctx, 'restore-cancel-old')
+    const retained = engine(ctx, old).config
+    const before = ctx.compactionPolicyControl.read(snapshot.entryId)
+    const bytes = readFileSync(profile.patchPath, 'utf8')
+    const entered = barrier()
+    const release = barrier()
+    activation.block = { model: 'original', entered, release }
+    const controller = new AbortController()
+    const pending = ctx.compactionPolicyControl.restoreSummaryPolicy(restoration(ctx, snapshot), controller.signal)
+    onTestFinished(async () => {
+      controller.abort('Restore test cleanup')
+      release.resolve()
+      await Promise.allSettled([pending])
+    })
+    const rejection = expect(pending).rejects.toMatchObject({ code: 'compaction-policy/rejected' })
+    await entered.promise
+    try {
+      expect(readFileSync(profile.patchPath, 'utf8')).not.toBe(bytes)
+      expect(ctx.compactionPolicyControl.read(snapshot.entryId).policy.summarizationModel).toBe('original')
+      controller.abort('Owned restore caller stopped')
+    } finally { release.resolve() }
+    await rejection
+    expect(readFileSync(profile.patchPath, 'utf8')).toBe(bytes)
+    expect(ctx.compactionPolicyControl.read(snapshot.entryId)).toEqual(before)
+    expect(engine(ctx, old).config).toBe(retained)
+    expect(engine(ctx, await agent(ctx, 'restore-cancel-fresh')).config.summarizationModel).toBe('replacement')
   })
 })

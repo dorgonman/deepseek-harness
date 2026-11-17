@@ -724,6 +724,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'Persisted and activated policy for new preset bindings; existing Agents retain their revision.',
         throws: ['RemoteError on stale policy, unverifiable target, persistence failure or failed activation. Editor failures restore the previous patch.'],
       },
+      {
+        signature: '@Remote async restoreSummaryPolicy(request: PresetCompactionPolicyRestore, signal?: AbortSignal): Promise<PresetCompactionPolicyWrite>',
+        description: 'Restore captured raw summary leaves and verify the replacement preset before committing success.',
+        parameters: [{ name: 'request', description: 'Current revision, prior read snapshot and explicitly owned existing overrides.' }, { name: 'signal', description: 'Optional cancellation; absence permits completion without caller cancellation.' }],
+        returns: 'Persisted and activated restored policy for new bindings; existing Agents retain their revision.',
+        throws: ['RemoteError on stale policy, changed identity, invalid snapshot, persistence or activation failure. Restore validates configuration without requiring the captured target to be available and performs no inference.'],
+      },
     ],
   },
   {
@@ -8208,6 +8215,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'PresetCompactionPolicy',
     declaration: 'export interface PresetCompactionPolicy {\n    readonly entryId: string;\n    readonly presetId: string;\n    readonly revision: string;\n    readonly policy: CompactionSummaryPolicy;\n    readonly modelPolicies: readonly (CompactionPolicyRoute & {\n        readonly policy: CompactionSummaryPolicy;\n    })[];\n}',
+  },
+  {
+    name: 'PresetCompactionPolicyRestore',
+    declaration: 'export interface PresetCompactionPolicyRestore {\n    readonly expectedRevision: string;\n    readonly snapshot: PresetCompactionPolicy;\n    readonly modelPolicyRoutes: readonly CompactionPolicyRoute[];\n}',
   },
   {
     name: 'PresetCompactionPolicyUpdate',

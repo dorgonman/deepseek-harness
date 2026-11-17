@@ -1,0 +1,9 @@
+version: 1
+scenario: compaction-policy-restore
+profile: headless
+composition: compaction-policy-restore
+recording: authored
+header:
+  class: compaction-policy-restore
+  pin: true
+  toolSchemasSource: kinf-decision

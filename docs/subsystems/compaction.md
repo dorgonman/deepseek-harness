@@ -243,6 +243,15 @@ Host-only policy control mounted by the preset owner when persistent editing exi
  *   Editor failures restore the previous patch.
  */
 @Remote async setSummaryTarget(request: PresetCompactionPolicyUpdate, signal?: AbortSignal): Promise<PresetCompactionPolicyWrite>
+
+/** Restore captured raw summary leaves and verify the replacement preset before committing success.
+ * @param request Current revision, prior read snapshot and explicitly owned existing overrides.
+ * @param signal Optional cancellation; absence permits completion without caller cancellation.
+ * @returns Persisted and activated restored policy for new bindings; existing Agents retain their revision.
+ * @throws RemoteError on stale policy, changed identity, invalid snapshot, persistence or activation failure.
+ *   Restore validates configuration without requiring the captured target to be available and performs no inference.
+ */
+@Remote async restoreSummaryPolicy(request: PresetCompactionPolicyRestore, signal?: AbortSignal): Promise<PresetCompactionPolicyWrite>
 ```
 
 Source: [`packages/compaction/compaction-basic/src/policy-control.ts`](../../packages/compaction/compaction-basic/src/policy-control.ts)

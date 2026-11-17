@@ -628,6 +628,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   CompactionSummaryPolicy: 'compaction.md',
   PresetCompactionPolicy: 'compaction.md',
   PresetCompactionPolicyUpdate: 'compaction.md',
+  PresetCompactionPolicyRestore: 'compaction.md',
   PresetCompactionPolicyWrite: 'compaction.md',
   PruneResult: 'compaction.md',
   ProjectionResult: 'compaction.md',

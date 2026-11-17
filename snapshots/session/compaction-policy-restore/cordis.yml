@@ -1,0 +1,51 @@
+# Exercise real profile-owned set and restore before a recorded model turn.
+- id: llm-deepseek
+  disabled: true
+
+- id: agent-default-model
+  config:
+    provider: policy-restore
+    model: conversation
+
+- id: system-prompt
+  config:
+    includeRuntimeContext: false
+    personaPrefix: Compaction policy restore snapshot.
+
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
+
+- id: skill
+  disabled: true
+
+- id: skill-filesystem
+  disabled: true
+
+- id: tool-skill
+  disabled: true
+
+- insert:
+    - id: llm-replay
+      name: '@deepseek-ai/dsh-llm-replay'
+      config:
+        providers:
+          - id: policy-restore
+            name: Policy restore fixture
+            models:
+              - id: conversation
+                contextWindow: 262144
+                nativeTools: false
+              - id: summary
+                contextWindow: 8192
+                nativeTools: false
+
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
+      config:
+        default: standard
+
+    - id: policy-restore-fixture
+      name: ./policy-restore-fixture.mjs

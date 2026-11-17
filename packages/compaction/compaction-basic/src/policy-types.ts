@@ -6,7 +6,7 @@ export interface CompactionPolicyRoute {
   readonly model: string
 }
 
-/** Explicit summary fields; absence preserves the preset's configured inheritance. */
+/** Raw summary leaves; omitted members are absent in the declaration and retain inheritance. */
 export interface CompactionSummaryPolicy {
   readonly summarizationProvider?: string
   readonly summarizationModel?: string
@@ -30,6 +30,16 @@ export interface PresetCompactionPolicyUpdate {
   readonly expectedRevision: string
   readonly target: CompactionPolicyRoute & { readonly maxTokens: number }
   /** Existing override keys to update; every omitted override remains unchanged. */
+  readonly modelPolicyRoutes: readonly CompactionPolicyRoute[]
+}
+
+/** Restore captured default leaves and only the existing route overrides the caller owns. */
+export interface PresetCompactionPolicyRestore {
+  /** Current content revision, read immediately before this rollback. */
+  readonly expectedRevision: string
+  /** Unmodified prior read, including declaration identity and absent summary leaves. */
+  readonly snapshot: PresetCompactionPolicy
+  /** Existing override keys to restore; omitted overrides retain their current leaves. */
   readonly modelPolicyRoutes: readonly CompactionPolicyRoute[]
 }
 

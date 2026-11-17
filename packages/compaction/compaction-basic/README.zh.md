@@ -89,7 +89,9 @@ kind: "package-reference"
 
 当 profile 同时挂载 preset 注册表与配置编辑器时，Host 提供 `compactionPolicy.read(entryId)` 和 `setSummaryTarget(request)`。先读取精确声明行，再传入其 revision、显式提供方/模型/输出预算，以及你拥有的现有源路由覆盖。策略传输类型从 `@deepseek-ai/dsh-compaction-basic/types` 导出。操作将回退设为 `error`；省略的覆盖、对话默认值和同级插件值保持不变。缺失或歧义行、过期 revision 及无法验证的 Chat 目标会使操作被拒绝。
 
-每次调用通过编辑器已加锁并重新协调的事务编辑一个 preset。目标元数据在编辑前和替换 preset 协调后分别检查；激活或元数据校验失败会恢复原补丁与运行时。成功会报告供新绑定使用的已持久化并激活策略，现有 Agent 保留原 revision。这不保证提供方未来仍可用。多个 preset 的写入不构成共同原子事务。编辑器保存完整 preset 配置，将当前插件列表保留为显式 profile 覆盖。
+保留未经修改的读取快照，以便显式回滚。`restoreSummaryPolicy({ expectedRevision, snapshot, modelPolicyRoutes })` 恢复其中四个默认摘要叶字段，以及所选的现有路由覆盖。快照中省略的叶字段会再次变为缺失，包括继承的绑定和输出预算；各不相同的路由策略保留其捕获值。恢复会检查当前 revision、声明身份与快照完整性。它验证配置和激活，不检查捕获目标的可用性，也不运行推理。
+
+每次写入通过编辑器已加锁并重新协调的事务编辑一个 preset。`setSummaryTarget` 在编辑前和替换 preset 协调后分别检查目标元数据。激活失败，或设置目标期间的元数据校验失败，会恢复该次调用之前的补丁与运行时。成功会报告供新绑定使用的已持久化并激活策略，现有 Agent 保留原 revision。这不保证提供方未来仍可用。多个 preset 的写入不构成共同原子事务；显式恢复是单独的操作。编辑器保存完整 preset 配置，将当前插件列表保留为显式 profile 覆盖。
 
 ### 压缩运行时会发生什么
 
