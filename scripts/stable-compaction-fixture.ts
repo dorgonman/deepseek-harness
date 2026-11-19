@@ -1,14 +1,14 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createMessage, createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createMessage, createToolResultMessage, createUserMessage, ToolCallId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 
 /** Append one complete synthetic user, assistant, tool, and follow-up transaction. */
-export function appendFixtureTurn(session: Session, turn: number, user: string, result: string) {
+export function appendFixtureTurn(session: Session, turn: number, user: string | UserMessage['content'], result: string) {
   const callId = ToolCallId(`fixture-${turn}`)
   const model = { kind: 'model', provider: 'fixture', model: 'fixture' } as const
   session.append('turn/start', { turn })
   const input = session.append('user/message', createUserMessage({
-    content: [{ type: 'text', text: user }],
+    content: typeof user === 'string' ? [{ type: 'text', text: user }] : user,
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
   session.append('step/start', { turn, step: 1 })
