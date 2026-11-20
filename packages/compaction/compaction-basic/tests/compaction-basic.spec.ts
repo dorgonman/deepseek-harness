@@ -1495,10 +1495,12 @@ describe('default one-shot summarizer', () => {
 
   it('quotes tool history only for an explicit no-tools ordinary summary route', async () => {
     const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }], undefined, MODEL, {
-      auto: false, maxTokens: 32,
+      auto: false, maxTokens: 32, summarizationFallback: 'error',
+      summarizationProvider: MODEL, summarizationModel: MODEL,
     })
     vi.spyOn(adapter, 'resolveModel').mockResolvedValue({
-      provider: MODEL, id: MODEL, name: MODEL, nativeTools: false, context: { contextWindow: 65_536 },
+      provider: MODEL, id: MODEL, name: MODEL, nativeTools: false, inputModalities: ['text'],
+      context: { contextWindow: 65_536 },
     })
     const session = toolConversation()
     const before = session.snapshotEvents()
@@ -1524,7 +1526,7 @@ describe('default one-shot summarizer', () => {
       .toMatchObject({ requestProjection: 'text-transcript-v1', llmStreamCall: true })
   })
 
-  it.each([undefined, true])('keeps the prefix for nativeTools=%s and records the selected representation', async (nativeTools) => {
+  it.each([undefined, true])('dispatches a legacy prefix without context capacity for nativeTools=%s', async (nativeTools) => {
     const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }])
     vi.spyOn(adapter, 'resolveModel').mockResolvedValue({
       provider: MODEL, id: MODEL, name: MODEL,
@@ -1532,9 +1534,24 @@ describe('default one-shot summarizer', () => {
     })
     const input = promptInput('unchanged prefix')
     const output = await compact.runSummarize(input, agent(conversation(1), MODEL))
+    expect(adapter.lastOptions?.model).toBe(MODEL)
     expect(adapter.lastOptions?.messages.slice(0, -1)).toEqual(input.messages)
     expect(adapter.lastOptions).toHaveProperty('toolHistory')
     expect(output.requestProjection).toBe('conversation-prefix-v1')
+  })
+
+  it('keeps legacy stream dispatch when the advisory metadata lookup rejects', async () => {
+    const { ctx, adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }], undefined, MODEL, {
+      auto: false, maxTokens: 32, summarizationFallback: 'latest-route',
+      summarizationProvider: MODEL, summarizationModel: MODEL,
+    })
+    const resolve = vi.spyOn(ctx.llm, 'resolveModelInfo').mockRejectedValueOnce(new Error('advisory metadata unavailable'))
+    const stream = vi.spyOn(adapter, 'stream')
+    await expect(compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL), SIGNAL)).resolves.toMatchObject({
+      summary: [{ type: 'text', text: 'checkpoint' }], requestProjection: 'conversation-prefix-v1',
+    })
+    expect(resolve).toHaveBeenCalledExactlyOnceWith(MODEL, MODEL, SIGNAL)
+    expect(stream).toHaveBeenCalledTimes(1)
   })
 
   it('prices transcript framing and the instruction at the exact context boundary without tool schemas', async () => {
@@ -1560,8 +1577,10 @@ describe('default one-shot summarizer', () => {
     expect(required).toBeGreaterThan(ctx.tokenMeter.estimateMessage(input.messages[0]!) + 32)
   })
 
-  it('preserves cancellation during no-tools capability resolution without committing a summary', async () => {
-    const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }])
+  it.each(['latest-route', 'error'] as const)('preserves cancellation during %s capability resolution', async (fallback) => {
+    const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }], undefined, MODEL, {
+      auto: false, summarizationFallback: fallback, summarizationProvider: MODEL, summarizationModel: MODEL,
+    })
     const controller = new AbortController()
     const reason = new Error('cancel summary capability lookup')
     vi.spyOn(adapter, 'resolveModel').mockImplementation(async () => {
@@ -2161,14 +2180,59 @@ describe('summary target preflight', () => {
     expect(adapter.streamCalls).toBe(0)
   })
 
-  it('fails closed when the summarizer protocol cannot be verified', async () => {
+  it.each([
+    ['Error', new Error('metadata unavailable')],
+    ['string', 'metadata unavailable'],
+  ] as const)('fails closed when adapter preparation rejects with a %s', async (_kind, cause) => {
     const { ctx, adapter } = probe({ provider: 'probe', id: 'probe', name: 'probe' })
-    vi.spyOn(ctx.llm, 'resolveModelInfo').mockRejectedValueOnce(new Error('metadata unavailable'))
+    vi.spyOn(adapter, 'prepareCall').mockRejectedValueOnce(cause)
     await expect(summarizeWithLlm(
       ctx, CONFIG, promptInput('history'), agent(conversation(1), MODEL), SIGNAL,
-    )).rejects.toMatchObject({ code: 'SUMMARY_TARGET_UNVERIFIED' })
+    )).rejects.toMatchObject({
+      code: 'SUMMARY_TARGET_UNVERIFIED', cause, message: 'compaction: cannot verify summarizer probe/probe: metadata unavailable',
+    })
     expect(adapter.streamCalls).toBe(0)
   })
+
+  it.each(['error', 'latest-route'] as const)('rejects an image-only target with %s fallback', async (fallback) => {
+    const { ctx, adapter } = probe({
+      provider: 'probe', id: 'probe', name: 'probe', inputModalities: ['image'], context: { contextWindow: 65_536 },
+    })
+    await expect(summarizeWithLlm(
+      ctx, { ...CONFIG, summarizationFallback: fallback }, promptInput('history'), agent(conversation(1), MODEL), SIGNAL,
+    )).rejects.toMatchObject({ code: 'SUMMARY_TARGET_NOT_CHAT' })
+    expect(adapter.streamCalls).toBe(0)
+  })
+
+  it.each([undefined, -1, 2.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects prepared context %s after policy selection without changing history', async (contextWindow) => {
+      const { ctx, adapter, compact } = await summarizerHarness([{ type: 'text', text: 'not dispatched' }], undefined, MODEL, {
+        auto: false, maxTokens: 32, summarizationFallback: 'error',
+        summarizationProvider: MODEL, summarizationModel: MODEL,
+      })
+      const textModel: LlmResolvedModelInfo = {
+        provider: MODEL, id: MODEL, name: MODEL, inputModalities: ['text'], context: { contextWindow: 65_536 },
+      }
+      vi.spyOn(adapter, 'resolveModel').mockResolvedValue(textModel)
+      const { context: _context, ...identity } = textModel
+      vi.spyOn(adapter, 'prepareCall').mockResolvedValue({
+        model: contextWindow === undefined ? identity : { ...identity, context: { contextWindow } },
+        stream: options => adapter.stream(options),
+      })
+      expect((await ctx.llm.resolveModelInfo(MODEL, MODEL)).context?.contextWindow).toBe(65_536)
+
+      const session = conversation(2)
+      const before = session.snapshotEvents()
+      const nodes = [...session.surface.nodes]
+      await expect(compact.compactRegion(nodes[0]!, nodes[1]!, agent(session, MODEL), SIGNAL))
+        .rejects.toMatchObject({ code: 'SUMMARY_TARGET_UNVERIFIED' })
+      expect(adapter.lastOptions).toBeUndefined()
+      expect(session.surface.nodes).toEqual(nodes)
+      expect(session.snapshotEvents().slice(0, before.length)).toEqual(before)
+      expect(session.snapshotEvents().slice(before.length).map(event => event.type))
+        .toEqual(['compaction/start', 'compaction/end'])
+    },
+  )
 })
 
 describe('automatic listener and loader composition', () => {

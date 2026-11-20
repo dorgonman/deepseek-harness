@@ -91,7 +91,9 @@ All settings are optional. With context window `W`, effective request output cap
 
 Misconfiguration fails fast: unknown settings, duplicate per-model overrides, invalid token counts, both retention forms together, or a retention ratio at least as large as the threshold ratio reject the plugin at load. When the model is first used, `W − O − B` must be positive and the resolved retained budget must be below the trigger. Zero headroom requires an explicit positive `maxTokens`, globally or in that model policy. Explicit headroom must fit the window. An omitted summary cap follows the adjusted headroom on the conversation route when it declares a window, with a minimum of one token. Explicit summary targets keep their configured or inherited cap. Lower `thresholdRatio` to compact earlier.
 
-A configured summary target is validated before its provider call: an unverifiable route fails with `SUMMARY_TARGET_UNVERIFIED`, a non-chat request protocol fails with `SUMMARY_TARGET_NOT_CHAT`, and the complete selected summary envelope plus its output cap exceeding the summarizer context fails with `SUMMARY_CAPACITY_EXCEEDED`. Pricing includes transcript framing and the final instruction. These checks use the summarizer’s metadata and token meter; none falls back to another provider.
+Basic with `summarizationFallback: error` and the Hybrid backend verify the exact call before sending history. Missing or invalid context capacity fails with `SUMMARY_TARGET_UNVERIFIED`. A non-Chat protocol or declared input modalities that exclude text fail with `SUMMARY_TARGET_NOT_CHAT`. Undeclared modalities are allowed. Basic with `latest-route` still accepts an adapter that omits its context capacity.
+
+When capacity is known, the full summary input and output cap must fit within the context window. If they exceed that window, compaction fails with `SUMMARY_CAPACITY_EXCEEDED`. The estimate includes transcript framing and the final instruction.
 
 <a id="persist-preset-summary-policy"></a>
 ### Persist preset summary policy

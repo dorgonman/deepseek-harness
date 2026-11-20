@@ -174,10 +174,64 @@ it('references an oversized result while preserving its tool pair and exact orig
   }, { summarizationModel: 'narrow', maxTokens: 64 })
 })
 
-it('keeps the prior route and checkpoint unchanged when the second switch chunk fails', async () => {
+it.each([
+  ['missing context', {}, 'SUMMARY_TARGET_UNVERIFIED'],
+  ['invalid context', { context: { contextWindow: -1 } }, 'SUMMARY_TARGET_UNVERIFIED'],
+  ['image-only input', { context: { contextWindow: 4_096 }, inputModalities: ['image'] as const }, 'SUMMARY_TARGET_NOT_CHAT'],
+  ['Decision protocol', { context: { contextWindow: 4_096 }, requestProtocol: 'kinf-decision-v1' }, 'SUMMARY_TARGET_NOT_CHAT'],
+] as const)('blocks /compact and Model Switch on prepared %s without dispatch or replacement', async (_case, metadata, code) => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Short reply.')))
+    const summary = new WindowAdapter([textResponse('Must not dispatch.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const summaryProvider = 'synthetic-summary'
+    ctx.llm.registerAdapter([summaryProvider], summary)
+    expect((await ctx.llm.resolveModelInfo(summaryProvider, 'narrow')).context?.contextWindow).toBe(4_096)
+    vi.spyOn(summary, 'prepareCall').mockResolvedValue({
+      model: { provider: summaryProvider, id: 'narrow', name: 'narrow', ...metadata },
+      stream: options => summary.stream(options),
+    })
+
+    const sessionId = SessionId('hybrid-unverified-switch')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    const { agent } = owned
+    for (const label of ['early', 'middle', 'late']) await send(agent, `${label} `.repeat(1_700))
+    const before = (await ctx.sessionQuery.readSession(sessionId)).events
+    const surface = [...agent.session.surface.nodes]
+    const header = agent.session.requestHeader()
+    await expect(ctx.compaction.compactNow(agent, signal)).rejects.toMatchObject({ code: 'summary', cause: { code } })
+
+    agent.model.select({ provider: wide.provider, model: 'small' })
+    await send(agent, 'Switch to the lower-capacity model.')
+    const after = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(summary.requests).toHaveLength(0)
+    expect(chat.requests).toHaveLength(3)
+    expect(after.at(-1)).toMatchObject({
+      type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'MODEL_SWITCH_COMPACTION_FAILED' } } },
+    })
+    expect(checkpoints(after)).toHaveLength(0)
+    expect(after.some(event => event.type === 'compaction/summary')).toBe(false)
+    expect(after.slice(0, before.length)).toEqual(before)
+    expect(agent.session.surface.nodes).toEqual(surface)
+    expect(agent.session.requestHeader()).toEqual(header)
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.5, summarizationModel: 'narrow', maxTokens: 64 })
+})
+
+it.each(['provider rejection', 'changed modality', 'changed capacity'] as const)('preserves the switch origin after second-chunk %s', async (failure) => {
   await withContext(async (ctx, root) => {
     const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Short reply.')))
     const summary = new WindowAdapter([textResponse('First chunk.'), [...fault]])
+    if (failure !== 'provider rejection') {
+      const prepare = summary.prepareCall.bind(summary)
+      const changedMetadata = failure === 'changed modality'
+        ? { inputModalities: ['image'] as const }
+        : { context: { contextWindow: 8_192 } }
+      vi.spyOn(summary, 'prepareCall').mockImplementation(async (...args) => {
+        const call = await prepare(...args)
+        return summary.requests.length === 0 ? call : { ...call, model: { ...call.model, ...changedMetadata } }
+      })
+    }
     ctx.llm.registerAdapter([wide.provider], chat)
     ctx.llm.registerAdapter(['synthetic-summary'], summary)
     const sessionId = SessionId('hybrid-failed-switch')
@@ -189,11 +243,15 @@ it('keeps the prior route and checkpoint unchanged when the second switch chunk 
     owned.agent.model.select({ provider: wide.provider, model: 'small' })
     await send(owned.agent, 'Switch to the lower-capacity model.')
     const after = (await ctx.sessionQuery.readSession(sessionId)).events
-    expect(summary.requests).toHaveLength(2)
+    expect(summary.requests).toHaveLength(failure === 'provider rejection' ? 2 : 1)
     expect(chat.requests).toHaveLength(3)
     expect(after.at(-1)).toMatchObject({
       type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'MODEL_SWITCH_COMPACTION_FAILED' } } },
     })
+    if (failure === 'changed capacity') {
+      expect(after.findLast(event => event.type === 'compaction/end')?.data.error)
+        .toBe('compaction: summarizer capacity changed')
+    }
     expect(checkpoints(after)).toHaveLength(0)
     expect(after.filter(event => event.type === 'compaction/summary')).toHaveLength(0)
     expect(after.slice(0, before.length)).toEqual(before)

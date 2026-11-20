@@ -11,6 +11,7 @@ import { resolveCompactSpec, resolveTargetPolicy } from './config.ts'
 import { projectSummaryTranscript } from './request-projection.ts'
 import { selectCompactableRange } from './region.ts'
 import type { CompactionChunkCall, RegionSummary, SurfaceSelection } from './region.ts'
+import { prepareSummaryCall } from './summarizer.ts'
 import type { SummarizationInput } from './summarizer.ts'
 
 interface OriginalMessage {
@@ -189,12 +190,9 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     const target = policy.summarizationProvider === ''
       ? { provider: sourceRoute.provider, model: sourceRoute.model }
       : { provider: policy.summarizationProvider, model: policy.summarizationModel }
-    const info = await ctx.llm.resolveModelInfo(target.provider, target.model, signal)
-    if (info.requestProtocol !== undefined) {
-      throw new LlmError('compaction: Hybrid requires a chat summarizer', 'SUMMARY_TARGET_NOT_CHAT')
-    }
     const config = { ...target, maxTokens: policy.maxTokens }
-    const first = await ctx.llm.prepareCall(config, signal)
+    const first = await prepareSummaryCall(ctx, config, signal)
+    const window = first.window
     const destinationCall = admission === undefined ? await ctx.llm.prepareCall(destination.config, signal) : undefined
     const destinationWindow = admission?.contextWindow ?? destinationCall?.context?.contextWindow
     const destinationHeader = destinationCall === undefined ? destination : { ...destination, config: destinationCall.config }
@@ -207,8 +205,6 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     const destinationBudget = switching
       ? Math.min(destinationWindow - reserve, resolveCompactSpec(destinationPolicy, destinationWindow, reserve).thresholdTokens - 1)
       : destinationWindow - reserve
-    const window = first.context?.contextWindow
-    if (window === undefined) throw new LlmError('compaction: summarizer context is unknown', 'SUMMARY_TARGET_UNVERIFIED')
     const meter = ctx.tokenMeter
     const events = observation.events
     const fixed = meter.estimateMessage(summaryInstruction)
@@ -258,11 +254,12 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     const summary: Array<{ type: 'text'; text: string }> = []
     const chunkCalls: CompactionChunkCall[] = []
     for (const [index, chunk] of chunks.entries()) {
-      const call = index === 0 ? first : await ctx.llm.prepareCall(config, signal)
+      const prepared = index === 0 ? first : await prepareSummaryCall(ctx, config, signal)
+      const { call } = prepared
       assertCurrent()
-      if (call.context?.contextWindow !== window || call.config.maxTokens !== config.maxTokens
-        || call.inputModalities?.includes('text') === false || chunk.tokens + config.maxTokens > window) {
-        throw new LlmError('compaction: summarizer capacity or modality changed', 'SUMMARY_TARGET_UNVERIFIED')
+      if (prepared.window !== window || call.config.maxTokens !== config.maxTokens
+        || chunk.tokens + config.maxTokens > window) {
+        throw new LlmError('compaction: summarizer capacity changed', 'SUMMARY_TARGET_UNVERIFIED')
       }
       const assembler = new BlockAssembler()
       for await (const item of call.stream({

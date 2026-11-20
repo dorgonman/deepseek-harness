@@ -3,14 +3,14 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.2-rc.3/compaction-summary-output/guide.md
 /:
-  en: ca1db9eea83dfe03
-  zh: cf60a4d5f88706f1
+  en: 33ffe2835b67d566
+  zh: 41aeac230d66c450
 /summarizers-must-return-text-without-tool-calls:
   en: 50e6185b4dab692a
   zh: 9e757034d36b69f4
 /summarizers-must-return-text-without-tool-calls/change:
-  en: 79774563a26959cc
-  zh: 6f26a3294f30552c
+  en: 7baa7101da265f1a
+  zh: 3b7b51b036a81327
 /summarizers-must-return-text-without-tool-calls/migration:
-  en: 5ecd6f91f991fcc3
-  zh: a18196645ab0de9a
+  en: 2a80248d40811dea
+  zh: bdf48f3f04d8b5ff

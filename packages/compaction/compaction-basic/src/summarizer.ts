@@ -11,7 +11,8 @@ import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 // Type-only: makes the token meter service available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type {
-  ContentBlock, FinishReason, GenerateOptions, LlmResolvedModelInfo, Message, RequestMessage, TokenUsage, ToolSchema,
+  ContentBlock, FinishReason, GenerateOptions, LlmCallConfig, LlmResolvedModelInfo, Message,
+  PreparedLlmCall, RequestMessage, TokenUsage, ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { projectSummaryTranscript } from './request-projection.ts'
@@ -100,7 +101,7 @@ export type SummaryResult = {
   | {
     /** Complete provider output before the text-only summary projection. */
     rawOutput: ContentBlock[]
-    /** Identifies exactly one call through this context's `ctx.llm.stream()`. */
+    /** Identifies exactly one call through this context's LLM waterfall. */
     llmStreamCall: true
   }
   | {
@@ -111,10 +112,71 @@ export type SummaryResult = {
   }
 )
 
+/** Reject a target that explicitly uses another protocol or excludes text. */
+function requireTextSummarizer(info: LlmResolvedModelInfo): void {
+  if (info.requestProtocol !== undefined) {
+    throw new LlmError(
+      `compaction: summarizer ${info.provider}/${info.id} uses the ${info.requestProtocol} request protocol, `
+      + 'not ordinary chat text generation',
+      'SUMMARY_TARGET_NOT_CHAT',
+    )
+  }
+  if (info.inputModalities?.includes('text') === false) {
+    throw new LlmError(
+      `compaction: summarizer ${info.provider}/${info.id} does not accept text input required for compaction`,
+      'SUMMARY_TARGET_NOT_CHAT',
+    )
+  }
+}
+
+/**
+ * Bind a verified text target and its context window to the eventual dispatch.
+ * @param ctx - context providing the LLM service.
+ * @param config - selected provider, model, and call controls.
+ * @param signal - cancellation forwarded to call preparation.
+ * @returns the prepared call, its context window, and the adapter's tool capability.
+ */
+export async function prepareSummaryCall(
+  ctx: Context,
+  config: LlmCallConfig,
+  signal?: AbortSignal,
+): Promise<{ call: PreparedLlmCall; window: number; nativeTools: boolean | undefined }> {
+  let nativeTools: boolean | undefined
+  let call: PreparedLlmCall
+  const { provider, model } = config
+  try {
+    call = await ctx.llm.prepareCall(config, signal, (controls, info) => {
+      requireTextSummarizer(info)
+      nativeTools = info.nativeTools
+      return { ...controls }
+    })
+  } catch (error: unknown) {
+    signal?.throwIfAborted()
+    if (error instanceof LlmError && error.code === 'SUMMARY_TARGET_NOT_CHAT') throw error
+    const message = error instanceof Error ? error.message : String(error)
+    throw new LlmError(
+      `compaction: cannot verify summarizer ${provider}/${model}: ${message}`,
+      'SUMMARY_TARGET_UNVERIFIED',
+      { cause: error },
+    )
+  }
+  signal?.throwIfAborted()
+  const window = call.context?.contextWindow
+  if (window === undefined || !Number.isSafeInteger(window) || window <= 0) {
+    throw new LlmError(
+      `compaction: cannot verify summarizer ${provider}/${model}: `
+      + 'context capacity is unavailable; configure contextWindow on the adapter model',
+      'SUMMARY_TARGET_UNVERIFIED',
+    )
+  }
+  return { call, window, nativeTools }
+}
+
 /**
  * Summarize through the exact ordinary Chat route. Explicit no-tools routes
  * receive quoted text history; other routes retain the conversation prefix.
  * Both append the final compaction instruction and report their selected input.
+ * Strict policies bind metadata verification and dispatch to one adapter call.
  * @param ctx - context providing the LLM service.
  * @param config - resolved backend configuration.
  * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.
@@ -156,37 +218,18 @@ export async function summarizeWithLlm(
     )
   }
 
-  // The summarizer is an ordinary text-generating Chat deployment. Verify the
-  // exact route's protocol and capacity before spending a provider call, so an
-  // incompatible or oversized summary fails with the summarizer named instead
-  // of surfacing as a generic provider error or an accepted structured readout.
-  // Under the fail-closed policy an unverifiable route is rejected; without
-  // that policy, an adapter that exposes no exact metadata keeps the upstream
-  // best-effort behavior.
-  let info: LlmResolvedModelInfo | undefined
-  try {
-    info = await ctx.llm.resolveModelInfo(target.provider, target.model, signal)
-  } catch (error: unknown) {
-    signal?.throwIfAborted()
-    if (config.summarizationFallback === 'error') {
-      const message = error instanceof Error ? error.message : String(error)
-      throw new LlmError(
-        `compaction: cannot verify summarizer ${target.provider}/${target.model}: ${message}`,
-        'SUMMARY_TARGET_UNVERIFIED',
-        { cause: error },
-      )
-    }
-    info = undefined
-  }
-  if (info?.requestProtocol !== undefined) {
-    throw new LlmError(
-      `compaction: summarizer ${target.provider}/${target.model} uses the `
-      + `${info.requestProtocol} request protocol, not ordinary chat text generation`,
-      'SUMMARY_TARGET_NOT_CHAT',
-    )
-  }
+  const proposed = { provider: target.provider, model: target.model, maxTokens: config.maxTokens }
+  const prepared = config.summarizationFallback === 'error'
+    ? await prepareSummaryCall(ctx, proposed, signal)
+    : undefined
+  // Legacy stream middleware may reroute the call, and missing capacity is
+  // allowed when the adapter cannot provide it.
+  const info = prepared === undefined
+    ? await ctx.llm.resolveModelInfo(target.provider, target.model, signal).catch(() => undefined)
+    : undefined
   signal?.throwIfAborted()
-  const requestProjection: SummaryRequestProjection = info?.nativeTools === false
+  if (info !== undefined) requireTextSummarizer(info)
+  const requestProjection: SummaryRequestProjection = (prepared?.nativeTools ?? info?.nativeTools) === false
     ? 'text-transcript-v1'
     : 'conversation-prefix-v1'
   const prefix = requestProjection === 'text-transcript-v1'
@@ -200,27 +243,26 @@ export async function summarizeWithLlm(
     }),
   ]
   const options: GenerateOptions = {
-    provider: target.provider,
-    model: target.model,
+    ...(prepared?.call.config ?? proposed),
     messages,
     ...requestProjection === 'conversation-prefix-v1' ? {
       toolHistory: agent.session.toolHistory(),
       ...input.tools === undefined ? {} : { tools: [...input.tools] },
     } : {},
-    maxTokens: config.maxTokens,
     sessionId: agent.session.id,
     purpose: 'compaction',
     ...signal === undefined ? {} : { signal },
   }
+  const window = prepared?.window ?? info?.context?.contextWindow
   const meter = ctx.get('tokenMeter')
-  if (info?.context !== undefined && meter !== undefined) {
+  if (window !== undefined && meter !== undefined) {
     const inputTokens = messages.reduce((total, message) => total + meter.estimateMessage(message), 0)
       + meter.estimateTools(options.tools)
     const required = inputTokens + config.maxTokens
-    if (required > info.context.contextWindow) {
+    if (required > window) {
       throw new LlmError(
         `compaction: summarizer ${target.provider}/${target.model} estimated ${inputTokens} input + `
-        + `${config.maxTokens} output tokens exceed its ${info.context.contextWindow}-token context window; `
+        + `${config.maxTokens} output tokens exceed its ${window}-token context window; `
         + 'increase the retained tail, lower maxTokens, or use a larger-context summarizer',
         'SUMMARY_CAPACITY_EXCEEDED',
       )
@@ -228,7 +270,8 @@ export async function summarizeWithLlm(
   }
 
   const assembler = new BlockAssembler()
-  for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)
+  const stream = prepared === undefined ? ctx.llm.stream(options) : prepared.call.stream(options)
+  for await (const chunk of stream) assembler.push(chunk)
   const error = finishError(assembler.finish)
   if (error !== undefined) throw error
 
