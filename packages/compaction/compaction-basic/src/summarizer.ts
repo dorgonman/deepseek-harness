@@ -129,8 +129,18 @@ function requireTextSummarizer(info: LlmResolvedModelInfo): void {
   }
 }
 
-/** Bind a verified text target and its context window to the eventual dispatch. */
-export async function prepareSummaryCall(ctx: Context, config: LlmCallConfig, signal?: AbortSignal) {
+/**
+ * Bind a verified text target and its context window to the eventual dispatch.
+ * @param ctx - context providing the LLM service.
+ * @param config - selected provider, model, and call controls.
+ * @param signal - cancellation forwarded to call preparation.
+ * @returns the prepared call, its context window, and the adapter's tool capability.
+ */
+export async function prepareSummaryCall(
+  ctx: Context,
+  config: LlmCallConfig,
+  signal?: AbortSignal,
+): Promise<{ call: PreparedLlmCall; window: number; nativeTools: boolean | undefined }> {
   let nativeTools: boolean | undefined
   let call: PreparedLlmCall
   const { provider, model } = config
