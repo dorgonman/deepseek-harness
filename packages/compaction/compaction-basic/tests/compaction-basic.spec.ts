@@ -1540,6 +1540,20 @@ describe('default one-shot summarizer', () => {
     expect(output.requestProjection).toBe('conversation-prefix-v1')
   })
 
+  it('keeps legacy stream dispatch when the advisory metadata lookup rejects', async () => {
+    const { ctx, adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }], undefined, MODEL, {
+      auto: false, maxTokens: 32, summarizationFallback: 'latest-route',
+      summarizationProvider: MODEL, summarizationModel: MODEL,
+    })
+    const resolve = vi.spyOn(ctx.llm, 'resolveModelInfo').mockRejectedValueOnce(new Error('advisory metadata unavailable'))
+    const stream = vi.spyOn(adapter, 'stream')
+    await expect(compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL), SIGNAL)).resolves.toMatchObject({
+      summary: [{ type: 'text', text: 'checkpoint' }], requestProjection: 'conversation-prefix-v1',
+    })
+    expect(resolve).toHaveBeenCalledExactlyOnceWith(MODEL, MODEL, SIGNAL)
+    expect(stream).toHaveBeenCalledTimes(1)
+  })
+
   it('prices transcript framing and the instruction at the exact context boundary without tool schemas', async () => {
     const { ctx, adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }], undefined, MODEL, {
       auto: false, maxTokens: 32,
@@ -2166,12 +2180,17 @@ describe('summary target preflight', () => {
     expect(adapter.streamCalls).toBe(0)
   })
 
-  it('fails closed when the summarizer protocol cannot be verified', async () => {
+  it.each([
+    ['Error', new Error('metadata unavailable')],
+    ['string', 'metadata unavailable'],
+  ] as const)('fails closed when adapter preparation rejects with a %s', async (_kind, cause) => {
     const { ctx, adapter } = probe({ provider: 'probe', id: 'probe', name: 'probe' })
-    vi.spyOn(adapter, 'prepareCall').mockRejectedValueOnce(new Error('metadata unavailable'))
+    vi.spyOn(adapter, 'prepareCall').mockRejectedValueOnce(cause)
     await expect(summarizeWithLlm(
       ctx, CONFIG, promptInput('history'), agent(conversation(1), MODEL), SIGNAL,
-    )).rejects.toMatchObject({ code: 'SUMMARY_TARGET_UNVERIFIED' })
+    )).rejects.toMatchObject({
+      code: 'SUMMARY_TARGET_UNVERIFIED', cause, message: 'compaction: cannot verify summarizer probe/probe: metadata unavailable',
+    })
     expect(adapter.streamCalls).toBe(0)
   })
 

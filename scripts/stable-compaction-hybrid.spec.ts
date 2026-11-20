@@ -218,15 +218,18 @@ it.each([
   }, { auto: true, thresholdRatio: 0.5, summarizationModel: 'narrow', maxTokens: 64 })
 })
 
-it.each(['provider rejection', 'changed modality'] as const)('preserves the switch origin after second-chunk %s', async (failure) => {
+it.each(['provider rejection', 'changed modality', 'changed capacity'] as const)('preserves the switch origin after second-chunk %s', async (failure) => {
   await withContext(async (ctx, root) => {
     const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Short reply.')))
     const summary = new WindowAdapter([textResponse('First chunk.'), [...fault]])
-    if (failure === 'changed modality') {
+    if (failure !== 'provider rejection') {
       const prepare = summary.prepareCall.bind(summary)
+      const changedMetadata = failure === 'changed modality'
+        ? { inputModalities: ['image'] as const }
+        : { context: { contextWindow: 8_192 } }
       vi.spyOn(summary, 'prepareCall').mockImplementation(async (...args) => {
         const call = await prepare(...args)
-        return summary.requests.length === 0 ? call : { ...call, model: { ...call.model, inputModalities: ['image'] } }
+        return summary.requests.length === 0 ? call : { ...call, model: { ...call.model, ...changedMetadata } }
       })
     }
     ctx.llm.registerAdapter([wide.provider], chat)
@@ -240,11 +243,15 @@ it.each(['provider rejection', 'changed modality'] as const)('preserves the swit
     owned.agent.model.select({ provider: wide.provider, model: 'small' })
     await send(owned.agent, 'Switch to the lower-capacity model.')
     const after = (await ctx.sessionQuery.readSession(sessionId)).events
-    expect(summary.requests).toHaveLength(failure === 'changed modality' ? 1 : 2)
+    expect(summary.requests).toHaveLength(failure === 'provider rejection' ? 2 : 1)
     expect(chat.requests).toHaveLength(3)
     expect(after.at(-1)).toMatchObject({
       type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'MODEL_SWITCH_COMPACTION_FAILED' } } },
     })
+    if (failure === 'changed capacity') {
+      expect(after.findLast(event => event.type === 'compaction/end')?.data.error)
+        .toBe('compaction: summarizer capacity changed')
+    }
     expect(checkpoints(after)).toHaveLength(0)
     expect(after.filter(event => event.type === 'compaction/summary')).toHaveLength(0)
     expect(after.slice(0, before.length)).toEqual(before)
