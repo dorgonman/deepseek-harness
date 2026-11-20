@@ -298,8 +298,8 @@ export class BasicCompactionEngine extends CompactionEngine {
   }
 
   /**
-   * Summarize the selected region through a direct one-shot `ctx.llm.stream()`
-   * call. Ordinary Chat targets with nativeTools:false receive quoted text
+   * Summarize the selected region through one auxiliary LLM call.
+   * Ordinary Chat targets with nativeTools:false receive quoted text
    * history; other routes retain the conversation prefix.
    * Override this sole hook for a template or remote summarizer.
    * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.

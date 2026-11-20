@@ -1,0 +1,16 @@
+- id: llm-replay
+  config:
+    providers:
+      - id: deepseek-official
+        name: DeepSeek
+        models:
+          - id: deepseek-v4-flash
+            contextWindow: 8980
+            defaultMaxTokens: 1000
+      - id: summary-text
+        name: Image-only summary
+        models:
+          - id: ordinary-text
+            contextWindow: 262144
+            inputModalities: [image]
+            nativeTools: false
