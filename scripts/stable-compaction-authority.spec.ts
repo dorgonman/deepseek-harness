@@ -11,7 +11,7 @@ import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import LlmRuntime, { createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
@@ -26,6 +26,8 @@ import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { expect, it } from 'vitest'
 import { createSessionTestController } from '../packages/api/session-controller/tests/test-remote.ts'
 import { MockAdapter, textResponse, toolCallResponse } from '../packages/core/agent-loop/tests/mock-adapter.ts'
+import { eventLine, eventLines } from '../packages/session/session-persistence-jsonl/src/format.ts'
+import { compressZstdFrame, scanZstdFrames } from '../packages/session/session-persistence-jsonl/src/zstd.ts'
 import { appendFixtureTurn, fixtureAgent } from './stable-compaction-fixture.ts'
 
 class FixtureCompaction extends BasicCompactionEngine {
@@ -405,12 +407,37 @@ it('retains original tool history through repeated Basic compaction, a refused s
   }
 })
 
+async function tearPlainRecord(logPath: string, cut: SessionEvent) {
+  const rows = (await readFile(logPath, 'utf8')).split('\n')
+  const cutIndex = rows.findIndex(row => row.includes(`"seq":${cut.seq},`) && row.includes(`"type":"${cut.type}"`))
+  if (cutIndex < 0) throw new Error('The omitted record was not written into the fixture log')
+  const committed = Buffer.from(rows.slice(0, cutIndex).join('\n') + '\n')
+  const fragment = Buffer.from(rows[cutIndex]!).subarray(0, 16)
+  await truncate(logPath, committed.length + fragment.length)
+  return { committed, torn: Buffer.concat([committed, fragment]) }
+}
+
+async function tearCompressedFrame(
+  logPath: string, committed: Buffer, completeRecords: readonly SessionEvent[], cut: SessionEvent,
+) {
+  // Complete transaction records share a final frame with the incomplete next row.
+  const frame = await compressZstdFrame(eventLines(completeRecords) + '\n' + eventLine(cut).slice(0, 16))
+  const torn = Buffer.concat([committed, frame.subarray(0, -1)])
+  expect(scanZstdFrames(torn).tornStart).toBe(committed.length)
+  await writeFile(logPath, torn)
+  return { committed, torn }
+}
+
 it.each([
-  { boundary: 'replacement', replacementStored: false },
-  { boundary: 'close marker', replacementStored: true },
-])('retains raw history and retries after a torn Basic $boundary', async ({ replacementStored }) => {
+  { compression: 'none', boundary: 'replacement', replacementStored: false },
+  { compression: 'none', boundary: 'close marker', replacementStored: true },
+  { compression: 'zstd', boundary: 'replacement', replacementStored: false },
+  { compression: 'zstd', boundary: 'close marker', replacementStored: true },
+] as const)('retains raw history and retries after a torn Basic $boundary ($compression)', async ({
+  compression, replacementStored,
+}) => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-compaction-torn-tail-'))
-  const persistence = { root: join(root, 'sessions'), compression: 'none' } as const
+  const persistence = { root: join(root, 'sessions'), compression }
   const route = { provider: 'fixture-chat', model: 'wide', maxTokens: 64 }
   const sessionId = SessionId('torn-compaction')
   const signal = new AbortController().signal
@@ -438,6 +465,12 @@ it.each([
     expect(originalResult?.data.message).toMatchObject({
       toolCallId: 'torn-tool-call', isError: false, content: [{ type: 'text', text: resultText }],
     })
+    expect(await author.sessions.flush(agent.session)).toBe(true)
+    const extension = compression === 'zstd' ? '.jsonl.zstd' : '.jsonl'
+    const logs = (await readdir(persistence.root, { recursive: true })).filter(path => path.endsWith(extension))
+    expect(logs).toHaveLength(1)
+    const logPath = join(persistence.root, logs[0]!)
+    const preCompactionFrames = compression === 'zstd' ? await readFile(logPath) : undefined
     const first = await author.compaction.compactNow(agent, signal)
     const compacted = await author.sessionQuery.readSession(sessionId)
     const replacement = compacted.events.find(event => event.type === 'user/message' && isCompactCheckpointSource(event.data.source))
@@ -449,18 +482,11 @@ it.each([
     const replayedSurface = replacementStored ? [...agent.session.surface.nodes] : rawSurface
     await dispose()
 
-    const logs = (await readdir(persistence.root, { recursive: true })).filter(path => path.endsWith('.jsonl'))
-    expect(logs).toHaveLength(1)
-    const logPath = join(persistence.root, logs[0]!)
     const cut = replacementStored ? end : replacement
-    const rows = (await readFile(logPath, 'utf8')).split('\n')
-    const cutIndex = rows.findIndex(row => row.includes(`"seq":${cut.seq},`) && row.includes(`"type":"${cut.type}"`))
-    if (cutIndex < 0) throw new Error('The omitted record was not written into the fixture log')
-    const committed = Buffer.from(rows.slice(0, cutIndex).join('\n') + '\n')
-    const fragment = Buffer.from(rows[cutIndex]!).subarray(0, 16)
-    await truncate(logPath, committed.length + fragment.length)
-    const torn = Buffer.concat([committed, fragment])
     const prefix = compacted.events.filter(event => event.seq < cut.seq)
+    const { committed, torn } = preCompactionFrames === undefined
+      ? await tearPlainRecord(logPath, cut)
+      : await tearCompressedFrame(logPath, preCompactionFrames, prefix.slice(original.events.length), cut)
 
     const retrySummary = new ModelSwitchAdapter([textResponse('Recovered.')])
     await mountBasicRecovery(reader, persistence, retrySummary)
@@ -485,7 +511,9 @@ it.each([
     expect(recovered.filter(event => event.type === 'compaction/end').map(event => event.data.compactionId))
       .toEqual([retry?.compactionId])
     expect((await reader.sessionQuery.readEvent({ sessionId, seq: originalResult.seq })).target).toEqual(originalResult)
-    expect((await readFile(logPath)).subarray(0, committed.length)).toEqual(committed)
+    const repaired = await readFile(logPath)
+    expect(repaired.subarray(0, committed.length)).toEqual(committed)
+    if (compression === 'zstd') expect(scanZstdFrames(repaired).tornStart).toBeUndefined()
   } finally {
     await reader.fiber.dispose()
     await author.fiber.dispose()
