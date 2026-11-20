@@ -115,6 +115,28 @@ describe('mandatory V4 compaction restoration', () => {
     expect(() => reopen(compact().slice(0, 5))).not.toThrow()
   })
 
+  it('retains genuine Hybrid chunk receipts and rejects malformed call records', () => {
+    const receipt = {
+      groups: [{ eventSeqs: [1], toolBodiesOmitted: false }],
+      estimatedInputTokens: 100,
+      contextWindow: 256,
+      rawOutput: [{ type: 'reasoning', text: 'trace' }, { type: 'text', text: 'summary' }],
+      usage: { inputTokens: 100, outputTokens: 10 },
+    }
+    const restored = reopen(change(compact(), 3, { maxTokens: 32, chunkCalls: [receipt] }))
+    expect(restored.artifact.events[3]?.data).toMatchObject({ chunkCalls: [receipt] })
+    for (const fields of [
+      { chunkCalls: [] },
+      { chunkCalls: [receipt], llmStreamCall: true, rawOutput: receipt.rawOutput },
+      { chunkCalls: [receipt, receipt] },
+      { chunkCalls: [{ ...receipt, estimatedInputTokens: 250 }] },
+      { chunkCalls: [{ ...receipt, rawOutput: [call] }] },
+      { chunkCalls: [{ ...receipt, groups: [{ eventSeqs: [2], toolBodiesOmitted: false }] }] },
+    ]) {
+      expect(() => reopen(change(compact(), 3, { maxTokens: 32, ...fields }))).toThrow(/compaction chunk/)
+    }
+  })
+
   it.each([
     ['checkpoint identity', change(compact(), 4, { source: { kind: 'compact-checkpoint', compactionId: 'WRONG', sourceCommandId: 'cmd' } })],
     ['checkpoint command', change(compact(), 4, { source: { kind: 'compact-checkpoint', compactionId: 'c', sourceCommandId: 'WRONG' } })],

@@ -217,6 +217,7 @@
       "@deepseek-ai/dsh-compaction/checkpoint": ["./packages/compaction/compaction/src/checkpoint.ts"],
       "@deepseek-ai/dsh-compaction/types": ["./packages/compaction/compaction/src/types.ts"],
       "@deepseek-ai/dsh-compaction-basic/types": ["./packages/compaction/compaction-basic/src/policy-types.ts"],
+      "@deepseek-ai/dsh-compaction-basic/hybrid": ["./packages/compaction/compaction-basic/src/hybrid.ts"],
       "@deepseek-ai/dsh-file-reference/grammar": ["./packages/context/file-reference/src/grammar.ts"],
       "@deepseek-ai/dsh-file-reference/types": ["./packages/context/file-reference/src/types.ts"],
       "@deepseek-ai/dsh-session-reference/types": ["./packages/context/session-reference/src/types.ts"],

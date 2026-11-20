@@ -404,6 +404,8 @@ type PreStepDecision =
   }
 ```
 
+`agent/request-admission` 在模型切换时运行，时机在解析适配器之后、提交新提示词、已接纳输入和请求 header 之前。`PendingAgentRequest.preview()` 构建独立 Session，其中包含这些消息、运行时上下文、工具声明及其差异。预期 Surface 落地后，循环复用已检查的提示词和消息。监听器可以抛出错误拒绝准入。
+
 `agent/request-error` 在失败的模型步骤关闭之后、其轮次关闭之前运行。listener 可以在失败轮次的 signal 仍然存活时修复持久状态或 await 策略工作。处理该错误的 listener 返回 `{ kind: 'retry' }` 且不调用 `next()`；默认的 `undefined` 会让失败保持终态。
 
 ```ts type-equiv
@@ -1044,6 +1046,29 @@ Reject a proposed step or replace the messages that enter it. Calling `next()` p
 ```
 
 Types: [Scoped](scope.zh.md) · [UserMessage](session.zh.md)
+
+Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
+
+<a id="agentrequest-admission--serial"></a>
+
+#### `agent/request-admission` — serial
+
+Price the pending host request after the destination adapter resolves and before the loop admits the prompt, input, and route. A rejected listener aborts admission.
+
+```ts cordis-catalog
+/**
+ * Price the pending host request after the destination adapter resolves
+ * and before the loop admits the prompt, input, and route. A rejected
+ * listener aborts admission.
+ * @param payload.agent - the agent whose route will change.
+ * @param payload.request - resolved destination and detached preview of pending input.
+ * @param payload.signal - the current turn's cancellation signal.
+ * @mode serial
+ */
+'agent/request-admission'(this: Scoped<Agent>, payload: { agent: Agent request: PendingAgentRequest signal: AbortSignal }): Promise<void> | void
+```
+
+Types: [Scoped](scope.zh.md)
 
 Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
 

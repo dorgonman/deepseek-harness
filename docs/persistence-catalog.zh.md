@@ -36,7 +36,7 @@
 | `event:compaction/end` | event | `b0127044ab31a702bddfd785d345f5abd7a70876746e895ce443afa3e60ddf2d` | [`{ type: "compaction/end" }`](#persistence-type-sha256-b0127044ab31a702bddfd785d345f5abd7a70876746e895ce443afa3e60ddf2d) |
 | `event:compaction/prune` | event | `7f7fd5a6b0064f597534b29ff62ef26e786dffccf5e14f654a7d4fcea2c35f04` | [`{ type: "compaction/prune" }`](#persistence-type-sha256-7f7fd5a6b0064f597534b29ff62ef26e786dffccf5e14f654a7d4fcea2c35f04) |
 | `event:compaction/start` | event | `db874d463b0fdec77e9da1c4568f37cb70bd6596781eb93800db44fb8a116965` | [`{ type: "compaction/start" }`](#persistence-type-sha256-db874d463b0fdec77e9da1c4568f37cb70bd6596781eb93800db44fb8a116965) |
-| `event:compaction/summary` | event | `c217c6f6a129040bcb03a388f932d1290611b54b71d40f259b96fd5d671eb80f` | [`{ type: "compaction/summary" }`](#persistence-type-sha256-c217c6f6a129040bcb03a388f932d1290611b54b71d40f259b96fd5d671eb80f) |
+| `event:compaction/summary` | event | `06fa604dd079f2c6d5d00b078c22748029abdbb2849daa56e1c18e89e66a8dbf` | [`{ type: "compaction/summary" }`](#persistence-type-sha256-06fa604dd079f2c6d5d00b078c22748029abdbb2849daa56e1c18e89e66a8dbf) |
 | `event:context/decision-relevance` | event | `139b033b629515085d96a415d6b66224e2daffd9cd3aead52bd16332dedab104` | [`{ type: "context/decision-relevance" }`](#persistence-type-sha256-139b033b629515085d96a415d6b66224e2daffd9cd3aead52bd16332dedab104) |
 | `event:deliverables/presented` | event | `13d3d180f977bf78081d487ffa0ecb75857349bcab29a5a3fb48189fca2a6176` | [`{ type: "deliverables/presented" }`](#persistence-type-sha256-13d3d180f977bf78081d487ffa0ecb75857349bcab29a5a3fb48189fca2a6176) |
 | `event:developer/message` | event | `10cb7902aecbf17953cbb6feed3ffa07a0ec0da8a8fab34bcf927b8b2fc66bb4` | [`{ type: "developer/message" }`](#persistence-type-sha256-10cb7902aecbf17953cbb6feed3ffa07a0ec0da8a8fab34bcf927b8b2fc66bb4) |
@@ -382,7 +382,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'compaction/end': { compactionId: CompactionId; sourceCommandId?: CommandId; turn: number | null; error?: string }
 ```
 
-来源：[`packages/compaction/compaction/src/types.ts:80`](../packages/compaction/compaction/src/types.ts)
+来源：[`packages/compaction/compaction/src/types.ts:102`](../packages/compaction/compaction/src/types.ts)
 
 <a id="compactionprune--log-only"></a>
 
@@ -408,7 +408,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }
 ```
 
-来源：[`packages/compaction/compaction/src/types.ts:90`](../packages/compaction/compaction/src/types.ts)
+来源：[`packages/compaction/compaction/src/types.ts:112`](../packages/compaction/compaction/src/types.ts)
 
 <a id="compactionstart--log-only"></a>
 
@@ -423,7 +423,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'compaction/start': { compactionId: CompactionId; sourceCommandId?: CommandId; turn: number | null }
 ```
 
-来源：[`packages/compaction/compaction/src/types.ts:27`](../packages/compaction/compaction/src/types.ts)
+来源：[`packages/compaction/compaction/src/types.ts:41`](../packages/compaction/compaction/src/types.ts)
 
 <a id="compactionsummary--log-only"></a>
 
@@ -470,11 +470,19 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
     rawOutput: ContentBlock[]
     /** Identifies exactly one call through this context's `ctx.llm.stream()`. */
     llmStreamCall: true
+    chunkCalls?: never
   }
   | {
     /** Optional complete output from an unmarked template, remote, or other summarizer. */
     rawOutput?: ContentBlock[]
     /** An unmarked summary does not identify a call through this context's LLM seam. */
+    llmStreamCall?: never
+    chunkCalls?: never
+  }
+  | {
+    /** Successful Hybrid requests in dispatch order. */
+    chunkCalls: CompactionChunkCall[]
+    rawOutput?: never
     llmStreamCall?: never
   }
 )
@@ -482,7 +490,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 类型：[ContentBlock](subsystems/core.zh.md) · [TokenUsage](subsystems/llm-streaming.zh.md)
 
-来源：[`packages/compaction/compaction/src/types.ts:37`](../packages/compaction/compaction/src/types.ts)
+来源：[`packages/compaction/compaction/src/types.ts:51`](../packages/compaction/compaction/src/types.ts)
 
 ### `context/*`
 
@@ -3416,6 +3424,35 @@ SHA-256: `31907de9563751822af6d9be02bafaf26faa098bbd1cb412524134d577cc1648`
 | `kind` | 必需 | `"compact-checkpoint"` |
 | `sourceCommandId` | 可选 | `string` |
 
+<a id="persistence-type-sha256-a27100c1f0aefe7322f51e25b7a957c02e2e76d582aa7a164c9a4193f5d0b98a"></a>
+
+<a id="persistence-type-compactionchunkcall"></a>
+
+<a id="persistence-type-packagescompactioncompactionsrctypestscompactionchunkcall"></a>
+
+### `CompactionChunkCall`
+
+SHA-256: `a27100c1f0aefe7322f51e25b7a957c02e2e76d582aa7a164c9a4193f5d0b98a`
+
+来源：[`packages/compaction/compaction/src/types.ts:21`](../packages/compaction/compaction/src/types.ts)
+
+| 属性 | 存在性 | 类型 |
+|---|---|---|
+| `contextWindow` | 必需 | `number` |
+| `estimatedInputTokens` | 必需 | `number` |
+| `groups` | 必需 | [`{ eventSeqs, toolBodiesOmitted }[]`](#persistence-type-sha256-410fef0c454930d489ed4bf2a760e21c7e1751f2cb81701ea567ea5fe2682949) |
+| `rawOutput` | 必需 | [`union (2 variants)[]`](#persistence-type-sha256-336ffff35ca3264d44ebb476ac0780473c495db10e5d2c20bfc37a5231625720) |
+| `reasoningEffort` | 可选 | `string` |
+| `usage` | 可选 | [`TokenUsage`](#persistence-type-sha256-fec5442b9ee4122e10514d81d5a43648003fe8bfb7ee2ba50c0cdbdd383ed394) |
+
+<a id="persistence-type-sha256-eb7cc593c8356970139d50a3ed49ada70058febe98fe69175d356b7e546a18c1"></a>
+
+### `CompactionChunkCall[]`
+
+SHA-256: `eb7cc593c8356970139d50a3ed49ada70058febe98fe69175d356b7e546a18c1`
+
+[`CompactionChunkCall`](#persistence-type-sha256-a27100c1f0aefe7322f51e25b7a957c02e2e76d582aa7a164c9a4193f5d0b98a) 的数组。
+
 <a id="persistence-type-sha256-8064c03c87c357fd1575cb9395ce86e6dcbe2d275bf7717864a02cddf01827d5"></a>
 
 <a id="persistence-type-contentblock"></a>
@@ -5901,17 +5938,6 @@ SHA-256: `0c257f6119acdde45c806537cd16869e211091b876a672602eed640284aec7bf`
 - `"no"`
 - `"yes"`
 
-<a id="persistence-type-sha256-138c02a26d5429a6dc645575f058b158392f80ef1192d0f4e76384eedfbee2a4"></a>
-
-### `union (2 variants)`
-
-SHA-256: `138c02a26d5429a6dc645575f058b158392f80ef1192d0f4e76384eedfbee2a4`
-
-以下类型之一：
-
-- [`{ compactionId, llmStreamCall, maxTokens?, model, … }`](#persistence-type-sha256-084198af0ea031bf8107fb5884fed5c1065fad05908fccdd54f8af4c5c8256f3)
-- [`{ compactionId, maxTokens?, model, provider, … }`](#persistence-type-sha256-a49eb25468f78e6c56ac76734b19cfbbef742d6fe1c355e5b1f21acec278d8c1)
-
 <a id="persistence-type-sha256-1ab2ef1296f157ba96998f179bb5daa9d21a82480da2901127aeab2730797c92"></a>
 
 ### `union (2 variants)`
@@ -5955,6 +5981,37 @@ SHA-256: `a01212471a11a4c64c09a45113520e46b30322bb82391aee20ea0db4acba6bfd`
 
 - `"conversation-prefix-v1"`
 - `"text-transcript-v1"`
+
+<a id="persistence-type-sha256-f316e282d90240c39a213a1b082b67348805a514f7d139814292d8cf87567586"></a>
+
+### `union (2 variants)`
+
+SHA-256: `f316e282d90240c39a213a1b082b67348805a514f7d139814292d8cf87567586`
+
+以下类型之一：
+
+- [`ReasoningBlock`](#persistence-type-sha256-814d9434e1ddf9078612b3b34322f26e9363b469213335007f7e9ba7fee9464e)
+- [`TextBlock`](#persistence-type-sha256-4e887768586528565381dadbddee6cef555874148089f4579e0b4b1ad096fc9c)
+
+<a id="persistence-type-sha256-336ffff35ca3264d44ebb476ac0780473c495db10e5d2c20bfc37a5231625720"></a>
+
+### `union (2 variants)[]`
+
+SHA-256: `336ffff35ca3264d44ebb476ac0780473c495db10e5d2c20bfc37a5231625720`
+
+[`union (2 variants)`](#persistence-type-sha256-f316e282d90240c39a213a1b082b67348805a514f7d139814292d8cf87567586) 的数组。
+
+<a id="persistence-type-sha256-39170b4f5483f63e57797303f6fa26532a5bf4d2e230d62f354cc7240945d209"></a>
+
+### `union (3 variants)`
+
+SHA-256: `39170b4f5483f63e57797303f6fa26532a5bf4d2e230d62f354cc7240945d209`
+
+以下类型之一：
+
+- [`{ compactionId, llmStreamCall, maxTokens?, model, … }`](#persistence-type-sha256-084198af0ea031bf8107fb5884fed5c1065fad05908fccdd54f8af4c5c8256f3)
+- [`{ compactionId, maxTokens?, model, provider, … }`](#persistence-type-sha256-a49eb25468f78e6c56ac76734b19cfbbef742d6fe1c355e5b1f21acec278d8c1)
+- [`{ chunkCalls, compactionId, maxTokens?, model, … }`](#persistence-type-sha256-446373c201b3651e99e0a8a52e9cd2df53263b33f6c9083970032ef1afcc9d43)
 
 <a id="persistence-type-sha256-5776e5553ff2dfe3f5bc202dbb1e7c9f93e35a531aebb7764c23b2b6153b2ccc"></a>
 
@@ -6307,6 +6364,27 @@ SHA-256: `cbbe8377ee744964537dbafd83607219e58ba79a13f6db0d0645c7ad3d5e8a09`
 | `mode` | 必需 | `"external"` |
 | `version` | 必需 | `2` |
 
+<a id="persistence-type-sha256-446373c201b3651e99e0a8a52e9cd2df53263b33f6c9083970032ef1afcc9d43"></a>
+
+### `{ chunkCalls, compactionId, maxTokens?, model, … }`
+
+SHA-256: `446373c201b3651e99e0a8a52e9cd2df53263b33f6c9083970032ef1afcc9d43`
+
+| 属性 | 存在性 | 类型 |
+|---|---|---|
+| `chunkCalls` | 必需 | [`CompactionChunkCall[]`](#persistence-type-sha256-eb7cc593c8356970139d50a3ed49ada70058febe98fe69175d356b7e546a18c1) |
+| `compactionId` | 必需 | `string` |
+| `maxTokens` | 可选 | `number` |
+| `model` | 必需 | `string` |
+| `provider` | 必需 | `string` |
+| `requestProjection` | 可选 | [`union (2 variants)`](#persistence-type-sha256-a01212471a11a4c64c09a45113520e46b30322bb82391aee20ea0db4acba6bfd) |
+| `shadowedRange` | 必需 | [`{ end, start }`](#persistence-type-sha256-9e41386b3a0c9572b0d63078492ebb3997da7d3a830d44e0259418bd02f4bcb2) |
+| `shadowedSeqs` | 必需 | [`number[]`](#persistence-type-sha256-5d03ba38734809bcbd2a55221bd938b3b3fc34b49bb686c6113e9e4931e3aa78) |
+| `shadowedTokenCount` | 必需 | `number` |
+| `sourceCommandId` | 可选 | `string` |
+| `summary` | 必需 | [`ContentBlock[]`](#persistence-type-sha256-b52f215a6cd691058a3413c12f161fa3b563a2f4895adb3df6f744ec4b0a6ef1) |
+| `usage` | 可选 | [`TokenUsage`](#persistence-type-sha256-fec5442b9ee4122e10514d81d5a43648003fe8bfb7ee2ba50c0cdbdd383ed394) |
+
 <a id="persistence-type-sha256-a81059ca06999da1e712414520c2c65e491d052fcf9640fae20aa38f0a5dc735"></a>
 
 ### `{ code, name, reason? }`
@@ -6342,7 +6420,7 @@ SHA-256: `5b6fb1f226ff56402db08a6aae82af76100b14056271875f69ec526a1ae05d51`
 
 SHA-256: `ca59530d1a4f3e191b4032bc4a20eded0d827db8b5a7efb27b3af9e9b456c6f2`
 
-来源：[`packages/compaction/compaction/src/types.ts:80`](../packages/compaction/compaction/src/types.ts)
+来源：[`packages/compaction/compaction/src/types.ts:102`](../packages/compaction/compaction/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -6400,7 +6478,7 @@ SHA-256: `a49eb25468f78e6c56ac76734b19cfbbef742d6fe1c355e5b1f21acec278d8c1`
 
 SHA-256: `3e4e7683b0192c9f0e6a75c59076108f017892cdb302a98032c2632fd79c356f`
 
-来源：[`packages/compaction/compaction/src/types.ts:27`](../packages/compaction/compaction/src/types.ts)
+来源：[`packages/compaction/compaction/src/types.ts:41`](../packages/compaction/compaction/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -6549,7 +6627,7 @@ SHA-256: `c2a13242efc3bea4b36a843ddf1524ff4d33c765a71b582fa1fdbfa4fa148434`
 
 SHA-256: `9e41386b3a0c9572b0d63078492ebb3997da7d3a830d44e0259418bd02f4bcb2`
 
-来源：[`packages/compaction/compaction/src/types.ts:41`](../packages/compaction/compaction/src/types.ts) · [`packages/compaction/compaction/src/types.ts:92`](../packages/compaction/compaction/src/types.ts)
+来源：[`packages/compaction/compaction/src/types.ts:114`](../packages/compaction/compaction/src/types.ts) · [`packages/compaction/compaction/src/types.ts:55`](../packages/compaction/compaction/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -6598,6 +6676,27 @@ SHA-256: `5302e763151277614b97e77f00e3b326694c6c1247b916a20503c344dc970777`
 | `meta` | 可选 | [`JsonValue`](#persistence-type-sha256-c592ce75aab73fcab19c1d7845684c72cf402b78d2e1f2833a58ecf9f3598ed6) |
 | `step` | 必需 | `number` |
 | `turn` | 必需 | `number` |
+
+<a id="persistence-type-sha256-b578eda11b87b6c26f10e582882f6699ebfda4ad426801d688a17d497b26f0e4"></a>
+
+### `{ eventSeqs, toolBodiesOmitted }`
+
+SHA-256: `b578eda11b87b6c26f10e582882f6699ebfda4ad426801d688a17d497b26f0e4`
+
+来源：[`packages/compaction/compaction/src/types.ts:23`](../packages/compaction/compaction/src/types.ts)
+
+| 属性 | 存在性 | 类型 |
+|---|---|---|
+| `eventSeqs` | 必需 | [`number[]`](#persistence-type-sha256-5d03ba38734809bcbd2a55221bd938b3b3fc34b49bb686c6113e9e4931e3aa78) |
+| `toolBodiesOmitted` | 必需 | `boolean` |
+
+<a id="persistence-type-sha256-410fef0c454930d489ed4bf2a760e21c7e1751f2cb81701ea567ea5fe2682949"></a>
+
+### `{ eventSeqs, toolBodiesOmitted }[]`
+
+SHA-256: `410fef0c454930d489ed4bf2a760e21c7e1751f2cb81701ea567ea5fe2682949`
+
+[`{ eventSeqs, toolBodiesOmitted }`](#persistence-type-sha256-b578eda11b87b6c26f10e582882f6699ebfda4ad426801d688a17d497b26f0e4) 的数组。
 
 <a id="persistence-type-sha256-8e31bb958e9b015e6f8407eaade32217068159e816f3cc99c3ad76eb889732e0"></a>
 
@@ -8343,7 +8442,7 @@ SHA-256: `8bb8c3751a6ce64b61aba1ec7ae798c00a5803c4d868a0430873216c6569ed52`
 
 SHA-256: `5dd766ccd1702a1142ad8b4bd44f2242f8e8a6752669ad3de0a5d224329b1438`
 
-来源：[`packages/compaction/compaction/src/types.ts:90`](../packages/compaction/compaction/src/types.ts)
+来源：[`packages/compaction/compaction/src/types.ts:112`](../packages/compaction/compaction/src/types.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -8663,17 +8762,17 @@ SHA-256: `db874d463b0fdec77e9da1c4568f37cb70bd6596781eb93800db44fb8a116965`
 | `time` | 必需 | `number` |
 | `type` | 必需 | `"compaction/start"` |
 
-<a id="persistence-type-sha256-c217c6f6a129040bcb03a388f932d1290611b54b71d40f259b96fd5d671eb80f"></a>
+<a id="persistence-type-sha256-06fa604dd079f2c6d5d00b078c22748029abdbb2849daa56e1c18e89e66a8dbf"></a>
 
 <a id="persistence-type-eventcompactionsummary"></a>
 
 ### `{ type: "compaction/summary" }`
 
-SHA-256: `c217c6f6a129040bcb03a388f932d1290611b54b71d40f259b96fd5d671eb80f`
+SHA-256: `06fa604dd079f2c6d5d00b078c22748029abdbb2849daa56e1c18e89e66a8dbf`
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
-| `data` | 必需 | [`union (2 variants)`](#persistence-type-sha256-138c02a26d5429a6dc645575f058b158392f80ef1192d0f4e76384eedfbee2a4) |
+| `data` | 必需 | [`union (3 variants)`](#persistence-type-sha256-39170b4f5483f63e57797303f6fa26532a5bf4d2e230d62f354cc7240945d209) |
 | `ignorable` | 可选 | `true` |
 | `seq` | 必需 | `number` |
 | `time` | 必需 | `number` |

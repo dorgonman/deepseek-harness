@@ -7,7 +7,7 @@
  * @module @deepseek-ai/dsh-compaction/types
  */
 
-import type { ContentBlock, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ReasoningEffortId, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type { CompactionId } from './brand.ts'
@@ -16,6 +16,20 @@ export type { CompactionId }
 
 /** The selected input representation of one auxiliary summarization call. */
 export type SummaryRequestProjection = 'conversation-prefix-v1' | 'text-transcript-v1'
+
+/** Replay facts for one successful Hybrid summarizer call. */
+interface CompactionChunkCall {
+  /** Original event groups in request order, with any tool-body substitution. */
+  groups: { eventSeqs: SessionSeq[]; toolBodiesOmitted: boolean }[]
+  /** Selected summarizer window and measured projected request size. */
+  contextWindow: number
+  estimatedInputTokens: number
+  /** Adapter-resolved reasoning control, when applied. */
+  reasoningEffort?: ReasoningEffortId
+  /** Complete output before checkpoint projection and ordered merge. */
+  rawOutput: Extract<ContentBlock, { type: 'text' | 'reasoning' }>[]
+  usage?: TokenUsage
+}
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
@@ -65,11 +79,19 @@ declare module '@deepseek-ai/dsh-session/types' {
         rawOutput: ContentBlock[]
         /** Identifies exactly one call through this context's `ctx.llm.stream()`. */
         llmStreamCall: true
+        chunkCalls?: never
       }
       | {
         /** Optional complete output from an unmarked template, remote, or other summarizer. */
         rawOutput?: ContentBlock[]
         /** An unmarked summary does not identify a call through this context's LLM seam. */
+        llmStreamCall?: never
+        chunkCalls?: never
+      }
+      | {
+        /** Successful Hybrid requests in dispatch order. */
+        chunkCalls: CompactionChunkCall[]
+        rawOutput?: never
         llmStreamCall?: never
       }
     )

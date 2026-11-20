@@ -27,6 +27,17 @@ This package keeps long agent conversations working near the model's context lim
 
 Mount this package to get automatic conversation condensation in a composition that already provides an LLM, session storage, and token measurement. The shipped `dsh` base enables it by default; mount it explicitly to control when condensation starts.
 
+<a id="opt-in-hybrid-provider"></a>
+### Opt-in Hybrid provider
+
+Select `@deepseek-ai/dsh-compaction-basic/hybrid` in place of the Basic provider in a composition that also mounts Session Query. It uses the same compaction settings and entry points. Configure a text summarizer with a known context window and give the destination route a known completion cap.
+
+Hybrid traces the selected Surface span back to original Session events. Previous checkpoint text stays out of summarizer requests. It quotes each history group as data and sends balanced groups in bounded chunks. When a tool result prevents its group from fitting, the request cites its original event so Session Query can recover the exact result. Each request reserves the configured output tokens and prices the actual formatted input with the existing token estimator.
+
+Hybrid combines chunk results in source order. During a model switch it prices the checkpoint with the pending prompt, accepted input, runtime context, and tools under the resolved destination envelope. If that request exceeds the budget, the switch fails before the checkpoint commits. Hybrid uses the existing transaction and flush paths. An interrupted physical write can leave a partial durable log. If Hybrid cannot confirm the write, it stops the pressure step or refuses the overflow retry.
+
+Cold Session replay restores the committed checkpoint and original history. Hybrid records each successful chunk in the summary record so adapter replay can reproduce its output in call order. The source test suite uses synthetic Sessions and fake adapters.
+
 ### What you get
 
 With the default settings you get four behaviors: automatic condensation as the conversation grows toward the model's context limit; recovery after a confirmed context-overflow error, where the conversation condenses and the request retries; on-demand condensation through the `/compact` command; and — when the pruner is mounted — trimming of oversized tool outputs before condensation.

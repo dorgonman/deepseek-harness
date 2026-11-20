@@ -1,0 +1,28 @@
+# Bilingual-pair consistency record for 2026-11-20-hybrid-compaction-replay.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/persistence-changes/2026-11-20-hybrid-compaction-replay.md
+/:
+  en: 3d5a424ae7d7e46b
+  zh: c22a8e4a62d8cc1a
+/2026-11-20-hybrid-compaction-replay:
+  en: b18fcef4b62ca0fe
+  zh: 72e6bbb966c0ede2
+/2026-11-20-hybrid-compaction-replay/summary:
+  en: 6cb70267843f2efa
+  zh: 9df10996942945ca
+/2026-11-20-hybrid-compaction-replay/table-of-contents:
+  en: 6cf314a069ceb451
+  zh: 9adff678e9ecab3b
+/2026-11-20-hybrid-compaction-replay/declaration:
+  en: 6907136f28e48c90
+  zh: 02f8298485f3d8e7
+/2026-11-20-hybrid-compaction-replay/compatibility:
+  en: 51ab4533dd17ce54
+  zh: 83a0314db04dd9c6
+/2026-11-20-hybrid-compaction-replay/verification:
+  en: fc24d79999e9085c
+  zh: d521fe7c6cbacc71
+/2026-11-20-hybrid-compaction-replay/dev-note:
+  en: b75c8458928b72b9
+  zh: 003ba4e17b4b5269

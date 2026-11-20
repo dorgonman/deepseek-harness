@@ -5109,6 +5109,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'payload', description: '.modelSelection - captured step selection, retained across retries; omitted effort uses adapter defaults. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
   },
   {
+    name: 'agent/request-admission',
+    mode: 'serial',
+    signature: '\'agent/request-admission\'(this: Scoped<Agent>, payload: { agent: Agent request: PendingAgentRequest signal: AbortSignal }): Promise<void> | void',
+    summary: 'Price the pending host request after the destination adapter resolves and before the loop admits the prompt, input, and route.',
+    description: 'Price the pending host request after the destination adapter resolves and before the loop admits the prompt, input, and route. A rejected listener aborts admission.',
+    parameters: [{ name: 'payload', description: '.signal - the current turn\'s cancellation signal.' }],
+  },
+  {
     name: 'agent/request-error',
     mode: 'waterfall',
     signature: '\'agent/request-error\'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; provider: string; failure: LlmFailure; retryPolicy: ResolvedRetryPolicy | undefined; signal: AbortSignal }, next: () => Promise<RequestErrorAction>): Promise<RequestErrorAction>',
@@ -8061,12 +8069,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface PeerScope {\n    readonly id: PeerId;\n    readonly ctx: Context;\n    readonly principal: Principal;\n    readonly signal: AbortSignal;\n    readonly interactions: \'answer\' | \'none\';\n    dispose(): Promise<void>;\n}',
   },
   {
+    name: 'PendingAgentRequest',
+    declaration: 'export interface PendingAgentRequest {\n    readonly header: EpochHeader;\n    readonly contextWindow?: number;\n    preview(events: readonly SessionEvent[], replacement?: PendingRequestReplacement): Session;\n}',
+  },
+  {
     name: 'PendingModule',
     declaration: 'export interface PendingModule {\n    url: string;\n    reason: \'host-module\' | \'unmanaged-plugin\' | \'module-comparison\';\n}',
   },
   {
     name: 'PendingRemoteEventInfo',
     declaration: 'export interface PendingRemoteEventInfo {\n    readonly event: string;\n    readonly agentId: RemoteEventAgentId;\n}',
+  },
+  {
+    name: 'PendingRequestReplacement',
+    declaration: 'export interface PendingRequestReplacement {\n    start: SessionSeq;\n    end: SessionSeq;\n    shadowedSeqs: readonly SessionSeq[];\n    replacementSeq: SessionSeq;\n    message: UserMessage;\n}',
   },
   {
     name: 'PermissionCatalog',

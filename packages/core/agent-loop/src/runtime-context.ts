@@ -159,13 +159,15 @@ export class RuntimeContextProjection {
    * The first snapshot omits supersession; later snapshots also override facts
    * retained in compaction summaries. Proposals do not advance committed state.
    * @param sections - named contributions that formed the current snapshot.
+   * @param shadowed - optional Surface nodes removed by a hypothetical replacement.
    * @returns a candidate user message, or `undefined` when no update is needed.
    */
-  project(sections: readonly ContextSnapshotSection[]): UserMessage | undefined {
-    const previous = this.retained?.sections
-    if (this.retained === undefined && sections.length === 0) return
+  project(sections: readonly ContextSnapshotSection[], shadowed?: readonly SessionSeq[]): UserMessage | undefined {
+    const retained = this.retained && shadowed?.includes(this.retained.seq) ? null : this.retained
+    const previous = retained?.sections
+    if (retained === undefined && sections.length === 0) return
     if (previous !== undefined && deepEqualJson(previous, sections)) return
-    const intro = this.retained === undefined
+    const intro = retained === undefined
       ? 'The following information describes your current session:'
       : 'The following information describes your current session. It replaces earlier versions of this context, including any retained in conversation summaries.'
     const body = sections.map(section => section.text).join('\n\n')

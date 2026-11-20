@@ -12,7 +12,7 @@ import type { EpochHeader, Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
-import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import type { Agent, PendingAgentRequest, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 // Type-only: makes the optional sibling service available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
@@ -28,6 +28,7 @@ import {
   compactSurfaceRegion,
   selectCompactableRange,
 } from './region.ts'
+import type { RegionSummary, SurfaceSelection } from './region.ts'
 import { summarizeWithLlm } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 import type {
@@ -124,9 +125,7 @@ const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
  * Dependency-light compaction backend using `ctx.tokenMeter` for pressure,
  * retention, cited source events, and summary-convergence pricing.
  *
- * `summarize()` is the sole subclass customization hook; the replay and durable
- * mutation strategy stays fixed so every pricing decision uses the singleton
- * token meter.
+ * The region transaction owns replay, admission, and durable mutation.
  */
 export class BasicCompactionEngine extends CompactionEngine {
   static inject = ['llm', 'tokenMeter', 'sessions']
@@ -183,6 +182,7 @@ export class BasicCompactionEngine extends CompactionEngine {
           const result = await this.compactIfNeeded(agent, 'pressure', signal)
           if (result !== null) logResult(result, 'step pressure')
         } catch (error: unknown) {
+          if (this.stopAfterWriteFailure(error)) throw error
           if (error instanceof TargetPressureConfigError) {
             if (this.warnedPressureConfigTargets.has(error.targetKey)) return next()
             this.warnedPressureConfigTargets.add(error.targetKey)
@@ -202,6 +202,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     // committed header still identifies the model that can summarize the history.
     ctx.on('agent/request', async ({ agent, signal }, next) => {
       const config = await next()
+      if (!this.usesLegacySwitchCompaction()) return config
       const previous = agent.session.requestHeader()
       if (signal.aborted || previous === undefined || config.provider === '' || config.model === ''
         || (previous.config.provider === config.provider && previous.config.model === config.model)) return config
@@ -266,6 +267,10 @@ export class BasicCompactionEngine extends CompactionEngine {
         result = await this.compactIfNeeded(agent, 'context-overflow', signal)
       } catch (recoveryError: unknown) {
         const message = recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
+        if (this.stopAfterWriteFailure(recoveryError)) {
+          ctx.logger.warn(`context-overflow compaction write was not confirmed: ${message}; refusing retry`)
+          return undefined
+        }
         // A model-free prune can land before later summary work fails. That
         // durable reduction is sufficient retry proof; do not discard it just
         // because the optional second phase threw. Cancellation still wins.
@@ -322,6 +327,40 @@ export class BasicCompactionEngine extends CompactionEngine {
     const reserve = agent.session.requestHeader()?.config.maxTokens ?? info.defaultMaxTokens ?? 0
     const maxTokens = resolveSummaryMaxTokens(policy, info.context.contextWindow - reserve)
     return summarizeWithLlm(this.ctx, { ...policy, maxTokens }, input, agent, signal)
+  }
+
+  /** Summarize one verified Surface selection using the ordinary Basic backend. */
+  protected summarizeSelection(
+    input: SummarizationInput,
+    agent: Agent,
+    _selection: SurfaceSelection,
+    _destination: EpochHeader | undefined,
+    signal?: AbortSignal,
+    _admission?: PendingAgentRequest,
+  ): Promise<RegionSummary> {
+    return this.summarize(input, agent, signal)
+  }
+
+  /** Dispatch pressure compaction while retaining the proposed request header. */
+  protected compactPressureRegion(
+    start: SessionSeq, end: SessionSeq, agent: Agent, _destination: EpochHeader, signal: AbortSignal,
+  ): Promise<CompactionResult> {
+    return this.compactRegion(start, end, agent, signal)
+  }
+
+  /** Supply a durability checkpoint for automatic and explicit transactions. */
+  protected regionFlush(_agent: Agent): (() => Promise<void>) | undefined {
+    return undefined
+  }
+
+  /** Decide whether a failed compaction write precludes further automatic dispatch. */
+  protected stopAfterWriteFailure(_error: unknown): boolean {
+    return false
+  }
+
+  /** Basic sizes a model switch before adapter and prompt admission. */
+  protected usesLegacySwitchCompaction(): boolean {
+    return true
   }
 
   /**
@@ -413,7 +452,7 @@ export class BasicCompactionEngine extends CompactionEngine {
           + `(${measurement.totalTokens} estimated tokens >= threshold ${spec.thresholdTokens})`,
         )
       }
-      result = await this.compactRegion(range.start, range.end, agent, signal)
+      result = await this.compactPressureRegion(range.start, range.end, agent, header, signal)
       measurement = meter.measure(agent.session, header)
       if (measurement.totalTokens < spec.thresholdTokens) return result
     }
@@ -438,14 +477,17 @@ export class BasicCompactionEngine extends CompactionEngine {
     end: SessionSeq,
     agent: Agent,
     signal?: AbortSignal,
+    destination?: EpochHeader,
+    admission?: PendingAgentRequest,
   ): Promise<CompactionResult> {
+    const flush = this.regionFlush(agent)
     return compactSurfaceRegion(
-      this.regionDependencies(),
+      this.regionDependencies(destination, admission),
       agent.session,
       start,
       end,
       agent,
-      { owner: 'current-turn', stability: 'whole-surface' },
+      { owner: 'current-turn', stability: 'whole-surface', ...flush === undefined ? {} : { flush } },
       signal,
     )
   }
@@ -513,10 +555,14 @@ export class BasicCompactionEngine extends CompactionEngine {
   }
 
   /** Bind the effective token meter and dynamically dispatched summarizer hook. */
-  private regionDependencies(): Parameters<typeof compactSurfaceRegion>[0] {
+  private regionDependencies(
+    destination?: EpochHeader, admission?: PendingAgentRequest,
+  ): Parameters<typeof compactSurfaceRegion>[0] {
     return {
       meter: this.ctx.tokenMeter,
-      summarize: (input, owner, abort) => this.summarize(input, owner, abort),
+      summarize: (input, owner, selection, abort) => this.summarizeSelection(
+        input, owner, selection, destination ?? owner.session.requestHeader(), abort, admission,
+      ),
       recover: (error, agent, sourceEventSeqs, signal) => this.ctx.waterfall('compaction/summary-error', {
         session: agent.session,
         sourceEventSeqs,

@@ -13,7 +13,7 @@
 | 事件 | 载荷 | 作用 |
 |---|---|---|
 | `compaction/start` | `{ turn }` | 获取日志记录的锁；数字标识尚未结束的自动轮次，`null` 标识独立手动尝试 |
-| `compaction/summary` | `{ summary, rawOutput?, llmStreamCall?, requestProjection?, shadowedRange, shadowedSeqs, shadowedTokenCount, provider, model, maxTokens?, usage? }` | 安全摘要投影、可选的完整提供方输出与 usage、生成结果时恰好通过此上下文的 `ctx.llm.stream()` 发起一次调用所带的 `llmStreamCall: true` 标记（此时必须提供完整的 `rawOutput`）、被遮蔽的 surface 边界对（`start`/`end` seq——位置跨度，而非数值区间）、按 surface 顺序排列的被遮蔽 seq、估算 token 数，以及摘要调用的 envelope（`provider`、`model`，若有生成上限则还包括该上限）——写入日志后，该一次性请求可由日志 + 代码重建（见可重建性 Agent Note）；未带标记的 `rawOutput` 并不能判定调用路径 |
+| `compaction/summary` | `{ summary, rawOutput?, llmStreamCall?, chunkCalls?, requestProjection?, shadowedRange, shadowedSeqs, shadowedTokenCount, provider, model, maxTokens?, usage? }` | 安全摘要投影、可选的完整提供方输出与 usage、生成结果时恰好通过此上下文的 `ctx.llm.stream()` 发起一次调用所带的 `llmStreamCall: true` 标记（此时必须提供完整的 `rawOutput`）、被遮蔽的 surface 边界对（`start`/`end` seq——位置跨度，而非数值区间）、按 surface 顺序排列的被遮蔽 seq、估算 token 数，以及摘要调用的 envelope（`provider`、`model`，若有生成上限则还包括该上限）——写入日志后，该一次性请求可由日志 + 代码重建（见可重建性 Agent Note）；未带标记的 `rawOutput` 并不能判定调用路径 |
 | `compaction/end` | `{ turn, error? }` | 使用相同的数字或 `null` 归属值释放锁（`error` 记录失败尝试） |
 
 锁括住**整个**操作：先追加 `compaction/start`，然后执行摘要生成、写入 `compaction/summary` 记录与 `user/message` 替换，最后才追加 `compaction/end`。最后释放锁意味着操作中途崩溃会表现为可检测的遗留锁（有 `compaction/start` 而无匹配的 `compaction/end`），而非一个虚假声称压缩已完成的 `compaction/end`。
@@ -24,6 +24,8 @@
 
 <a id="summary-request-projection"></a>
 ### 摘要请求投影
+
+Hybrid 在成功的 `compaction/summary` 上按顺序记录 `chunkCalls`。每条记录包含相应的原始追加事件组、由源引用替代的工具正文、上下文窗口、估算的输入 token，以及提供方的文本或推理输出与可选用量。重放为每条记录还原一次成功的辅助流调用。Session 格式仍接受旧的单调用摘要和未标记摘要。
 
 `requestProjection` 记录辅助请求如何表示其所选历史。默认的 `compaction-basic` LLM 摘要器为每条新摘要记录一个明确标签。
 

@@ -237,11 +237,73 @@ class Relationships {
     if (current.turn !== this.turn) throw new SessionFormatError(`${event.type} does not match the open turn`)
     if (event.type === 'compaction/summary') {
       if (current.summarized) throw new SessionFormatError('compaction/summary repeats')
+      this.chunkReceipts(event, data)
       current.summarized = true
     } else {
       if (data['turn'] !== current.turn) throw new SessionFormatError('compaction/end changes its owner turn')
       if (data['error'] === undefined && !current.summarized) throw new SessionFormatError('successful compaction/end requires one summary')
       this.compaction = undefined
+    }
+  }
+
+  chunkReceipts(event: SessionFormatEvent, data: SessionFormatJsonObject): void {
+    if (data['chunkCalls'] === undefined) return
+    if (data['llmStreamCall'] !== undefined || data['rawOutput'] !== undefined || data['requestProjection'] !== undefined) {
+      throw new SessionFormatError('compaction chunk receipts conflict with a single-call record')
+    }
+    const maxTokens = sessionFormatCount(data['maxTokens'], 'compaction chunk output cap')
+    const calls = array(data['chunkCalls'], 'compaction chunk calls')
+    if (calls.length === 0 || maxTokens === 0) throw new SessionFormatError('compaction chunk calls and output cap must be nonempty')
+    let previousSeq = -1
+    for (const item of calls) {
+      const call = record(item, 'compaction chunk call')
+      const window = sessionFormatCount(call['contextWindow'], 'compaction chunk context')
+      const input = sessionFormatCount(call['estimatedInputTokens'], 'compaction chunk input')
+      if (input === 0 || input + maxTokens > window) throw new SessionFormatError('compaction chunk exceeds its context budget')
+      if (call['reasoningEffort'] !== undefined) text(call['reasoningEffort'], 'compaction chunk reasoning effort')
+      if (call['usage'] !== undefined) {
+        const usage = record(call['usage'], 'compaction chunk usage')
+        sessionFormatCount(usage['inputTokens'], 'compaction chunk usage input')
+        const output = sessionFormatCount(usage['outputTokens'], 'compaction chunk usage output')
+        if (output > maxTokens) throw new SessionFormatError('compaction chunk output exceeds its cap')
+      }
+      const rawOutput = array(call['rawOutput'], 'compaction chunk output')
+      let hasText = false
+      for (const value of rawOutput) {
+        const block = record(value, 'compaction chunk output block')
+        if ((block['type'] !== 'text' && block['type'] !== 'reasoning') || typeof block['text'] !== 'string') {
+          throw new SessionFormatError('compaction chunk output must contain only text or reasoning blocks')
+        }
+        if (block['type'] === 'text' && block['text'].trim().length > 0) hasText = true
+      }
+      if (!hasText) throw new SessionFormatError('compaction chunk output requires nonempty text')
+      const groups = array(call['groups'], 'compaction chunk groups')
+      if (groups.length === 0) throw new SessionFormatError('compaction chunk groups must be nonempty')
+      for (const value of groups) {
+        const group = record(value, 'compaction chunk group')
+        const seqs = array(group['eventSeqs'], 'compaction chunk sources')
+        if (typeof group['toolBodiesOmitted'] !== 'boolean' || seqs.length === 0) {
+          throw new SessionFormatError('compaction chunk group requires sources and a tool-body policy')
+        }
+        let hasToolResult = false
+        for (const coord of seqs) {
+          const seq = earlier(coord, event.seq, 'compaction chunk source')
+          const original = this.artifact.events[seq]
+          if (seq <= previousSeq || original?.['surfaceOp'] !== 'append' || !SURFACE_TYPES.has(original.type)) {
+            throw new SessionFormatError('compaction chunk sources must be ordered original Surface events')
+          }
+          previousSeq = seq
+          if (original.type === 'tool/result') hasToolResult = true
+          if (original.type === 'user/message') {
+            const payload = record(original.data, 'compaction chunk user input')
+            const source = record(payload['source'], 'compaction chunk user source')
+            if (source['kind'] === 'compact-checkpoint') throw new SessionFormatError('compaction chunk source is a prior checkpoint')
+          }
+        }
+        if (group['toolBodiesOmitted'] && !hasToolResult) {
+          throw new SessionFormatError('compaction chunk omits tool bodies without a tool result')
+        }
+      }
     }
   }
 

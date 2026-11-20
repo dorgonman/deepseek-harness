@@ -461,7 +461,8 @@ export function parseSessionHeader(text: string): {
  *
  * Reads one embedded stream from each Assistant settlement. A `compaction/summary` explicitly marked
  * as one local LLM-stream call becomes a canonical successful stream from its
- * complete `rawOutput` at the summary's log position. A
+ * complete `rawOutput` at the summary's log position. Hybrid receipts contribute
+ * one stream per chunk in dispatch order. A
  * missing assistant terminator means the live stream threw, so derivation
  * rejects and the scenario must provide an explicit override. Multiple calls
  * may share one turn and step when the loop retries.
@@ -480,6 +481,16 @@ export function deriveReplayScript(events: SessionEvent[]): ReplayEntry[] {
     }
     script.push({ kind: 'chunks', chunks })
   }
+  const summaryCall = (rawOutput: readonly ContentBlock[], usage: TokenUsage | undefined): void => {
+    const chunks: StreamChunk[] = []
+    for (const [index, block] of rawOutput.entries()) {
+      chunks.push({ type: 'block-start', index, blockType: block.type })
+      chunks.push({ type: 'block-end', index, block })
+    }
+    if (usage !== undefined) chunks.push({ type: 'usage', usage })
+    chunks.push({ type: 'finish', reason: { kind: 'stop' } })
+    script.push({ kind: 'chunks', chunks })
+  }
   for (const event of events) {
     if (event.type === 'compaction/summary') {
       // JSONL decoding crosses an untyped durable boundary, so retain its wider
@@ -488,19 +499,24 @@ export function deriveReplayScript(events: SessionEvent[]): ReplayEntry[] {
         readonly llmStreamCall?: true
         readonly rawOutput?: ContentBlock[]
         readonly usage?: TokenUsage
+        readonly chunkCalls?: readonly { rawOutput: ContentBlock[]; usage?: TokenUsage }[]
       } = event.data
-      if (persisted.llmStreamCall === true) {
+      if (persisted.chunkCalls !== undefined) {
+        if (persisted.llmStreamCall !== undefined || persisted.rawOutput !== undefined
+          || !Array.isArray(persisted.chunkCalls) || persisted.chunkCalls.length === 0) {
+          throw new Error('llm-replay: invalid or conflicting compaction chunk calls')
+        }
+        for (const call of persisted.chunkCalls) {
+          if (!Array.isArray(call?.rawOutput) || call.rawOutput.length === 0) {
+            throw new Error('llm-replay: compaction chunk call lacks rawOutput')
+          }
+          summaryCall(call.rawOutput, call.usage)
+        }
+      } else if (persisted.llmStreamCall === true) {
         if (persisted.rawOutput === undefined) {
           throw new Error('llm-replay: compaction/summary marks an LLM stream call without rawOutput')
         }
-        const chunks: StreamChunk[] = []
-        for (const [index, block] of persisted.rawOutput.entries()) {
-          chunks.push({ type: 'block-start', index, blockType: block.type })
-          chunks.push({ type: 'block-end', index, block })
-        }
-        if (persisted.usage !== undefined) chunks.push({ type: 'usage', usage: persisted.usage })
-        chunks.push({ type: 'finish', reason: { kind: 'stop' } })
-        script.push({ kind: 'chunks', chunks })
+        summaryCall(persisted.rawOutput, persisted.usage)
       }
       continue
     }

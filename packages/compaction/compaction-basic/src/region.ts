@@ -25,17 +25,25 @@ import { frameSummary } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 interface RegionDependencies {
   readonly meter: TokenMeter
-  summarize(input: SummarizationInput, agent: Agent, signal?: AbortSignal): Promise<SummaryResult>
+  summarize(input: SummarizationInput, agent: Agent, selection: SurfaceSelection, signal?: AbortSignal): Promise<RegionSummary>
   recover(error: unknown, agent: Agent, sourceEventSeqs: readonly SessionSeq[], signal?: AbortSignal): boolean
 }
 
 /** One validated inclusive span of current surface positions. */
-interface SurfaceSelection {
+export interface SurfaceSelection {
   readonly start: SessionSeq
   readonly end: SessionSeq
   readonly startIdx: number
   readonly endIdx: number
   readonly shadowedSeqs: readonly SessionSeq[]
+}
+
+export type CompactionChunkCall = NonNullable<SessionEvent<'compaction/summary'>['data']['chunkCalls']>[number]
+
+export type RegionSummary = SummaryResult & {
+  chunkCalls?: CompactionChunkCall[]
+  /** Optional provider-owned guard evaluated synchronously before replacement. */
+  validateCommit?: (checkpoint: UserMessage) => void
 }
 
 /** A selection with its priced snapshot and the replay input built from it. */
@@ -48,7 +56,7 @@ interface PreparedCompaction extends SurfaceSelection {
   readonly input: SummarizationInput
 }
 
-type SummarizedCompaction = PreparedCompaction & SummaryResult & {
+type SummarizedCompaction = PreparedCompaction & RegionSummary & {
   readonly checkpointMessage: UserMessage
 }
 
@@ -212,7 +220,7 @@ export async function compactSurfaceRegion(
     ? assertWholeSurfaceUnchanged
     : assertSelectedSpanStable
   let failure: TransactionFailure | undefined
-  let flushFailure: unknown
+  let flushFailure: { error: unknown } | undefined
   let result: CompactionResult | undefined
   let closed = false
   let closing = false
@@ -231,6 +239,7 @@ export async function compactSurfaceRegion(
     )
     if (options.owner === null) signal?.throwIfAborted()
     assertStable(dependencies, session, summarized)
+    summarized.validateCommit?.(summarized.checkpointMessage)
     stage = 'commit'
     const pending = commitCompactionBody(session, startEvent, summarized)
     closing = true
@@ -254,20 +263,23 @@ export async function compactSurfaceRegion(
     try {
       await options.flush()
     } catch (error: unknown) {
-      flushFailure = error
+      flushFailure = { error }
     }
   }
 
   if (options.owner === null) signal?.throwIfAborted()
   if (failure !== undefined) {
     if (options.owner === null) throwManualFailure(failure)
-    throw failure.error
+    if (options.flush !== undefined && failure.stage === 'commit') {
+      throw new ManualCompactionError('commit', 'compaction did not commit cleanly', { cause: failure.error })
+    }
+    if (flushFailure === undefined) throw failure.error
   }
   if (flushFailure !== undefined) {
     throw new ManualCompactionError(
       'persistence',
-      'manual compaction durability checkpoint failed',
-      { cause: flushFailure },
+      options.owner === null ? 'manual compaction durability checkpoint failed' : 'compaction durability checkpoint failed',
+      { cause: flushFailure.error },
     )
   }
   /* v8 ignore next -- every path without a result records and throws a failure above. */
@@ -393,11 +405,11 @@ async function summarizeCompaction(
   assertStable: StabilityCheck,
   signal?: AbortSignal,
 ): Promise<SummarizedCompaction> {
-  let summaryResult: SummaryResult
+  let summaryResult: RegionSummary
   for (;;) {
     signal?.throwIfAborted()
     try {
-      summaryResult = await dependencies.summarize(prepared.input, agent, signal)
+      summaryResult = await dependencies.summarize(prepared.input, agent, prepared, signal)
       break
     } catch (error: unknown) {
       if (signal?.aborted === true) throw error
@@ -485,9 +497,11 @@ function commitCompactionBody(
     usage,
     checkpointMessage,
   } = summarized
-  const callRecord = summarized.llmStreamCall === true
-    ? { rawOutput: summarized.rawOutput, llmStreamCall: true as const }
-    : summarized.rawOutput === undefined ? {} : { rawOutput: summarized.rawOutput }
+  const callRecord = summarized.chunkCalls !== undefined
+    ? { chunkCalls: summarized.chunkCalls }
+    : summarized.llmStreamCall === true
+      ? { rawOutput: summarized.rawOutput, llmStreamCall: true as const }
+      : summarized.rawOutput === undefined ? {} : { rawOutput: summarized.rawOutput }
   const summaryEvent = session.append('compaction/summary', {
     compactionId: startEvent.data.compactionId,
     ...startEvent.data.sourceCommandId === undefined

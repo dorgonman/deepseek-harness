@@ -10,7 +10,7 @@ import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type {
   LlmAttemptId, LlmCallConfig, LlmFailure, MessageId, ReasoningEffortId, ResolvedRetryPolicy, StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type { AgentCancelCause, Session, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
+import type { AgentCancelCause, EpochHeader, Session, SessionEvent, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
 import type { Agent, InboxTarget, ModelSelection } from './types.ts'
 export type { Agent } from './types.ts'
@@ -147,6 +147,29 @@ export type PreStepDecision =
 
 /** Action returned by a listener that owns model-request recovery. */
 export type RequestErrorAction = { kind: 'retry' } | undefined
+
+/** A hypothetical replacement at the impending request's admission boundary. */
+export interface PendingRequestReplacement {
+  start: SessionSeq
+  end: SessionSeq
+  shadowedSeqs: readonly SessionSeq[]
+  replacementSeq: SessionSeq
+  message: UserMessage
+}
+
+/** A resolved host request and its uncommitted, loop-owned admission plan. */
+export interface PendingAgentRequest {
+  readonly header: EpochHeader
+  readonly contextWindow?: number
+  /**
+   * Project the pending request using an exact Session observation and optional
+   * replacement. The loop retains this admission plan for the live request.
+   * @param events - exact observed log at the current Session cursor.
+   * @param replacement - candidate replacement to price before publication.
+   * @returns a detached Session that includes the projected host request.
+   */
+  preview(events: readonly SessionEvent[], replacement?: PendingRequestReplacement): Session
+}
 
 /** Why a session lifecycle began; seeded creates are `startup`, while persisted loads are `resume`. */
 export type SessionStartSource = 'startup' | 'resume' | 'clear' | 'compact'
@@ -372,6 +395,20 @@ declare module '@deepseek-ai/cordis' {
      * @mode waterfall
     */
     'agent/request'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; signal: AbortSignal }, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig>
+    /**
+     * Price the pending host request after the destination adapter resolves
+     * and before the loop admits the prompt, input, and route. A rejected
+     * listener aborts admission.
+     * @param payload.agent - the agent whose route will change.
+     * @param payload.request - resolved destination and detached preview of pending input.
+     * @param payload.signal - the current turn's cancellation signal.
+     * @mode serial
+     */
+    'agent/request-admission'(this: Scoped<Agent>, payload: {
+      agent: Agent
+      request: PendingAgentRequest
+      signal: AbortSignal
+    }): Promise<void> | void
     /**
      * Handle one failed model-request attempt before the loop retries or closes
      * its step. A listener returns `{ kind: 'retry' }` without calling `next()`

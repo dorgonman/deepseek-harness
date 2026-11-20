@@ -514,6 +514,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   PreStepDecision: 'core.md',
   PreStepContext: 'core.md',
   RequestErrorAction: 'core.md',
+  PendingAgentRequest: 'core.md',
   RequestFailureContext: 'core.md',
   PreparedReferencedMessage: 'session-reference.md',
   FileReferenceCandidate: 'session-reference.md',

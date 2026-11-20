@@ -13,7 +13,7 @@ Compaction extends [`SessionEventMap`](session.md) with three event types via de
 | Event | Payload | Role |
 |---|---|---|
 | `compaction/start` | `{ turn }` | acquires the log-recorded lock; a number identifies the open automatic turn, while `null` identifies a standalone manual attempt |
-| `compaction/summary` | `{ summary, rawOutput?, llmStreamCall?, requestProjection?, shadowedRange, shadowedSeqs, shadowedTokenCount, provider, model, maxTokens?, usage? }` | the safe summary projection, optional complete provider output and usage, an `llmStreamCall: true` marker when producing the result consumed exactly one call through this context's `ctx.llm.stream()` (which requires complete `rawOutput`), the shadowed surface-boundary pair (`start`/`end` seqs — a position span, not a numeric interval), the shadowed seqs in surface order, the estimated token count, and the summarize call's envelope (`provider`, `model`, plus its generation cap when one applied) — logged so the one-shot request is reconstructable from log + code (the reconstructability Agent Note); unmarked `rawOutput` does not identify the call path |
+| `compaction/summary` | `{ summary, rawOutput?, llmStreamCall?, chunkCalls?, requestProjection?, shadowedRange, shadowedSeqs, shadowedTokenCount, provider, model, maxTokens?, usage? }` | the safe summary projection, optional complete provider output and usage, an `llmStreamCall: true` marker when producing the result consumed exactly one call through this context's `ctx.llm.stream()` (which requires complete `rawOutput`), the shadowed surface-boundary pair (`start`/`end` seqs — a position span, not a numeric interval), the shadowed seqs in surface order, the estimated token count, and the summarize call's envelope (`provider`, `model`, plus its generation cap when one applied) — logged so the one-shot request is reconstructable from log + code (the reconstructability Agent Note); unmarked `rawOutput` does not identify the call path |
 | `compaction/end` | `{ turn, error? }` | releases the lock with the same numeric-or-null owner (`error` records an unsuccessful attempt) |
 
 The lock brackets the **whole** operation: `compaction/start` is appended first, then summarization, the `compaction/summary` record, and the `user/message` replacement all land, and only then `compaction/end`. Releasing the lock last turns a crash mid-operation into a detectable orphaned lock (a `compaction/start` with no matching `compaction/end`) rather than a `compaction/end` that falsely claims compaction finished.
@@ -24,6 +24,8 @@ These variants are merged inside a `declare module '@deepseek-ai/dsh-session/typ
 
 <a id="summary-request-projection"></a>
 ### Summary request projection
+
+Hybrid records ordered `chunkCalls` on a successful `compaction/summary`. Each entry names its original append-origin event groups, any tool body replaced by a source reference, the context window and estimated input tokens, and the provider's text or reasoning output and optional usage. Replay restores one successful auxiliary stream per entry. The Session format continues to accept the older one-call and unmarked summary shapes.
 
 `requestProjection` records how the auxiliary request represented its selected history. The default `compaction-basic` LLM summarizer records one concrete tag on every new summary.
 

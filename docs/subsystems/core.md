@@ -396,6 +396,8 @@ type PreStepDecision =
   }
 ```
 
+`agent/request-admission` runs after the adapter resolves on a model switch and before the loop commits the new prompt, accepted input, or request header. `PendingAgentRequest.preview()` builds a detached Session with those messages, runtime context, tool declarations, and their delta. The loop reuses the checked prompt and messages when the expected Surface materializes. A listener can reject admission by throwing.
+
 `agent/request-error` runs after a failed model step closes and before its turn closes. Listeners can repair durable state or await policy work while the failed turn's signal is still live. A handling listener returns `{ kind: 'retry' }` without calling `next()`; the default `undefined` leaves the failure terminal.
 
 ```ts type-equiv
@@ -1032,6 +1034,29 @@ Reject a proposed step or replace the messages that enter it. Calling `next()` p
 ```
 
 Types: [Scoped](scope.md) · [UserMessage](session.md)
+
+Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
+
+<a id="agentrequest-admission--serial"></a>
+
+#### `agent/request-admission` — serial
+
+Price the pending host request after the destination adapter resolves and before the loop admits the prompt, input, and route. A rejected listener aborts admission.
+
+```ts cordis-catalog
+/**
+ * Price the pending host request after the destination adapter resolves
+ * and before the loop admits the prompt, input, and route. A rejected
+ * listener aborts admission.
+ * @param payload.agent - the agent whose route will change.
+ * @param payload.request - resolved destination and detached preview of pending input.
+ * @param payload.signal - the current turn's cancellation signal.
+ * @mode serial
+ */
+'agent/request-admission'(this: Scoped<Agent>, payload: { agent: Agent request: PendingAgentRequest signal: AbortSignal }): Promise<void> | void
+```
+
+Types: [Scoped](scope.md)
 
 Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
 

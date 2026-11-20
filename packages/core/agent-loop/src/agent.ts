@@ -15,6 +15,7 @@ import type {
   ModelSelectionProjectionState,
   InboxTarget,
   InboxState,
+  PendingAgentRequest,
   PreStepDecision,
   RequestErrorAction,
 } from '@deepseek-ai/dsh-agent'
@@ -30,8 +31,8 @@ import {
 import { assertNever, deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { EpochHeader, RequestContext, Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
-import { canonicalHeader, headerEquals, ToolCallRecovery } from '@deepseek-ai/dsh-session'
+import type { EpochHeader, RequestContext, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import { canonicalHeader, headerEquals, Session, ToolCallRecovery } from '@deepseek-ai/dsh-session'
 import { renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import { ToolActivationError, ToolBatchExecutionError } from '@deepseek-ai/dsh-tools'
@@ -42,6 +43,7 @@ import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { REPEATED_MODEL_OUTPUT, StreamRepetition } from './stream-repetition.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
+import type { SystemPromptCommit } from './runtime-context.ts'
 
 /** Projected facts consumed by this driver; registration stays with the factory. */
 interface LoopProjections {
@@ -74,6 +76,14 @@ type PreparedStep =
     /** Admission shared by the step's declarations and dispatch; the turn disposes it after the step. */
     toolSet: ResolvedToolSet
   }
+
+type EnteredStep = Extract<PreparedStep, { kind: 'enter' }>
+type StepPosition = { turn: number; step: number }
+
+interface StepAdmission {
+  system: SystemPromptCommit[]
+  users: UserMessage[]
+}
 
 /** Remove adapter-derived values before plugins propose the next request config. */
 function requestProposal(header: EpochHeader): LlmCallConfig {
@@ -439,7 +449,7 @@ export class ReactLoopAgent implements Agent {
     return true
   }
 
-  private async step(decision: Extract<PreparedStep, { kind: 'enter' }>): Promise<StepEndReason | null> {
+  private async step(decision: EnteredStep): Promise<StepEndReason | null> {
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)
     const { turn, step, abort: { signal } } = this.phase
@@ -450,40 +460,25 @@ export class ReactLoopAgent implements Agent {
     let firstAttempt = true
     while (true) {
       const { config, preparedCall } = await this.prepareRequest(turn, step, decision.selection, signal)
-      const currentContext = this.loopCtx.systemPrompt.refreshContext(assembly, {
-        ...assembleContextFor(this, signal), modelSelection: decision.selection,
-      })
-      const sections = renderContextSections(currentContext)
-      const context = this.runtimeContext.project(sections)
-      signal.throwIfAborted()
       const startsRequestSeries = firstAttempt && decision.startsRequestSeries === true
-      const commits = this.systemPrompt.project(renderedPrompt, {
-        inHistory: preparedCall?.systemPromptUpdate === 'in-history',
-        startsSeries: startsRequestSeries
-          || this.requestSurfaceGeneration !== this.session.surface.contentGeneration
-          || (preparedCall?.toolUpdate === undefined && this.toolsChanged(assembly.tools)),
+      const header = canonicalHeader({
+        config,
+        ...preparedCall === undefined ? {} : { adapterDefaults: preparedCall.adapterDefaults },
+        ...assembly.tools.length > 0 ? { tools: assembly.tools } : {},
       })
-      for (const { message, intent } of commits) {
-        this.session.append('system/message', { turn, step, message }, intent)
-      }
-      let contextAdmitted = false
-      if (firstAttempt) {
-        for (const message of decision.messages) {
-          if (message.source.kind === 'runtime-context') {
-            if (context !== undefined && !contextAdmitted) {
-              this.session.append('user/message', context, { surfaceOp: 'append' })
-              contextAdmitted = true
-            }
-          } else {
-            this.session.append('user/message', message, { surfaceOp: 'append' })
-          }
-        }
-      }
-      if (context !== undefined && !contextAdmitted) {
-        this.session.append('user/message', context, { surfaceOp: 'append' })
-      }
+      const position = { turn, step }
+      const plan = (view: Session, shadowed?: readonly SessionSeq[]) => this.planStepAdmission(
+        view, decision, renderedPrompt, preparedCall, firstAttempt, startsRequestSeries, signal, shadowed,
+      )
+      const baseline = this.session.requestHeader()
+      const admission = baseline !== undefined
+        && (baseline.config.provider !== config.provider || baseline.config.model !== config.model)
+        ? await this.admitSwitch(baseline, header, preparedCall, plan, position, signal)
+        : undefined
+      signal.throwIfAborted()
+      this.appendStepAdmission(this.session, admission ?? plan(this.session), position)
       firstAttempt = false
-      const request = this.buildRequest(config, preparedCall, assembly.tools, { turn, step }, startsRequestSeries, signal)
+      const request = this.buildRequest(header, preparedCall, position, startsRequestSeries, signal)
       const live = new AssistantStreamAttempt(
         this.session.id,
         ++this.assistantAttemptCounter,
@@ -626,6 +621,106 @@ export class ReactLoopAgent implements Agent {
     }
   }
 
+  private planStepAdmission(
+    view: Session,
+    decision: EnteredStep,
+    renderedPrompt: string,
+    preparedCall: PreparedLlmCall | undefined,
+    firstAttempt: boolean,
+    startsRequestSeries: boolean,
+    signal: AbortSignal,
+    shadowed?: readonly SessionSeq[],
+  ): StepAdmission {
+    const { assembly } = decision
+    const currentContext = this.loopCtx.systemPrompt.refreshContext(assembly, {
+      ...assembleContextFor(this, signal), modelSelection: decision.selection,
+    })
+    const context = this.runtimeContext.project(renderContextSections(currentContext), shadowed)
+    signal.throwIfAborted()
+    const projection = view === this.session ? this.systemPrompt : new SystemPromptProjection(view)
+    const system = projection.project(renderedPrompt, {
+      inHistory: preparedCall?.systemPromptUpdate === 'in-history',
+      startsSeries: startsRequestSeries
+        || this.requestSurfaceGeneration !== view.surface.contentGeneration
+        || (preparedCall?.toolUpdate === undefined && this.toolsChanged(assembly.tools)),
+    })
+    const users: UserMessage[] = []
+    let contextAdmitted = false
+    for (const message of firstAttempt ? decision.messages : []) {
+      if (message.source.kind !== 'runtime-context') users.push(message)
+      else if (context !== undefined && !contextAdmitted) {
+        users.push(context)
+        contextAdmitted = true
+      }
+    }
+    if (context !== undefined && !contextAdmitted) users.push(context)
+    return { system, users }
+  }
+
+  private appendStepAdmission(view: Session, admission: StepAdmission, position: StepPosition): void {
+    for (const { message, intent } of admission.system) {
+      view.append('system/message', { ...position, message }, intent)
+    }
+    for (const message of admission.users) view.append('user/message', message, { surfaceOp: 'append' })
+  }
+
+  /** Price a switch against the same pending admission the live loop will use. */
+  private async admitSwitch(
+    baseline: EpochHeader,
+    header: EpochHeader,
+    preparedCall: PreparedLlmCall | undefined,
+    plan: (view: Session, shadowed?: readonly SessionSeq[]) => StepAdmission,
+    position: StepPosition,
+    signal: AbortSignal,
+  ): Promise<StepAdmission | undefined> {
+    const { session } = this
+    let checked: { admission: StepAdmission; nodes: readonly SessionSeq[]; generation: number } | undefined
+    const contextWindow = preparedCall?.context?.contextWindow
+    const request: PendingAgentRequest = {
+      header,
+      ...contextWindow === undefined ? {} : { contextWindow },
+      preview: (events, replacement) => {
+        signal.throwIfAborted()
+        if (events.length !== session.seq || session.requestHeader() !== baseline) {
+          throw new Error('agent: Session changed before request admission could be priced')
+        }
+        const view = Session.fromRestore(session.id, events, session.header, session.inheritedEventCount,
+          'shared-frozen', this.loopCtx.sessions.messageProjections)
+        const nodes = [...session.surface.nodes]
+        if (replacement !== undefined) {
+          const { start, end, shadowedSeqs, replacementSeq, message } = replacement
+          const index = nodes.indexOf(start)
+          if (index < 0 || nodes[index + shadowedSeqs.length - 1] !== end
+            || shadowedSeqs.some((seq, offset) => nodes[index + offset] !== seq)) {
+            throw new Error('agent: proposed replacement does not match the current Surface')
+          }
+          nodes.splice(index, shadowedSeqs.length, replacementSeq)
+          view.append('user/message', message, {
+            surfaceOp: { op: 'replace', startSeq: start, endSeq: end },
+            sourceEventSeqs: [...shadowedSeqs],
+          })
+        }
+        const admission = plan(view, replacement?.shadowedSeqs)
+        this.appendStepAdmission(view, admission, position)
+        const { seq } = view.append('request/header', { header, reason: 'change' })
+        this.appendToolDelta(view, baseline, header.tools ?? [], position, seq)
+        checked = {
+          admission, nodes,
+          generation: session.surface.contentGeneration + (replacement === undefined ? 0 : 1),
+        }
+        return view
+      },
+    }
+    await this.dispatch.serial('agent/request-admission', { request, signal })
+    if (checked === undefined) return undefined
+    const { admission, nodes, generation } = checked
+    if (session.requestHeader() !== baseline || session.surface.contentGeneration !== generation
+      || session.surface.nodes.length !== nodes.length || nodes.some((seq, i) => session.surface.nodes[i] !== seq)) {
+      throw new Error('agent: the priced request no longer matches the Session Surface')
+    }
+    return admission
+  }
+
   /** Resolve request config for the step's selection and bind its adapter before admitting model-visible input. */
   private async prepareRequest(
     turn: number,
@@ -671,20 +766,15 @@ export class ReactLoopAgent implements Agent {
 
   /** Log the resolved envelope and derive a frozen request from the admitted surface. */
   private buildRequest(
-    config: LlmCallConfig,
+    header: EpochHeader,
     preparedCall: PreparedLlmCall | undefined,
-    tools: GenerateOptions['tools'] & object,
-    position: { turn: number; step: number },
+    position: StepPosition,
     startsRequestSeries: boolean,
     signal: AbortSignal,
   ): GenerateOptions {
     const { session } = this
+    const { config } = header
     const surfaceGeneration = session.surface.contentGeneration
-    const header = canonicalHeader({
-      config,
-      ...preparedCall === undefined ? {} : { adapterDefaults: preparedCall.adapterDefaults },
-      ...tools.length > 0 ? { tools } : {},
-    })
     const baseline = this.session.requestHeader()
     const startsSeries = startsRequestSeries
       || this.requestSurfaceGeneration !== surfaceGeneration
@@ -707,19 +797,7 @@ export class ReactLoopAgent implements Agent {
       this.session.append('request/header', { header, reason: 'series' })
     }
     if (baseline !== undefined && headerSeq !== undefined) {
-      const previousNames = new Set(baseline.tools?.map(tool => tool.name))
-      const currentNames = new Set(tools.map(tool => tool.name))
-      const additions = tools.filter(tool => !previousNames.has(tool.name))
-        .map(tool => ({ type: 'tool-addition' as const, toolName: tool.name }))
-      const removals = (baseline.tools ?? []).filter(tool => !currentNames.has(tool.name))
-        .map(tool => ({ type: 'tool-removal' as const, toolName: tool.name }))
-      if (additions.length > 0 || removals.length > 0) {
-        session.append('developer/message', {
-          ...position,
-          message: createDeveloperMessage({ source: { kind: 'tool-registry' }, content: [...additions, ...removals] }),
-          ...additions.length > 0 ? { headerSeq } : {},
-        }, { surfaceOp: 'append' })
-      }
+      this.appendToolDelta(session, baseline, header.tools ?? [], position, headerSeq)
     }
     this.requestSurfaceGeneration = surfaceGeneration
 
@@ -758,5 +836,27 @@ export class ReactLoopAgent implements Agent {
       signal,
     }))
     return request
+  }
+
+  private appendToolDelta(
+    view: Session,
+    baseline: EpochHeader,
+    tools: NonNullable<EpochHeader['tools']>,
+    position: StepPosition,
+    headerSeq: SessionSeq,
+  ): void {
+    const previousNames = new Set(baseline.tools?.map(tool => tool.name))
+    const currentNames = new Set(tools.map(tool => tool.name))
+    const additions = tools.filter(tool => !previousNames.has(tool.name))
+      .map(tool => ({ type: 'tool-addition' as const, toolName: tool.name }))
+    const removals = (baseline.tools ?? []).filter(tool => !currentNames.has(tool.name))
+      .map(tool => ({ type: 'tool-removal' as const, toolName: tool.name }))
+    if (additions.length > 0 || removals.length > 0) {
+      view.append('developer/message', {
+        ...position,
+        message: createDeveloperMessage({ source: { kind: 'tool-registry' }, content: [...additions, ...removals] }),
+        ...additions.length > 0 ? { headerSeq } : {},
+      }, { surfaceOp: 'append' })
+    }
   }
 }
