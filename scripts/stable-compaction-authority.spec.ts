@@ -3,11 +3,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
-import LlmRuntime, { ToolCallId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -16,17 +19,27 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import * as ToolSessionQuery from '@deepseek-ai/dsh-tool-session-query'
-import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import { defineContentToolFixture, executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { PeerId } from '@deepseek-ai/dsh-typert-protocol'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { expect, it } from 'vitest'
 import { createSessionTestController } from '../packages/api/session-controller/tests/test-remote.ts'
+import { MockAdapter, textResponse, toolCallResponse } from '../packages/core/agent-loop/tests/mock-adapter.ts'
 import { appendFixtureTurn, fixtureAgent } from './stable-compaction-fixture.ts'
 
 class FixtureCompaction extends BasicCompactionEngine {
   protected override async summarize() {
     return { summary: [{ type: 'text' as const, text: 'Synthetic checkpoint.' }], provider: 'fixture', model: 'fixture' }
+  }
+}
+
+class ModelSwitchAdapter extends MockAdapter {
+  override async resolveModel(provider: string, model: string) {
+    return {
+      ...await super.resolveModel(provider, model),
+      context: { contextWindow: model === 'small' ? 4_096 : 128_000 },
+    }
   }
 }
 
@@ -249,6 +262,133 @@ it('authorizes cold compacted event reads and recovers the retained image throug
     await expect(fetchEvent(sameWorkspace)).resolves.toEqual(found)
     expect(await readFile(logPath)).toEqual(logBytes)
     expect(reader.sessions.get(sessionId)).toBeUndefined()
+  } finally {
+    await reader.fiber.dispose()
+    await author.fiber.dispose()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('retains original tool history through repeated Basic compaction, a refused switch, and a cold retry', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-compaction-switch-recovery-'))
+  const persistence = { root: join(root, 'sessions'), compression: 'zstd' } as const
+  const sourceRoute = { provider: 'fixture-source', model: 'wide', maxTokens: 64 }
+  const destinationRoute = { provider: 'fixture-destination', model: 'small' }
+  const sessionId = SessionId('repeated-compaction')
+  const resultText = 'Retained synthetic tool bytes — exact.\n'.repeat(1_000)
+  const callIds = [1, 2, 3, 4].map(n => `recovery-call-${n}`)
+  const sourceAdapter = new ModelSwitchAdapter(callIds.flatMap(id => [
+    toolCallResponse(id, 'fixture_read', {}),
+    textResponse('Tool read complete.'),
+  ]))
+  const failedSummarizer = new ModelSwitchAdapter([
+    textResponse('First checkpoint.'),
+    textResponse('Second checkpoint.'),
+    textResponse('Third checkpoint.'),
+    [{ type: 'finish', reason: { kind: 'error', failure: { code: 'AUTH', message: 'Synthetic summary refusal' } } }],
+  ])
+  const retrySummarizer = new ModelSwitchAdapter([textResponse('Recovered checkpoint.')])
+  const destinationAdapter = new ModelSwitchAdapter([textResponse('Destination answered.')])
+  const author = new Context()
+  const reader = new Context()
+  let toolExecutions = 0
+  async function mount(ctx: Context, summarizer: ModelSwitchAdapter) {
+    await mountAgentLoopTestDependencies(ctx)
+    await ctx.plugin(JsonlSessionPersistence, persistence)
+    await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'never' })
+    await ctx.plugin(TokenMeter)
+    await ctx.plugin(BasicCompactionEngine, {
+      auto: true,
+      thresholdRatio: 0.5,
+      retainTokens: 0,
+      headroomTokens: 0,
+      maxTokens: 64,
+      summarizationProvider: 'fixture-summary',
+      summarizationModel: 'wide',
+      summarizationFallback: 'error',
+    })
+    await ctx.plugin(AgentLoop, { agents: [] })
+    ctx.llm.registerAdapter([sourceRoute.provider], sourceAdapter)
+    ctx.llm.registerAdapter([destinationRoute.provider], destinationAdapter)
+    ctx.llm.registerAdapter(['fixture-summary'], summarizer)
+    ctx.tools.register(defineContentToolFixture({
+      name: 'fixture_read',
+      description: 'Read the synthetic tool fixture.',
+      parameters: {},
+      async execute() {
+        toolExecutions += 1
+        return [{ type: 'text', text: resultText }]
+      },
+    }))
+  }
+  async function send(agent: Agent, text: string) {
+    agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+  }
+  try {
+    await mount(author, failedSummarizer)
+    const owned = await author.agents.create({ sessionId, agentOptions: sourceRoute, meta: { cwd: root } })
+    const { agent } = owned
+    for (const id of callIds.slice(0, 3)) {
+      await send(agent, `Read ${id}.`)
+      expect(await author.compaction.compactNow(agent, new AbortController().signal)).not.toBeNull()
+    }
+    await send(agent, 'Read one more original before switching.')
+    const before = (await author.sessionQuery.readSession(sessionId)).events
+    const calls = before.filter(event => event.type === 'tool/call')
+    const results = before.filter(event => event.type === 'tool/result')
+    const checkpoints = before.filter(event => event.type === 'user/message' && isCompactCheckpointSource(event.data.source))
+    expect(checkpoints).toHaveLength(3)
+    expect(calls.map(event => event.data.callId)).toEqual(callIds)
+    expect(results.map(event => event.data.message.toolCallId)).toEqual(callIds)
+    for (const result of results) {
+      expect(result.data.message).toMatchObject({ content: [{ type: 'text', text: resultText }], isError: false })
+    }
+    const committedHeader = agent.session.requestHeader()
+    expect(committedHeader?.config).toMatchObject(sourceRoute)
+    const priorSurface = [...agent.session.surface.nodes]
+
+    agent.model.select(destinationRoute)
+    await send(agent, 'Try the smaller route.')
+    const failed = (await author.sessionQuery.readSession(sessionId)).events
+    expect(failed.slice(0, before.length)).toEqual(before)
+    const attempt = failed.slice(before.length)
+    expect(attempt.filter(event => event.type.startsWith('compaction/')).map(event => event.type))
+      .toEqual(['compaction/start', 'compaction/end'])
+    expect(attempt.at(-1)).toMatchObject({
+      type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'MODEL_SWITCH_COMPACTION_FAILED' } } },
+    })
+    expect(agent.session.surface.nodes).toEqual(priorSurface)
+    expect(agent.session.requestHeader()).toEqual(committedHeader)
+    expect(failedSummarizer.requests).toHaveLength(4)
+    expect(destinationAdapter.requests).toHaveLength(0)
+    expect(toolExecutions).toBe(4)
+    await author.sessions.flush(agent.session)
+    await owned.dispose()
+    expect(author.sessions.get(sessionId)).toBeUndefined()
+
+    await mount(reader, retrySummarizer)
+    expect(reader.sessions.get(sessionId)).toBeUndefined()
+    expect((await reader.sessionQuery.readSession(sessionId)).events).toEqual(failed)
+    const oldestResult = results[0]!
+    const trace = await reader.sessionQuery.traceEvent({ sessionId, seq: oldestResult.seq })
+    expect(trace.replacementChain).toEqual(checkpoints.map(event => event.seq))
+    expect(reader.sessions.get(sessionId)).toBeUndefined()
+    const resumed = await reader.agents.resume({ resumeSessionId: sessionId, agentOptions: sourceRoute })
+    expect(resumed.agent.session.requestHeader()).toEqual(committedHeader)
+    expect(resumed.agent.model.current()).toMatchObject(destinationRoute)
+    await send(resumed.agent, 'Retry the smaller route from the stored history.')
+    expect(retrySummarizer.requests).toHaveLength(1)
+    expect(destinationAdapter.requests).toHaveLength(1)
+    expect(toolExecutions).toBe(4)
+    expect(resumed.agent.session.requestHeader()?.config).toMatchObject(destinationRoute)
+    await reader.sessions.flush(resumed.agent.session)
+    await resumed.dispose()
+    expect(reader.sessions.get(sessionId)).toBeUndefined()
+    const recovered = (await reader.sessionQuery.readSession(sessionId)).events
+    expect(recovered.slice(0, failed.length)).toEqual(failed)
+    expect(recovered.filter(event => event.type === 'compaction/summary')).toHaveLength(4)
+    expect(recovered.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
   } finally {
     await reader.fiber.dispose()
     await author.fiber.dispose()
