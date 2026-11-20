@@ -228,7 +228,12 @@ export function resolveCompactSpec(
   })
 }
 
-/** Reduce an omitted summary cap on the conversation route using its actual message budget. */
+/**
+ * Reduce an omitted summary cap on the conversation route using its actual message budget.
+ * @param policy - compaction settings resolved for that route.
+ * @param messageBudgetTokens - route capacity after the completion reserve.
+ * @returns the summary output cap in tokens.
+ */
 export function resolveSummaryMaxTokens(policy: ResolvedTargetPolicy, messageBudgetTokens: number): number {
   if (messageBudgetTokens <= 0 || policy.adaptiveHeadroom !== 'pressure-and-summary') return policy.maxTokens
   const retainTokens = resolveRetainTokens(policy, messageBudgetTokens)

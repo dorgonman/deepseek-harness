@@ -48,7 +48,7 @@ function rawGroups(
     const shadowed = edges.get(seq)
     if (checkpoint || shadowed !== undefined) {
       if (shadowed === undefined || !(checkpoint || event.type === 'tool/result')) {
-        throw new Error('compaction: unsupported Surface replacement provenance')
+        throw new Error('compaction: unsupported Surface replacement event')
       }
       for (const original of shadowed) pending.push(original)
       continue

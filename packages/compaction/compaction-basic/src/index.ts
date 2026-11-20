@@ -470,6 +470,8 @@ export class BasicCompactionEngine extends CompactionEngine {
    * @param end - inclusive last surface-node seq.
    * @param agent - owner of the target session, used by the summarizer.
    * @param signal - optional summarization cancellation signal.
+   * @param destination - proposed request header when compaction targets another route.
+   * @param admission - pending switch request used to price the replacement before commit.
    * @returns the successful durable compaction result.
    */
   override async compactRegion(

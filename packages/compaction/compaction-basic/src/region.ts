@@ -38,8 +38,10 @@ export interface SurfaceSelection {
   readonly shadowedSeqs: readonly SessionSeq[]
 }
 
+/** One durable call in an ordered compaction summary. */
 export type CompactionChunkCall = NonNullable<SessionEvent<'compaction/summary'>['data']['chunkCalls']>[number]
 
+/** Summary output and optional provider requirements for replacement. */
 export type RegionSummary = SummaryResult & {
   chunkCalls?: CompactionChunkCall[]
   /** Optional provider-owned guard evaluated synchronously before replacement. */
