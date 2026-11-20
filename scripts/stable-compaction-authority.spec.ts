@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, readdir, rm, truncate, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -41,6 +41,34 @@ class ModelSwitchAdapter extends MockAdapter {
       context: { contextWindow: model === 'small' ? 4_096 : 128_000 },
     }
   }
+}
+
+async function mountBasicRecovery(
+  ctx: Context,
+  persistence: { root: string; compression: 'none' | 'zstd' },
+  summarizer: ModelSwitchAdapter,
+) {
+  await mountAgentLoopTestDependencies(ctx)
+  await ctx.plugin(JsonlSessionPersistence, persistence)
+  await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'never' })
+  await ctx.plugin(TokenMeter)
+  await ctx.plugin(BasicCompactionEngine, {
+    auto: true,
+    thresholdRatio: 0.5,
+    retainTokens: 0,
+    headroomTokens: 0,
+    maxTokens: 64,
+    summarizationProvider: 'fixture-summary',
+    summarizationModel: 'wide',
+    summarizationFallback: 'error',
+  })
+  await ctx.plugin(AgentLoop, { agents: [] })
+  ctx.llm.registerAdapter(['fixture-summary'], summarizer)
+}
+
+async function sendRecoveryPrompt(agent: Agent, text: string) {
+  agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+  await agent.whenIdle()
 }
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
@@ -293,24 +321,9 @@ it('retains original tool history through repeated Basic compaction, a refused s
   const reader = new Context()
   let toolExecutions = 0
   async function mount(ctx: Context, summarizer: ModelSwitchAdapter) {
-    await mountAgentLoopTestDependencies(ctx)
-    await ctx.plugin(JsonlSessionPersistence, persistence)
-    await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'never' })
-    await ctx.plugin(TokenMeter)
-    await ctx.plugin(BasicCompactionEngine, {
-      auto: true,
-      thresholdRatio: 0.5,
-      retainTokens: 0,
-      headroomTokens: 0,
-      maxTokens: 64,
-      summarizationProvider: 'fixture-summary',
-      summarizationModel: 'wide',
-      summarizationFallback: 'error',
-    })
-    await ctx.plugin(AgentLoop, { agents: [] })
+    await mountBasicRecovery(ctx, persistence, summarizer)
     ctx.llm.registerAdapter([sourceRoute.provider], sourceAdapter)
     ctx.llm.registerAdapter([destinationRoute.provider], destinationAdapter)
-    ctx.llm.registerAdapter(['fixture-summary'], summarizer)
     ctx.tools.register(defineContentToolFixture({
       name: 'fixture_read',
       description: 'Read the synthetic tool fixture.',
@@ -321,19 +334,15 @@ it('retains original tool history through repeated Basic compaction, a refused s
       },
     }))
   }
-  async function send(agent: Agent, text: string) {
-    agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
-    await agent.whenIdle()
-  }
   try {
     await mount(author, failedSummarizer)
     const owned = await author.agents.create({ sessionId, agentOptions: sourceRoute, meta: { cwd: root } })
     const { agent } = owned
     for (const id of callIds.slice(0, 3)) {
-      await send(agent, `Read ${id}.`)
+      await sendRecoveryPrompt(agent, `Read ${id}.`)
       expect(await author.compaction.compactNow(agent, new AbortController().signal)).not.toBeNull()
     }
-    await send(agent, 'Read one more original before switching.')
+    await sendRecoveryPrompt(agent, 'Read one more original before switching.')
     const before = (await author.sessionQuery.readSession(sessionId)).events
     const calls = before.filter(event => event.type === 'tool/call')
     const results = before.filter(event => event.type === 'tool/result')
@@ -349,7 +358,7 @@ it('retains original tool history through repeated Basic compaction, a refused s
     const priorSurface = [...agent.session.surface.nodes]
 
     agent.model.select(destinationRoute)
-    await send(agent, 'Try the smaller route.')
+    await sendRecoveryPrompt(agent, 'Try the smaller route.')
     const failed = (await author.sessionQuery.readSession(sessionId)).events
     expect(failed.slice(0, before.length)).toEqual(before)
     const attempt = failed.slice(before.length)
@@ -377,7 +386,7 @@ it('retains original tool history through repeated Basic compaction, a refused s
     const resumed = await reader.agents.resume({ resumeSessionId: sessionId, agentOptions: sourceRoute })
     expect(resumed.agent.session.requestHeader()).toEqual(committedHeader)
     expect(resumed.agent.model.current()).toMatchObject(destinationRoute)
-    await send(resumed.agent, 'Retry the smaller route from the stored history.')
+    await sendRecoveryPrompt(resumed.agent, 'Retry the smaller route from the stored history.')
     expect(retrySummarizer.requests).toHaveLength(1)
     expect(destinationAdapter.requests).toHaveLength(1)
     expect(toolExecutions).toBe(4)
@@ -389,6 +398,94 @@ it('retains original tool history through repeated Basic compaction, a refused s
     expect(recovered.slice(0, failed.length)).toEqual(failed)
     expect(recovered.filter(event => event.type === 'compaction/summary')).toHaveLength(4)
     expect(recovered.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  } finally {
+    await reader.fiber.dispose()
+    await author.fiber.dispose()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it.each([
+  { boundary: 'replacement', replacementStored: false },
+  { boundary: 'close marker', replacementStored: true },
+])('retains raw history and retries after a torn Basic $boundary', async ({ replacementStored }) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-compaction-torn-tail-'))
+  const persistence = { root: join(root, 'sessions'), compression: 'none' } as const
+  const route = { provider: 'fixture-chat', model: 'wide', maxTokens: 64 }
+  const sessionId = SessionId('torn-compaction')
+  const signal = new AbortController().signal
+  const author = new Context()
+  const reader = new Context()
+  try {
+    const firstSummary = new ModelSwitchAdapter([textResponse('Detailed checkpoint of the first tool result and its source.')])
+    await mountBasicRecovery(author, persistence, firstSummary)
+    author.llm.registerAdapter([route.provider], new ModelSwitchAdapter([
+      toolCallResponse('torn-tool-call', 'fixture_read', {}),
+      textResponse('Tool read complete.'),
+    ]))
+    const resultText = 'Exact synthetic bytes from the original tool result.\n'.repeat(600)
+    author.tools.register(defineContentToolFixture({
+      name: 'fixture_read',
+      description: 'Read the synthetic tool fixture.',
+      parameters: {},
+      async execute() { return [{ type: 'text', text: resultText }] },
+    }))
+    const { agent, dispose } = await author.agents.create({ sessionId, agentOptions: route, meta: { cwd: root } })
+    await sendRecoveryPrompt(agent, 'Read the original tool result before compaction.')
+    const rawSurface = [...agent.session.surface.nodes]
+    const original = await author.sessionQuery.readSession(sessionId)
+    const originalResult = original.events.find(event => event.type === 'tool/result')
+    expect(originalResult?.data.message).toMatchObject({
+      toolCallId: 'torn-tool-call', isError: false, content: [{ type: 'text', text: resultText }],
+    })
+    const first = await author.compaction.compactNow(agent, signal)
+    const compacted = await author.sessionQuery.readSession(sessionId)
+    const replacement = compacted.events.find(event => event.type === 'user/message' && isCompactCheckpointSource(event.data.source))
+    const end = compacted.events.find(event => event.type === 'compaction/end')
+    if (first === null || originalResult === undefined || replacement === undefined || end === undefined) {
+      throw new Error('The synthetic writer did not produce a complete compaction')
+    }
+    expect(end.data.compactionId).toBe(first.compactionId)
+    const replayedSurface = replacementStored ? [...agent.session.surface.nodes] : rawSurface
+    await dispose()
+
+    const logs = (await readdir(persistence.root, { recursive: true })).filter(path => path.endsWith('.jsonl'))
+    expect(logs).toHaveLength(1)
+    const logPath = join(persistence.root, logs[0]!)
+    const cut = replacementStored ? end : replacement
+    const rows = (await readFile(logPath, 'utf8')).split('\n')
+    const cutIndex = rows.findIndex(row => row.includes(`"seq":${cut.seq},`) && row.includes(`"type":"${cut.type}"`))
+    if (cutIndex < 0) throw new Error('The omitted record was not written into the fixture log')
+    const committed = Buffer.from(rows.slice(0, cutIndex).join('\n') + '\n')
+    const fragment = Buffer.from(rows[cutIndex]!).subarray(0, 16)
+    await truncate(logPath, committed.length + fragment.length)
+    const torn = Buffer.concat([committed, fragment])
+    const prefix = compacted.events.filter(event => event.seq < cut.seq)
+
+    const retrySummary = new ModelSwitchAdapter([textResponse('Recovered.')])
+    await mountBasicRecovery(reader, persistence, retrySummary)
+    expect((await reader.sessionQuery.readSession(sessionId)).events).toEqual(prefix)
+    expect(await readFile(logPath)).toEqual(torn)
+    const trace = await reader.sessionQuery.traceEvent({ sessionId, seq: originalResult.seq })
+    expect(trace.replacementChain).toEqual(replacementStored ? [replacement.seq] : [])
+    expect(reader.sessions.get(sessionId)).toBeUndefined()
+
+    const resumed = await reader.agents.resume({ resumeSessionId: sessionId, agentOptions: route })
+    expect(resumed.agent.session.surface.nodes).toEqual(replayedSurface)
+    expect(resumed.agent.session.requestHeader()?.config).toMatchObject(route)
+    expect(retrySummary.requests).toHaveLength(0)
+    const retry = await reader.compaction.compactNow(resumed.agent, signal)
+    expect(retry).not.toBeNull()
+    expect(retry?.compactionId).not.toBe(first.compactionId)
+    expect(retrySummary.requests).toHaveLength(1)
+    await resumed.dispose()
+    const recovered = (await reader.sessionQuery.readSession(sessionId)).events
+    expect(recovered.slice(0, prefix.length)).toEqual(prefix)
+    expect(recovered.filter(event => event.type === 'session/end-seed' && event.seq >= cut.seq)).toHaveLength(1)
+    expect(recovered.filter(event => event.type === 'compaction/end').map(event => event.data.compactionId))
+      .toEqual([retry?.compactionId])
+    expect((await reader.sessionQuery.readEvent({ sessionId, seq: originalResult.seq })).target).toEqual(originalResult)
+    expect((await readFile(logPath)).subarray(0, committed.length)).toEqual(committed)
   } finally {
     await reader.fiber.dispose()
     await author.fiber.dispose()
