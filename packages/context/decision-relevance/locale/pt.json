@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Relevância dos resultados de ferramentas",
+    "description": "Usa um modelo Decision configurado para substituir o conteúdo de resultados irrelevantes de ferramentas por um marcador curto nas solicitações ao modelo. O registro da sessão preserva os resultados completos."
+  }
+}

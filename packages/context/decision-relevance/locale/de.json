@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Relevanz von Werkzeugergebnissen",
+    "description": "Verwendet ein konfiguriertes Decision-Modell, um den Inhalt irrelevanter Werkzeugergebnisse in Modellanfragen durch eine kurze Markierung zu ersetzen. Das Sitzungsprotokoll enthält weiterhin die vollständigen Ergebnisse."
+  }
+}
