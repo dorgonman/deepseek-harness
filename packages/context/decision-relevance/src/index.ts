@@ -63,7 +63,7 @@ export interface DecisionRelevanceEventData {
 }
 
 /** Capability-owned timeout reason code for background relevance requests. */
-export const RELEVANCE_TIMEOUT_CODE = 'DECISION_RELEVANCE_TIMEOUT'
+const RELEVANCE_TIMEOUT_CODE = 'DECISION_RELEVANCE_TIMEOUT'
 
 /**
  * Structural view of the session store.
@@ -467,14 +467,6 @@ interface DecisionReadout {
   readonly served_identity: Record<string, unknown>
 }
 
-export {
-  codePointLength,
-  DEFAULTS,
-  DEFAULT_ELISION_TEXT,
-  isEffective,
-  resolveConfig,
-  truncateCodePoints,
-} from './config.ts'
 export type {
   DecisionRelevanceConfig,
   ProjectionResult,
