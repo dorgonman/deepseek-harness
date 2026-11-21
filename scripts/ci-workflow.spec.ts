@@ -363,6 +363,32 @@ describe('CI workflow', () => {
     }
   })
 
+  it.each([
+    ['.github/workflows/ci.yml', ['node-24', 'node-24-coverage', 'node-24-lint', 'node-24-consumers'], 'LINUX', 'ubuntu-24.04', 'dsh-ubuntu-24-04-16core'],
+    ['.github/workflows/ci-windows.yml', ['windows-build', 'windows-coverage', 'windows-native-tests'], 'WINDOWS', 'windows-2025', 'dsh-windows-2025-16core'],
+  ] as const)('routes %s workers for unconfigured public forks', (path, jobNames, platform, standard, enterprise) => {
+    const workflow = loadWorkflow(path)
+    const variable = `DSH_CI_FAILOVER_${platform}`
+    for (const jobName of jobNames) {
+      const selector = workflowJob(workflow, jobName)['runs-on']
+      const evaluate = (repository: { fork: boolean; private: boolean }, mode = '', login = 'maintainer') =>
+        evaluateRunsOn(selector, {
+          vars: { [variable]: mode },
+          fromJSON: JSON.parse,
+          github: { event: { repository, pull_request: { user: { login }, head: { repo: { fork: true } } } } },
+        })
+
+      const publicFork = { fork: true, private: false }
+      expect(evaluate(publicFork), jobName).toBe(standard)
+      expect(evaluate({ fork: false, private: false }), jobName).toBe(enterprise)
+      expect(evaluate({ fork: true, private: true }), jobName).toBe(enterprise)
+      expect(evaluate(publicFork, 'blacksmith'), jobName).toMatch(/^blacksmith-/)
+      expect(evaluate(publicFork, 'selfhosted'), jobName).toEqual(expect.arrayContaining(['self-hosted']))
+      expect(evaluate(publicFork, 'selfhosted', 'dependabot[bot]'), jobName).toBe(enterprise)
+      expect(evaluate(publicFork, 'hosted'), jobName).toBe(enterprise)
+    }
+  })
+
   it('keeps split native Windows PR jobs with failover in their own workflow, plus a master-only standby', () => {
     const workflow = loadWorkflow('.github/workflows/ci.yml')
     const windowsWorkflow = loadWorkflow('.github/workflows/ci-windows.yml')
@@ -596,7 +622,7 @@ describe('CI workflow', () => {
       return evaluateRunsOn(expression, {
         vars,
         fromJSON: JSON.parse,
-        github: { event: { pull_request: { user: { login } } } },
+        github: { event: { repository: { fork: false, private: false }, pull_request: { user: { login } } } },
       })
     }
     for (const [name, selector, variable, pool, hosted] of [

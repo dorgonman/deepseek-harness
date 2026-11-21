@@ -20,17 +20,14 @@ concurrency:
 
 jobs:
 
-  # Three enterprise jobs isolate coverage, static analysis, and the
-  # build-backed consumer tail. The consumer job owns the only Linux build so
-  # all three jobs enter runner allocation independently.
+  # Separate runners isolate static analysis, lint, coverage, and the
+  # build-backed consumer checks. Consumers own the only Linux build here.
   #
   # FAILOVER (Linux): each Linux enterprise job resolves its pool through the
-  # DSH_CI_FAILOVER_LINUX repository variable. Unset (normal), the expressions
-  # pick the hosted enterprise pools below. Setting the variable to
-  # 'selfhosted' (repo Settings → Actions → Variables; writer-manageable
-  # repository state — not PR-editable, no merge required) retargets all
-  # three onto the in-house
-  # vm-backup pool and re-running the failed jobs is the entire switch —
+  # DSH_CI_FAILOVER_LINUX repository variable. With the variable unset, public
+  # forks use GitHub-hosted Ubuntu and other repositories use enterprise runners.
+  # Setting the variable to 'selfhosted' in repository Actions variables routes
+  # eligible jobs to the in-house vm-backup pool. Re-run the failed jobs to switch —
   # see .agents/notes/implemented/process/2026-07-26-ci-failover-runbook.md.
   # Setting the variable to 'blacksmith' instead routes the same jobs onto
   # Blacksmith's hosted runners sized per workload (see
@@ -45,6 +42,9 @@ jobs:
           || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
+          || !vars.DSH_CI_FAILOVER_LINUX
+          && github.event.repository.fork && github.event.repository.private == false
+          && 'ubuntu-24.04'
           || 'dsh-ubuntu-24-04-16core' }}
     name: node 24 / static
     env:
@@ -112,6 +112,9 @@ jobs:
           || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
+          || !vars.DSH_CI_FAILOVER_LINUX
+          && github.event.repository.fork && github.event.repository.private == false
+          && 'ubuntu-24.04'
           || 'dsh-ubuntu-24-04-16core' }}
     name: node 24 / coverage
     env:
@@ -233,6 +236,9 @@ jobs:
           || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
+          || !vars.DSH_CI_FAILOVER_LINUX
+          && github.event.repository.fork && github.event.repository.private == false
+          && 'ubuntu-24.04'
           || 'dsh-ubuntu-24-04-16core' }}
     name: node 24 / lint
     env:
@@ -358,6 +364,9 @@ jobs:
           || vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
+          || !vars.DSH_CI_FAILOVER_LINUX
+          && github.event.repository.fork && github.event.repository.private == false
+          && 'ubuntu-24.04'
           || 'dsh-ubuntu-24-04-16core' }}
     name: node 24 / snapshots and artifacts
     env:
