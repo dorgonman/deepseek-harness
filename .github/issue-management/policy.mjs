@@ -15,8 +15,9 @@ function readEvent() {
 
 async function main(argv) {
   const [command] = argv
-  if (command === 'pr-preflight') await runPullRequestPreflight(readEvent())
-  else if (command === 'pr') await runPullRequestCheck(readEvent())
+  const workflow = { repository: process.env.GITHUB_REPOSITORY, repositoryId: process.env.GITHUB_REPOSITORY_ID }
+  if (command === 'pr-preflight') await runPullRequestPreflight(readEvent(), workflow)
+  else if (command === 'pr') await runPullRequestCheck(readEvent(), workflow)
   else if (command === 'lifecycle') await runLifecycle(process.env.GITHUB_EVENT_NAME, readEvent())
   else throw new Error('用法：policy.mjs pr-preflight|pr|lifecycle')
 }

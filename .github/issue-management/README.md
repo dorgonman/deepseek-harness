@@ -26,15 +26,17 @@ Contributors can link Issues as context without coupling pull-request validation
 
 [Issue policy](../workflows/issue-policy.yml) applies to non-draft, human-authored PRs with a requested review or submitted review. Exempt PRs finish successfully without resolving Issue references, minting a Project App token, or querying ProjectV2. Eligibility uses live repository state before expensive reads; the required job remains present for subscribed events. Final validation re-reads live state: preflight is not a cached verdict or an exemption for metadata edits.
 
+The repository name and ID supplied by GitHub Actions must match the event repository and the PR base repository. Each policy pass verifies the PR number and base repository in the live REST response. Reads of the PR, requested reviewers, reviews, and same-repository Issues use the verified repository. A repository mismatch or REST redirect fails the check.
+
 Selective preflight requires [selective-preflight.json](selective-preflight.json) in the trusted checkout. Without that marker, the workflow preserves legacy behavior: human PRs receive a Project token and full legacy validation; Bot/App PRs skip both. A failed supported preflight fails the job rather than falling back.
 
 Eligible PRs need at least one same-repository Issue reference, exactly one canonical `kind/*`, at least one `area/*`, and at most one `p0`–`p3` label. Unsupported kinds, retired aliases, and `source/*` labels fail validation; [label taxonomy](../../.agents/notes/implemented/process/2026-08-08-unified-github-label-taxonomy.md) owns their meanings.
 
-- Informational references, such as `Refs #3624`, establish context. Validation uses REST to distinguish Issues from PR numbers and does not read their Project fields. An informational-only PR can carry its own Priority without matching the referenced Issue.
+- Informational references, such as `Refs #3624`, establish context. REST reads in the verified repository, including a fork, distinguish Issues from PR numbers and suffice for informational references. An informational-only PR can carry its own Priority without matching the referenced Issue.
 - Resolving references use closing keywords such as `Fixes #123`, `Closes #123`, or `Resolves #123`. Only references that resolve to actual Issues require Project reads during validation. A PR Priority must match the highest resolving-Issue Priority; a resolving PR with a Priority label requires every resolving Issue to have Priority. If all resolving Priorities are empty, the PR may omit Priority.
 - References inside HTML comments, code fences, or inline code do not count. Cross-repository references and references to PRs do not satisfy the Issue requirement.
 
-REST reads use the repository `GITHUB_TOKEN`. Project validation uses a separate App token with Issues and organization Projects read permissions. Missing required Project access or invalid field configuration fails validation rather than bypassing resolving-Issue Priority checks.
+REST reads use the repository `GITHUB_TOKEN`. Project validation uses a separate App token with Issues and organization Projects read permissions. For resolving Issue references, validation fails if the verified repository differs from the configured Project repository, required Project access is unavailable, or field configuration is invalid.
 
 -----
 
@@ -52,7 +54,7 @@ PR opening initializes an empty Project `Start Date` for every referenced Issue,
 <a id="configuration-and-limitations"></a>
 ## Configuration and limitations
 
-[config.json](config.json) selects the repository, Project, field names, statuses, lifecycle actor, and time zone. The policy reads the Project custom single-select `Priority` field, not a native organization Issue Priority field. Maintainers set Project Priority manually; skill guidance that directs edits to native Issue fields does not populate this value. Issue audits remove PR-only kinds and retired label aliases before validating the remaining metadata. There is no field migration or Priority synchronization.
+[config.json](config.json) selects the repository and Project for lifecycle operations and Project-backed Priority checks. It also selects field names, statuses, the lifecycle actor, and the time zone. The policy reads the Project custom single-select `Priority` field, not a native organization Issue Priority field. Maintainers set Project Priority manually; skill guidance that directs edits to native Issue fields does not populate this value. Issue audits remove PR-only kinds and retired label aliases before validating the remaining metadata. There is no field migration or Priority synchronization.
 
 Lifecycle processing is event-driven, not a reconciler. Omitted events do not repair Project state, and concurrent Project mutations have no atomic compare-and-swap. Selective evaluation does not redesign required-check authority or guarantee measured Actions-minute savings. The [selective-evaluation decision](../../.agents/notes/implemented/process/2026-09-07-selective-issue-policy-evaluation.md) records the trade-offs.
 
@@ -61,7 +63,7 @@ Lifecycle processing is event-driven, not a reconciler. Omitted events do not re
 <a id="module-ownership"></a>
 ## Module ownership
 
-Maintainers reuse the owning module directly; [policy.mjs](policy.mjs) only reads the event file, dispatches commands, and reports command failures. The [module-ownership decision](../../.agents/notes/implemented/process/2026-09-07-issue-policy-module-ownership.md) explains this separation.
+Maintainers reuse the owning module directly. [policy.mjs](policy.mjs) reads the workflow repository identity and event file, dispatches commands, and reports command failures. The [module-ownership decision](../../.agents/notes/implemented/process/2026-09-07-issue-policy-module-ownership.md) explains this separation.
 
 <details>
 <summary>Implementation owners</summary>

@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { api, graphql, initializeIssueStartDate, issueSnapshot } from './github.mjs'
 import { auditIssue, initializePullRequestStartDates, repairIssueLabels, runLifecycle } from './lifecycle.mjs'
@@ -766,7 +767,20 @@ test('rejects multiple, unknown, legacy, and Issue-source PR labels', () => {
   )
 })
 
-const mockPolicyApi = (t, { pull = {}, requested = true, reviews = [], issues = {}, priority = 'P1', projectError = false } = {}) => {
+const upstreamRepository = { full_name: 'deepseek-harness/deepseek-harness', id: 101 }
+const forkRepository = { full_name: 'fixture-fork/deepseek-harness', id: 202 }
+
+const policyWorkflow = (repo = upstreamRepository) => ({
+  repository: repo.full_name,
+  repositoryId: String(repo.id),
+})
+
+const policyEvent = (repo = upstreamRepository, pull = {}) => ({
+  repository: repo,
+  pull_request: { number: 10, base: { repo }, ...pull },
+})
+
+const mockPolicyApi = (t, { repo = upstreamRepository, pull = {}, requested = true, reviews = [], issues = {}, priority = 'P1', projectError = false } = {}) => {
   const environment = ['GH_TOKEN', 'GITHUB_TOKEN', 'PROJECT_TOKEN', 'GITHUB_API_URL', 'GITHUB_OUTPUT']
   const previous = new Map(environment.map((key) => [key, process.env[key]]))
   const directory = mkdtempSync(join(tmpdir(), 'dsh-policy-'))
@@ -787,7 +801,7 @@ const mockPolicyApi = (t, { pull = {}, requested = true, reviews = [], issues = 
     const path = new URL(url).pathname + new URL(url).search
     requests.push(path)
     if (path.endsWith('/pulls/10')) return Response.json({
-      draft: false, user: { type: 'User' }, body: 'Refs #2',
+      number: 10, base: { repo }, draft: false, user: { type: 'User' }, body: 'Refs #2',
       labels: [{ name: 'kind/cleanup' }, { name: 'area/infra' }], ...pull,
     })
     if (path.endsWith('/requested_reviewers')) {
@@ -802,6 +816,7 @@ const mockPolicyApi = (t, { pull = {}, requested = true, reviews = [], issues = 
     const number = Number(path.match(/\/issues\/(\d+)$/)?.[1])
     assert.ok(Object.hasOwn(issues, number), 'Unexpected request: ' + path)
     const issue = issues[number]
+    if (typeof issue === 'function') return issue(options)
     return Response.json(issue ?? { message: 'Not Found' }, { status: issue === null ? 404 : 200 })
   })
   return { requests, output, workflowOutput: () => readFileSync(process.env.GITHUB_OUTPUT, 'utf8') }
@@ -815,42 +830,177 @@ for (const [name, pull, requested, count] of [
 ]) {
   test('reads no Issue or Project for a currently exempt ' + name + ' PR', async (t) => {
     const fixture = mockPolicyApi(t, { pull: { body: 'Fixes #999', ...pull }, requested })
-    const event = { pull_request: { number: 10, draft: false, user: { type: 'User' } } }
-    assert.deepEqual(await runPullRequestPreflight(event), { eligible: false, needsProject: false })
+    const event = policyEvent(upstreamRepository, { draft: false, user: { type: 'User' } })
+    assert.deepEqual(await runPullRequestPreflight(event, policyWorkflow()), { eligible: false, needsProject: false })
     assert.equal(fixture.requests.length, count)
     assert.equal(fixture.workflowOutput(), 'eligible=false\nexempt=true\nneeds-project=false\n')
-    await runPullRequestCheck(event)
+    await runPullRequestCheck(event, policyWorkflow())
     assert.equal(fixture.requests.length, count * 2)
     assert.ok(fixture.output.every((text) => text.includes('Issue policy exempt')))
   })
 }
 
+test('reads a ready fork PR and informational Issue from the workflow repository', async (t) => {
+  const workflow = policyWorkflow(forkRepository)
+  const event = policyEvent(forkRepository, {
+    draft: true,
+    body: 'Fixes #999',
+    head: { repo: upstreamRepository },
+  })
+  const pull = { body: 'Refs fixture-fork/deepseek-harness#2; Refs deepseek-harness/deepseek-harness#999' }
+  const fixture = mockPolicyApi(t, { repo: forkRepository, pull, issues: { 2: {}, 4: {} } })
+  const prefix = '/repos/fixture-fork/deepseek-harness'
+  const readPull = [
+    prefix + '/pulls/10',
+    prefix + '/pulls/10/requested_reviewers',
+    prefix + '/pulls/10/reviews?per_page=100',
+  ]
+
+  assert.deepEqual(await runPullRequestPreflight(event, workflow), { eligible: true, needsProject: false })
+  assert.deepEqual(fixture.requests, [...readPull, prefix + '/issues/2'])
+  assert.equal(fixture.workflowOutput(), 'eligible=true\nexempt=false\nneeds-project=false\n')
+
+  pull.body = 'Refs #4'
+  await runPullRequestCheck(event, workflow)
+  assert.deepEqual(fixture.requests, [
+    ...readPull, prefix + '/issues/2',
+    ...readPull, prefix + '/issues/4',
+  ])
+  assert.match(fixture.output.join(''), /Issue policy 通过/)
+})
+
+test('rejects unverified workflow and event repository identities before fetch', async (t) => {
+  const fixture = mockPolicyApi(t)
+  const event = policyEvent(forkRepository)
+  const workflow = policyWorkflow(forkRepository)
+  const otherId = { ...forkRepository, id: upstreamRepository.id }
+  const mismatchedRepo = /workflow repository does not match/i
+  const invalidScope = /valid workflow repository and PR number/i
+
+  for (const [name, inputEvent, inputWorkflow, error] of [
+    ['foreign workflow repository', event, policyWorkflow(upstreamRepository), mismatchedRepo],
+    ['workflow repository with wrong ID', event, { ...workflow, repositoryId: '101' }, mismatchedRepo],
+    ['nondecimal workflow repository ID', event, { ...workflow, repositoryId: '2.02e2' }, invalidScope],
+    ['foreign event repository', { ...event, repository: upstreamRepository }, workflow, mismatchedRepo],
+    ['event repository with wrong ID', { ...event, repository: otherId }, workflow, mismatchedRepo],
+    ['foreign PR base repository', policyEvent(forkRepository, { base: { repo: upstreamRepository } }), workflow, mismatchedRepo],
+    ['PR base repository with wrong ID', policyEvent(forkRepository, { base: { repo: otherId } }), workflow, mismatchedRepo],
+    ['nonpositive PR number', policyEvent(forkRepository, { number: 0 }), workflow, invalidScope],
+    ['unsafe PR number', policyEvent(forkRepository, { number: Number.MAX_SAFE_INTEGER + 1 }), workflow, invalidScope],
+  ]) {
+    await assert.rejects(runPullRequestPreflight(inputEvent, inputWorkflow), error, name)
+    await assert.rejects(runPullRequestCheck(inputEvent, inputWorkflow), error, name)
+  }
+  assert.deepEqual(fixture.requests, [])
+  assert.deepEqual(fixture.output, [])
+})
+
+test('binds the CLI policy commands to the GitHub workflow repository variables', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-policy-cli-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const eventPath = join(directory, 'event.json')
+  const mockPath = join(directory, 'mock.mjs')
+  const policyPath = fileURLToPath(new URL('./policy.mjs', import.meta.url))
+  const repo = { ...forkRepository, full_name: 'Fixture-Fork/DeepSeek-Harness' }
+  writeFileSync(eventPath, JSON.stringify(policyEvent(repo)))
+  writeFileSync(mockPath, [
+    "globalThis.fetch = async (url) => {",
+    "  if (new URL(url).pathname !== '/repos/fixture-fork/deepseek-harness/pulls/10') throw Error('Unexpected mock path')",
+    "  process.stdout.write('mock PR read\\n')",
+    "  return Response.json(" + JSON.stringify({ number: 10, base: { repo }, draft: true, labels: [] }) + ")",
+    "}",
+  ].join('\n'))
+  const env = {
+    SystemRoot: process.env.SystemRoot,
+    GITHUB_EVENT_PATH: eventPath,
+    GITHUB_TOKEN: 'repository-token',
+    GITHUB_REPOSITORY: forkRepository.full_name,
+  }
+  const mockUrl = pathToFileURL(mockPath).href
+  for (const command of ['pr-preflight', 'pr']) {
+    const run = (repositoryId) => spawnSync(process.execPath, ['--import', mockUrl, policyPath, command], {
+      env: { ...env, GITHUB_REPOSITORY_ID: repositoryId },
+      encoding: 'utf8',
+      timeout: 10_000,
+    })
+    const accepted = run(String(forkRepository.id))
+    assert.equal(accepted.error, undefined)
+    assert.equal(accepted.signal, null)
+    assert.equal(accepted.status, 0, accepted.stderr)
+    assert.match(accepted.stdout, /mock PR read/)
+    assert.match(accepted.stdout, /Issue policy exempt/)
+
+    const refused = run(String(upstreamRepository.id))
+    assert.equal(refused.error, undefined)
+    assert.equal(refused.signal, null)
+    assert.equal(refused.status, 1)
+    assert.match(refused.stderr, /workflow repository does not match/)
+    assert.equal(refused.stdout, '')
+  }
+})
+
+test('verifies the returned repository and PR number before granting a draft exemption', async (t) => {
+  const event = policyEvent(forkRepository)
+  const workflow = policyWorkflow(forkRepository)
+  const pull = { draft: true }
+  const fixture = mockPolicyApi(t, { repo: forkRepository, pull })
+  const wrongSnapshot = /REST pull request does not match/i
+
+  for (const [name, number, base] of [
+    ['different number', 11, { repo: forkRepository }],
+    ['missing number', undefined, { repo: forkRepository }],
+    ['foreign repository', 10, { repo: upstreamRepository }],
+    ['same repository name with wrong ID', 10, { repo: { ...forkRepository, id: upstreamRepository.id } }],
+  ]) {
+    Object.assign(pull, { number, base })
+    await assert.rejects(runPullRequestPreflight(event, workflow), wrongSnapshot, name)
+    await assert.rejects(runPullRequestCheck(event, workflow), wrongSnapshot, name)
+  }
+  assert.deepEqual(fixture.requests, Array(8).fill('/repos/fixture-fork/deepseek-harness/pulls/10'))
+  assert.deepEqual(fixture.output, [])
+})
+
+test('refuses resolving fork Issues without contacting the configured Project', async (t) => {
+  const fixture = mockPolicyApi(t, { repo: forkRepository, pull: { body: 'Fixes #2' }, issues: { 2: {} } })
+  const event = policyEvent(forkRepository)
+  const workflow = policyWorkflow(forkRepository)
+  const noProject = /resolving references require a configured Project authority/i
+
+  await assert.rejects(runPullRequestPreflight(event, workflow), noProject)
+  process.env.PROJECT_TOKEN = 'unused-project-token'
+  await assert.rejects(runPullRequestCheck(event, workflow), noProject)
+
+  assert.ok(fixture.requests.includes('/repos/fixture-fork/deepseek-harness/issues/2'))
+  assert.ok(fixture.requests.every((path) => path.startsWith('/repos/fixture-fork/deepseek-harness/')))
+  assert.deepEqual(fixture.output, [])
+})
+
 test('validates informational Issues and ignores PR numbers without Project reads', async (t) => {
   const fixture = mockPolicyApi(t, { pull: { body: 'Refs #2; Fixes #3' }, issues: { 2: {}, 3: { pull_request: {} } } })
-  const event = { pull_request: { number: 10, draft: true, body: 'Fixes #999' } }
-  assert.deepEqual(await runPullRequestPreflight(event), { eligible: true, needsProject: false })
+  const event = policyEvent(upstreamRepository, { draft: true, body: 'Fixes #999' })
+  assert.deepEqual(await runPullRequestPreflight(event, policyWorkflow()), { eligible: true, needsProject: false })
   assert.equal(fixture.requests.length, 5)
   assert.equal(fixture.workflowOutput(), 'eligible=true\nexempt=false\nneeds-project=false\n')
-  await runPullRequestCheck(event)
+  await runPullRequestCheck(event, policyWorkflow())
   assert.equal(fixture.requests.length, 10)
   assert.ok(!fixture.requests.includes('/graphql'))
 })
 
 test('requires a real Issue and explains why stacked PR references do not qualify', async (t) => {
   const fixture = mockPolicyApi(t, { pull: { body: 'Fixes #3' }, issues: { 3: { pull_request: {} } } })
-  await assert.rejects(runPullRequestCheck({ pull_request: { number: 10 } }), /Issue policy 未通过/)
+  await assert.rejects(runPullRequestCheck(policyEvent(), policyWorkflow()), /Issue policy 未通过/)
   assert.equal(fixture.requests.length, 4)
   assert.match(fixture.output.join(''), /PR 编号（包括堆叠依赖 PR）不算 Issue 引用/)
 })
 
 test('fetches Project Priority only for resolving Issues and enforces mismatch', async (t) => {
   const fixture = mockPolicyApi(t, { pull: { body: 'Fixes #2; Refs #4; Fixes #3' }, issues: { 2: {}, 4: {}, 3: { pull_request: {} } } })
-  const event = { pull_request: { number: 10 } }
-  assert.deepEqual(await runPullRequestPreflight(event), { eligible: true, needsProject: true })
+  const event = policyEvent()
+  assert.deepEqual(await runPullRequestPreflight(event, policyWorkflow()), { eligible: true, needsProject: true })
   assert.equal(fixture.requests.length, 6)
   assert.equal(fixture.workflowOutput(), 'eligible=true\nexempt=false\nneeds-project=true\n')
   assert.ok(!fixture.requests.includes('/graphql'))
-  await assert.rejects(runPullRequestCheck(event), /Issue policy 未通过/)
+  await assert.rejects(runPullRequestCheck(event, policyWorkflow()), /Issue policy 未通过/)
   assert.equal(fixture.requests.length, 13)
   assert.equal(fixture.requests.filter((path) => path === '/graphql').length, 1)
   assert.match(fixture.output.join(''), /PR Priority 应为 p1/)
@@ -858,24 +1008,52 @@ test('fetches Project Priority only for resolving Issues and enforces mismatch',
 
 test('enforces current metadata on title edits and prior reviews without requested reviewers', async (t) => {
   const fixture = mockPolicyApi(t, { requested: false, reviews: [{}], pull: { labels: [] }, issues: { 2: {} } })
-  await assert.rejects(runPullRequestCheck({ action: 'edited', changes: { title: { from: 'old' } }, pull_request: { number: 10 } }), /Issue policy 未通过/)
+  const event = { ...policyEvent(), action: 'edited', changes: { title: { from: 'old' } } }
+  await assert.rejects(runPullRequestCheck(event, policyWorkflow()), /Issue policy 未通过/)
   assert.equal(fixture.requests.length, 4)
   assert.match(fixture.output.join(''), /PR 必须至少有一个 area/)
 })
 
-test('fails closed on missing referenced numbers and unavailable Project access', async (t) => {
-  const fixture = mockPolicyApi(t, { pull: { body: 'Fixes #2' }, issues: { 2: null } })
-  await assert.rejects(runPullRequestPreflight({ pull_request: { number: 10 } }), /404/)
-  assert.equal(fixture.requests.length, 4)
+test('fails closed on a missing fork Issue in both policy stages', async (t) => {
+  const fixture = mockPolicyApi(t, { repo: forkRepository, issues: { 2: null } })
+  const event = policyEvent(forkRepository)
+  const workflow = policyWorkflow(forkRepository)
+  await assert.rejects(runPullRequestPreflight(event, workflow), /404/)
+  await assert.rejects(runPullRequestCheck(event, workflow), /404/)
+  assert.deepEqual(
+    fixture.requests.filter((path) => path.includes('/issues/')),
+    Array(2).fill('/repos/fixture-fork/deepseek-harness/issues/2'),
+  )
+  assert.ok(fixture.requests.every((path) => path.startsWith('/repos/fixture-fork/deepseek-harness/')))
+})
+
+test('refuses a relocated fork Issue in both policy stages', async (t) => {
+  const redirectModes = []
+  const fixture = mockPolicyApi(t, {
+    repo: forkRepository,
+    issues: { 2: ({ redirect }) => {
+      redirectModes.push(redirect)
+      if (redirect === 'error') throw new TypeError('Mock Issue redirect refused')
+      return Response.json({ number: 2 })
+    } },
+  })
+  const event = policyEvent(forkRepository)
+  const workflow = policyWorkflow(forkRepository)
+
+  await assert.rejects(runPullRequestPreflight(event, workflow), /Mock Issue redirect refused/)
+  await assert.rejects(runPullRequestCheck(event, workflow), /Mock Issue redirect refused/)
+  assert.deepEqual(redirectModes, ['error', 'error'])
+  assert.ok(fixture.requests.every((path) => path.startsWith('/repos/fixture-fork/deepseek-harness/')))
+  assert.deepEqual(fixture.output, [])
 })
 
 test('fails closed when current resolving Issues need a Project token preflight did not mint', async (t) => {
   const pull = { draft: true, body: 'Fixes #2' }
   const fixture = mockPolicyApi(t, { pull, issues: { 2: {} }, projectError: true })
-  const event = { pull_request: { number: 10 } }
-  assert.deepEqual(await runPullRequestPreflight(event), { eligible: false, needsProject: false })
+  const event = policyEvent()
+  assert.deepEqual(await runPullRequestPreflight(event, policyWorkflow()), { eligible: false, needsProject: false })
   pull.draft = false
-  await assert.rejects(runPullRequestCheck(event), /Project access denied/)
+  await assert.rejects(runPullRequestCheck(event, policyWorkflow()), /Project access denied/)
   assert.equal(fixture.requests.length, 6)
 })
 
@@ -1014,7 +1192,8 @@ test('reads policy snapshots in reference order and only resolving Project prior
     pull: { body: 'Refs #4; Fixes #3; Fixes #2' },
     issues: { 2: {}, 3: { pull_request: {} }, 4: {} },
   })
-  assert.deepEqual(await pullRequestSnapshot(10), {
+  const scope = { repository: upstreamRepository.full_name, repositoryId: upstreamRepository.id, number: 10 }
+  assert.deepEqual(await pullRequestSnapshot(scope), {
     number: 10,
     isDraft: false,
     authorType: 'User',

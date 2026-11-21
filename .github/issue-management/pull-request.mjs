@@ -12,22 +12,36 @@ import {
   validatePullRequest,
 } from './rules.mjs'
 
-/**
- * Resolve all same-repository body references with REST, excluding pull-request numbers.
- * @param {number} number Pull-request number.
- * @param {{body?: string}} pull Current REST pull-request data.
- * @returns {Promise<object>} Issue-only references and placeholder priorities; never reads Project data.
- */
-export async function resolvingReferencesSnapshot(number, pull) {
-  const references = parseReferences({
-    body: pull.body ?? '',
-    repository: `${config.organization}/${config.repository}`,
-  })
+const projectRepository = `${config.organization}/${config.repository}`
+const policyReadOptions = { redirect: 'error' }
+
+function matchesRepository(repo, repository, repositoryId) {
+  return repo?.id === repositoryId && typeof repo?.full_name === 'string'
+    && repo.full_name.toLowerCase() === repository.toLowerCase()
+}
+
+function workflowPullRequest(event, workflow) {
+  const { repository, repositoryId } = workflow
+  const number = event?.pull_request?.number
+  const id = Number(repositoryId)
+  if (typeof repository !== 'string' || !/^[a-z\d_.-]+\/[a-z\d_.-]+$/i.test(repository)
+    || repository.split('/').some(part => part === '.' || part === '..')
+    || typeof repositoryId !== 'string' || !/^[1-9]\d*$/.test(repositoryId)
+    || !Number.isSafeInteger(id) || !Number.isSafeInteger(number) || number <= 0) {
+    throw new Error('Issue policy requires a valid workflow repository and PR number.')
+  }
+  if (!matchesRepository(event.repository, repository, id)
+    || !matchesRepository(event.pull_request.base?.repo, repository, id)) {
+    throw new Error('Issue policy workflow repository does not match the event repository and PR base.')
+  }
+  return { repository, repositoryId: id, number }
+}
+
+async function resolvingReferencesSnapshot(repository, number, pull, readOptions) {
+  const references = parseReferences({ body: pull.body ?? '', repository })
   const issues = new Map()
   for (const issueNumber of references.all) {
-    const issue = await api(
-      `/repos/${config.organization}/${config.repository}/issues/${issueNumber}`,
-    )
+    const issue = await api(`/repos/${repository}/issues/${issueNumber}`, readOptions)
     if (!issue.pull_request) issues.set(issueNumber, { priority: null })
   }
   return {
@@ -39,12 +53,16 @@ export async function resolvingReferencesSnapshot(number, pull) {
 
 /**
  * Read current PR policy inputs, skipping references for exempt PRs.
- * @param {number} number Pull-request number.
+ * @param {{repository: string, repositoryId: number, number: number}} scope Verified workflow PR.
  * @param {boolean} includeProject Read Project Priority for resolving Issues when true.
- * @returns {Promise<object>} Policy snapshot; rejects any failed read and performs no writes.
+ * @returns {Promise<object>} Policy snapshot; rejects a failed read or identity mismatch and performs no writes.
  */
-export async function pullRequestSnapshot(number, includeProject = true) {
-  const pull = await api(`/repos/${config.organization}/${config.repository}/pulls/${number}`)
+export async function pullRequestSnapshot({ repository, repositoryId, number }, includeProject = true) {
+  const path = `/repos/${repository}/pulls/${number}`
+  const pull = await api(path, policyReadOptions)
+  if (pull?.number !== number || !matchesRepository(pull.base?.repo, repository, repositoryId)) {
+    throw new Error('Issue policy REST pull request does not match the verified repository and number.')
+  }
   const snapshot = {
     number,
     isDraft: pull.draft,
@@ -57,13 +75,16 @@ export async function pullRequestSnapshot(number, includeProject = true) {
   }
   if (snapshot.isDraft || ['Bot', 'App'].includes(snapshot.authorType)) return snapshot
   const [reviewRequests, reviews] = await Promise.all([
-    api(`/repos/${config.organization}/${config.repository}/pulls/${number}/requested_reviewers`),
-    api(`/repos/${config.organization}/${config.repository}/pulls/${number}/reviews?per_page=100`),
+    api(`${path}/requested_reviewers`, policyReadOptions),
+    api(`${path}/reviews?per_page=100`, policyReadOptions),
   ])
   snapshot.reviewRequestCount = reviewRequests.users.length + reviewRequests.teams.length
   snapshot.reviewCount = reviews.length
   if (!requiresPullRequestPolicy(snapshot)) return snapshot
-  Object.assign(snapshot, await resolvingReferencesSnapshot(number, pull))
+  Object.assign(snapshot, await resolvingReferencesSnapshot(repository, number, pull, policyReadOptions))
+  if (snapshot.references.resolving.length > 0 && repository.toLowerCase() !== projectRepository.toLowerCase()) {
+    throw new Error('Issue policy resolving references require a configured Project authority for the workflow repository.')
+  }
   if (includeProject) {
     for (const issueNumber of snapshot.references.resolving) {
       const context = await projectContext(issueNumber)
@@ -79,9 +100,9 @@ export async function pullRequestSnapshot(number, includeProject = true) {
  * @returns {Promise<object>} Lifecycle snapshot without Project reads or writes.
  */
 export async function lifecyclePullRequestSnapshot(number) {
-  const pull = await api(`/repos/${config.organization}/${config.repository}/pulls/${number}`)
+  const pull = await api(`/repos/${projectRepository}/pulls/${number}`)
   return {
-    ...(await resolvingReferencesSnapshot(number, pull)),
+    ...(await resolvingReferencesSnapshot(projectRepository, number, pull)),
     createdAt: pull.created_at,
   }
 }
@@ -91,11 +112,12 @@ const EXEMPT_MESSAGE =
 
 /**
  * Determine current policy eligibility and Project access needs without Project credentials.
- * @param {{pull_request: {number: number}}} event GitHub event identifying the PR.
+ * @param {object} event GitHub event identifying the PR and repository.
+ * @param {{repository?: string, repositoryId?: string}} workflow GitHub Actions repository identity.
  * @returns {Promise<{eligible: boolean, needsProject: boolean}>} Trusted workflow decisions.
  */
-export async function runPullRequestPreflight(event) {
-  const pull = await pullRequestSnapshot(event.pull_request.number, false)
+export async function runPullRequestPreflight(event, workflow) {
+  const pull = await pullRequestSnapshot(workflowPullRequest(event, workflow), false)
   const eligible = requiresPullRequestPolicy(pull)
   const needsProject = eligible && pull.references.resolving.length > 0
   if (process.env.GITHUB_OUTPUT) {
@@ -110,11 +132,12 @@ export async function runPullRequestPreflight(event) {
 
 /**
  * Enforce all PR rules against current GitHub state, independently of preflight.
- * @param {{pull_request: {number: number}}} event GitHub event identifying the PR.
+ * @param {object} event GitHub event identifying the PR and repository.
+ * @param {{repository?: string, repositoryId?: string}} workflow GitHub Actions repository identity.
  * @returns {Promise<void>} Resolves on success or exemption; rejects policy failures.
  */
-export async function runPullRequestCheck(event) {
-  const pull = await pullRequestSnapshot(event.pull_request.number)
+export async function runPullRequestCheck(event, workflow) {
+  const pull = await pullRequestSnapshot(workflowPullRequest(event, workflow))
   const errors = validatePullRequest(pull)
   if (errors.length > 0) {
     for (const error of errors) process.stdout.write(`::error::${error}\n`)
