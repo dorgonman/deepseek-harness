@@ -101,6 +101,8 @@ For each candidate the filter builds a plain-text prompt from the most recent us
 
 ### Source map
 
+The npm package includes the source exported under `./src/*` and the generated declaration and JavaScript source maps.
+
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: `DecisionRelevanceFilter` service, `project`, readout parsing |

@@ -101,6 +101,8 @@ kind: "package-reference"
 
 ### 源码地图
 
+npm 包包含 `./src/*` 导出的源代码，以及生成的声明映射和 JavaScript 源码映射。
+
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 插件入口：`DecisionRelevanceFilter` 服务、`project`、读数解析 |
