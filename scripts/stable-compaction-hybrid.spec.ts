@@ -41,7 +41,7 @@ const fault = [{
 
 async function withContext(
   run: (ctx: Context, root: string) => Promise<void>,
-  config: BasicCompactionConfig = {},
+  config: { [Key in keyof BasicCompactionConfig]?: BasicCompactionConfig[Key] | undefined } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-hybrid-compaction-'))
   const ctx = new Context()
@@ -92,6 +92,54 @@ function requestText(request: GenerateOptions): string {
   return request.messages.flatMap(message => message.content)
     .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
 }
+
+it.each([
+  ['implicit', undefined],
+  ['explicit', 960],
+] as const)('uses the %s 960-token same-route summary cap under pressure', async (mode, maxTokens) => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([
+      textResponse('Original reply.'),
+      request => textResponse(request.purpose === 'compaction' ? 'Smaller summary.' : 'Ordinary continuation.'),
+      textResponse('Ordinary continuation.'),
+    ])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const sessionId = SessionId(`hybrid-pressure-cap-${mode}`)
+    const agentOptions = { ...wide, model: 'small', maxTokens: 512 }
+    const owned = await ctx.agents.create({ sessionId, agentOptions, meta: { cwd: root } })
+    await send(owned.agent, 'SAME_ROUTE_ORIGINAL '.repeat(480))
+    await send(owned.agent, 'Continue on the same 8,192-token route.')
+
+    const summaryCalls = chat.requests.filter(request => request.purpose === 'compaction')
+    expect(summaryCalls.map(request => request.maxTokens)).toEqual([960])
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    expect(checkpoints(events)).toHaveLength(1)
+  }, {
+    auto: true, thresholdRatio: 0.1, headroomTokens: undefined, maxTokens,
+    summarizationProvider: '', summarizationModel: '', summarizationFallback: 'latest-route',
+  })
+})
+
+it('refuses an adaptive summary when the source completion reserve is unknown', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Original reply.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const sessionId = SessionId('hybrid-unknown-source-reserve')
+    const agentOptions = { provider: wide.provider, model: wide.model }
+    const owned = await ctx.agents.create({ sessionId, agentOptions, meta: { cwd: root } })
+    await send(owned.agent, 'History with no known completion reserve. '.repeat(200))
+
+    await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toThrow()
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    expect(events.findLast(event => event.type === 'compaction/end')?.data.error)
+      .toContain('source completion reserve is unavailable')
+    expect(chat.requests.filter(request => request.purpose === 'compaction')).toEqual([])
+    expect(checkpoints(events)).toHaveLength(0)
+  }, {
+    headroomTokens: undefined, maxTokens: undefined,
+    summarizationProvider: '', summarizationModel: '', summarizationFallback: 'latest-route',
+  })
+})
 
 it('loads Hybrid and runs /compact three times under the selected chunk budget without prior summaries', async () => {
   await withContext(async (ctx, root) => {

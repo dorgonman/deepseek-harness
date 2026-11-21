@@ -7,7 +7,7 @@ import {
   deriveEventMessage, foldSurface, isAppendSurfaceEvent, SessionSeq, type EpochHeader, type SessionEvent,
 } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-query'
-import { resolveCompactSpec, resolveTargetPolicy } from './config.ts'
+import { resolveCompactSpec, resolveSummaryMaxTokens, resolveTargetPolicy } from './config.ts'
 import { projectSummaryTranscript } from './request-projection.ts'
 import { selectCompactableRange } from './region.ts'
 import type { CompactionChunkCall, RegionSummary, SurfaceSelection } from './region.ts'
@@ -190,9 +190,16 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     const target = policy.summarizationProvider === ''
       ? { provider: sourceRoute.provider, model: sourceRoute.model }
       : { provider: policy.summarizationProvider, model: policy.summarizationModel }
-    const config = { ...target, maxTokens: policy.maxTokens }
-    const first = await prepareSummaryCall(ctx, config, signal)
-    const window = first.window
+    const resolveMaxTokens = policy.adaptiveHeadroom === 'pressure-and-summary'
+      ? (window: number, defaultMaxTokens: number | undefined) => {
+        const reserve = sourceRoute.maxTokens ?? defaultMaxTokens
+        if (reserve === undefined) throw new Error('compaction: source completion reserve is unavailable')
+        return resolveSummaryMaxTokens(policy, window - reserve)
+      }
+      : undefined
+    const prepare = () => prepareSummaryCall(ctx, { ...target, maxTokens: policy.maxTokens }, signal, resolveMaxTokens)
+    const first = await prepare()
+    const { window, maxTokens } = first
     const destinationCall = admission === undefined ? await ctx.llm.prepareCall(destination.config, signal) : undefined
     const destinationWindow = admission?.contextWindow ?? destinationCall?.context?.contextWindow
     const destinationHeader = destinationCall === undefined ? destination : { ...destination, config: destinationCall.config }
@@ -232,17 +239,17 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       let message = project(group, false)
       let tokens = meter.estimateMessage(message)
       let toolBodiesOmitted = false
-      if (fixed + tokens + config.maxTokens > window && group.some(({ message }) => message.role === 'tool')) {
+      if (fixed + tokens + maxTokens > window && group.some(({ message }) => message.role === 'tool')) {
         message = project(group, true)
         tokens = meter.estimateMessage(message)
         toolBodiesOmitted = true
       }
-      if (fixed + tokens + config.maxTokens > window) {
+      if (fixed + tokens + maxTokens > window) {
         throw new LlmError('compaction: one balanced history group exceeds the summarizer window', 'SUMMARY_CAPACITY_EXCEEDED')
       }
       const groupReceipt = { eventSeqs: group.map(({ event }) => event.seq), toolBodiesOmitted }
       const last = chunks.at(-1)
-      if (last !== undefined && last.tokens + tokens + config.maxTokens <= window) {
+      if (last !== undefined && last.tokens + tokens + maxTokens <= window) {
         last.messages.push(message)
         last.tokens += tokens
         last.groups.push(groupReceipt)
@@ -254,11 +261,11 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     const summary: Array<{ type: 'text'; text: string }> = []
     const chunkCalls: CompactionChunkCall[] = []
     for (const [index, chunk] of chunks.entries()) {
-      const prepared = index === 0 ? first : await prepareSummaryCall(ctx, config, signal)
+      const prepared = index === 0 ? first : await prepare()
       const { call } = prepared
       assertCurrent()
-      if (prepared.window !== window || call.config.maxTokens !== config.maxTokens
-        || chunk.tokens + config.maxTokens > window) {
+      if (prepared.window !== window || call.config.maxTokens !== maxTokens
+        || chunk.tokens + maxTokens > window) {
         throw new LlmError('compaction: summarizer capacity changed', 'SUMMARY_TARGET_UNVERIFIED')
       }
       const assembler = new BlockAssembler()
@@ -272,7 +279,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       const blocks = assembler.blocks()
       const rawOutput = blocks.filter(block => block.type === 'text' || block.type === 'reasoning')
       if (finish.kind !== 'stop' || rawOutput.length !== blocks.length
-        || (assembler.usage?.outputTokens ?? 0) > config.maxTokens) {
+        || (assembler.usage?.outputTokens ?? 0) > maxTokens) {
         throw new Error('compaction: summarizer did not return a complete text checkpoint')
       }
       const text = rawOutput.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
@@ -291,7 +298,8 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       })
     }
     return {
-      ...config,
+      ...target,
+      maxTokens,
       summary,
       chunkCalls,
       validateCommit(checkpoint) {

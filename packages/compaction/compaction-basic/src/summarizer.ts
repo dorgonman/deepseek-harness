@@ -134,13 +134,16 @@ function requireTextSummarizer(info: LlmResolvedModelInfo): void {
  * @param ctx - context providing the LLM service.
  * @param config - selected provider, model, and call controls.
  * @param signal - cancellation forwarded to call preparation.
- * @returns the prepared call, its context window, and the adapter's tool capability.
+ * @param resolveMaxTokens - optionally set the cap from that call's captured window and default completion reserve.
+ * @returns the prepared call, its context window and output cap, and the adapter's tool capability.
  */
 export async function prepareSummaryCall(
   ctx: Context,
-  config: LlmCallConfig,
+  config: LlmCallConfig & { maxTokens: number },
   signal?: AbortSignal,
-): Promise<{ call: PreparedLlmCall; window: number; nativeTools: boolean | undefined }> {
+  resolveMaxTokens?: (window: number, defaultMaxTokens: number | undefined) => number,
+): Promise<{ call: PreparedLlmCall; window: number; maxTokens: number; nativeTools: boolean | undefined }> {
+  let maxTokens = config.maxTokens
   let nativeTools: boolean | undefined
   let call: PreparedLlmCall
   const { provider, model } = config
@@ -148,7 +151,11 @@ export async function prepareSummaryCall(
     call = await ctx.llm.prepareCall(config, signal, (controls, info) => {
       requireTextSummarizer(info)
       nativeTools = info.nativeTools
-      return { ...controls }
+      const window = info.context?.contextWindow
+      if (resolveMaxTokens !== undefined && window !== undefined) {
+        maxTokens = resolveMaxTokens(window, info.defaultMaxTokens)
+      }
+      return { ...controls, maxTokens }
     })
   } catch (error: unknown) {
     signal?.throwIfAborted()
@@ -169,7 +176,7 @@ export async function prepareSummaryCall(
       'SUMMARY_TARGET_UNVERIFIED',
     )
   }
-  return { call, window, nativeTools }
+  return { call, window, maxTokens, nativeTools }
 }
 
 /**
