@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-This package helps a model escape loops in which it calls the same tool with identical arguments without making progress. At configured repeat counts, it asks the model to inspect the previous result and change approach or finish. The reminder is advisory: it never blocks or delays a legitimate repeated call. Past a configurable repeat count the guard blocks the repeated call instead of running it again, so a chain that keeps repeating cannot run unbounded. Repeats are tracked separately for each agent and cleared by a new user message. The `dsh` base bundle enables the package with reminders at 3, 5, and 8 repeats and blocking at 8.
+The guard tracks consecutive calls to the same tool with identical arguments and advises the model to inspect the previous result, change approach, or finish. Each agent has its own count, which resets on a new user message. The `dsh` base bundle sets reminder thresholds at 3, 5, and 8. At the separate block threshold, which defaults to 8 and is configurable, a corrective tool error replaces the tool result and any reminder.
 
 ## Table of Contents
 
