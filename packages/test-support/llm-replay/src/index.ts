@@ -499,7 +499,7 @@ export function deriveReplayScript(events: SessionEvent[]): ReplayEntry[] {
         readonly llmStreamCall?: true
         readonly rawOutput?: ContentBlock[]
         readonly usage?: TokenUsage
-        readonly chunkCalls?: readonly { rawOutput: ContentBlock[]; usage?: TokenUsage }[]
+        readonly chunkCalls?: ({ rawOutput?: ContentBlock[]; usage?: TokenUsage } | null | undefined)[]
       } = event.data
       if (persisted.chunkCalls !== undefined) {
         if (persisted.llmStreamCall !== undefined || persisted.rawOutput !== undefined

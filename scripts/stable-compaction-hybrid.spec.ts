@@ -159,7 +159,8 @@ it('loads Hybrid and runs /compact three times under the selected chunk budget w
     expect(estimatedOriginalInput).toBe(703_679)
     const original = (await ctx.sessionQuery.readSession(sessionId)).events
     const firstResult = await ctx.commands.execute(owned.agent, '/compact', [], signal)
-    expect(firstResult?.result).toMatchObject({ kind: 'success', text: expect.stringContaining('Compacted') })
+    expect(firstResult?.result.kind).toBe('success')
+    expect(firstResult?.result.text).toContain('Compacted')
     expect(summary.requests.length).toBeGreaterThan(1)
     for (const word of ['second', 'third']) {
       await send(owned.agent, `Fresh ${word} round context.`.repeat(40))
@@ -456,15 +457,14 @@ it.each(['pressure', 'overflow'] as const)('refuses further dispatch after a %s 
     expect(after.slice(0, before.length)).toEqual(before)
     expect(checkpoints(after)).toHaveLength(1)
     expect(after.filter(event => event.type === 'compaction/end')).toHaveLength(1)
-    expect(after.at(-1)).toMatchObject({
-      type: 'turn/end',
-      data: { reason: {
-        kind: 'error',
-        error: trigger === 'pressure'
-          ? { message: expect.stringContaining('synthetic journal flush failure') }
-          : { code: CONTEXT_WINDOW_EXCEEDED_CODE, message: 'synthetic context overflow' },
-      } },
-    })
+    const end = after.at(-1)
+    const reason = end?.type === 'turn/end' ? end.data.reason : undefined
+    const failure = reason?.kind === 'error' ? reason.error : undefined
+    if (trigger === 'pressure') {
+      expect(failure?.message).toContain('synthetic journal flush failure')
+    } else {
+      expect(failure).toMatchObject({ code: CONTEXT_WINDOW_EXCEEDED_CODE, message: 'synthetic context overflow' })
+    }
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.5 })
 })
@@ -526,7 +526,8 @@ it.each(['cancellation', 'mutation'] as const)('refuses a checkpoint after %s du
     expect(after.slice(0, before.length)).toEqual(before)
     expect(checkpoints(after)).toHaveLength(0)
     expect(after.filter(event => event.type === 'compaction/summary')).toHaveLength(0)
-    expect(after.at(-1)).toMatchObject({ type: 'compaction/end', data: { error: expect.any(String) } })
+    const end = after.at(-1)
+    expect(typeof (end?.type === 'compaction/end' ? end.data.error : undefined)).toBe('string')
     if (condition === 'mutation') expect(after).toContainEqual(mutation)
     await owned.dispose()
   })

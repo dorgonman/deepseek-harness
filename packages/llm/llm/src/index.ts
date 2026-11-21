@@ -885,7 +885,7 @@ export class LlmRuntime extends TypertRemoteService {
       ...inputModalities === undefined ? {} : { inputModalities },
       ...context === undefined ? {} : { context: { contextWindow: context.contextWindow } },
       ...defaultMaxTokens === undefined ? {} : { defaultMaxTokens },
-      ...requestProtocol === undefined ? {} : { requestProtocol: requestProtocol as 'kinf-decision-v1' },
+      ...requestProtocol === undefined ? {} : { requestProtocol },
       ...resolved.nativeTools === undefined ? {} : { nativeTools: resolved.nativeTools },
       ...resolved.inputProjectionPolicy === undefined ? {} : { inputProjectionPolicy: resolved.inputProjectionPolicy },
       ...resolved.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: resolved.systemPromptUpdate },

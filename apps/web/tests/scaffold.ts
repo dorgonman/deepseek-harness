@@ -1194,7 +1194,7 @@ function mapAttachmentFields(log: string, mapPath: (path: string) => string): st
   const mapArguments = (args: string) =>
     args.replace(/("file_path"\s*:\s*)("(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4}))*")/gu,
       (original, field: string, encoded: string) => {
-        const path: string = JSON.parse(encoded)
+        const path = JSON.parse(encoded) as string
         const mapped = mapPath(path)
         return mapped === path ? original : field + JSON.stringify(mapped)
       })
