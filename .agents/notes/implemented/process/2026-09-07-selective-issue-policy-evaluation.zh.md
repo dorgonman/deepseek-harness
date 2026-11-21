@@ -16,7 +16,7 @@ Status: implemented
 
 工作流在调用命令前检查受信任检出中的选择性预检能力标记。缺少标记的检出对人类 PR 执行完整旧版校验，并保留旧版 Bot/App 豁免。这支持 PR 工作流 YAML 与缺少预检功能的默认分支代码配合执行；执行错误不会触发回退。
 
-强制范围内的 PR 通过仓库 REST 读取解析引用。信息型引用无需 Project 访问即可证明 Issue 身份。只有解决型引用指向的实际 Issue 需要读取 Project Priority；PR 编号既不能满足 Issue 引用要求，也不会引发 Project 查询。[所属参考文档](../../../../.github/issue-management/README.zh.md)定义元数据校验与失败行为。
+策略使用经过验证的工作流仓库读取 PR 和同仓库引用。REST 重定向可能将查询转向其他仓库，因此会导致校验失败。信息型引用无需访问 Project 即可确认 Issue 身份。解决型引用指向实际 Issue 时，需要从为已验证仓库配置的 Project 读取 Priority。PR 编号既不能满足 Issue 引用要求，也不会引发 Project 查询。[所属参考文档](../../../../.github/issue-management/README.zh.md)定义元数据校验与失败行为。
 
 [Issue lifecycle](../../../../.github/workflows/issue-lifecycle.yml)订阅与状态相关的 PR 事件，并过滤仅标题编辑。它不订阅 PR 推送、PR 标签变更或 Issue 指派变更。job 条件在 runner 分配前排除 approved/commented 评审。请求修改的评审保留其状态命令。
 
@@ -25,6 +25,8 @@ Status: implemented
 ## 考虑过的替代方案
 
 **读取每个被引用 Issue 的 Project 字段。** 信息型引用不约束 Priority，因此这些查询只增加失败依赖，不贡献校验结果。
+
+**使用 Project 配置中的仓库进行 REST 查询。** PR 和 Issue 编号仅在各自的仓库内有效。在分叉仓库中，这种做法可能读取同编号的无关记录，并据此作出错误的强制范围或 Priority 判定。
 
 **为批准与评论保留成功的无操作生命周期 job。** 这可以保持绿色 job 展示，却会为没有生命周期命令的事件分配 runner。生命周期与保留的必需策略 job 相互独立。
 
@@ -40,4 +42,4 @@ Status: implemented
 
 ## 验证
 
-[策略测试](../../../../.github/issue-management/policy.test.mjs)验证早期豁免、仅使用 REST 的信息型引用、实际 Issue 过滤、解决型 Priority 读取及失败，以及生命周期命令选择。[工作流测试](../../../../scripts/ci-workflow.spec.ts)验证 Project token 条件、保留的必需 job、精简后的订阅及 runner 级生命周期过滤。本地 fixture 不能证明实际 webhook 交付或计费结果。
+[策略测试](../../../../.github/issue-management/policy.test.mjs)验证早期豁免、分叉仓库内的 REST 读取、仓库不匹配与重定向拒绝、实际 Issue 过滤、解决型 Priority 读取及失败，以及生命周期命令选择。[工作流测试](../../../../scripts/ci-workflow.spec.ts)验证 Project token 条件、保留的必需 job、精简后的订阅及 runner 级生命周期过滤。本地 fixture 不能证明实际 webhook 交付或计费结果。

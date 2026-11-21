@@ -16,7 +16,7 @@ Lifecycle events have a separate cost: an approval, comment, push, label change,
 
 The workflow checks the trusted checkout for a selective-preflight capability marker before invoking the command. A checkout without the marker uses full legacy validation for human PRs and preserves the legacy Bot/App exemption. This supports PR workflow YAML running against default-branch code that lacks preflight; execution errors never select the fallback.
 
-Eligible PRs resolve references through repository REST reads. Informational references prove Issue identity without Project access. Only actual Issues named by resolving references require Project Priority reads; a PR number cannot satisfy the Issue requirement or cause a Project query. [The owner reference](../../../../.github/issue-management/README.md) defines metadata validation and failure behavior.
+Policy reads PRs and same-repository references using the verified workflow repository. REST redirects fail validation because they can take a lookup outside that repository. Informational references prove Issue identity without Project access. Actual Issues named by resolving references require Priority reads from a Project configured for the verified repository. A PR number cannot satisfy the Issue requirement or cause a Project query. [The owner reference](../../../../.github/issue-management/README.md) defines metadata validation and failure behavior.
 
 [Issue lifecycle](../../../../.github/workflows/issue-lifecycle.yml) subscribes to status-relevant PR events and filters title-only edits. It does not subscribe to PR pushes or label changes, or Issue assignment changes. Its job condition rejects approved/commented reviews before runner allocation. Changes-requested reviews retain their status command.
 
@@ -25,6 +25,8 @@ This scheduling decision partially supersedes the no-op-job scheduling in [event
 ## Alternatives considered
 
 **Read every referenced Issue's Project fields.** Informational references do not constrain Priority, so these queries add failure dependencies without contributing a validation result.
+
+**Use the configured Project repository for REST lookups.** PR and Issue numbers are local to a repository. On forks this can load unrelated records with the same numbers and apply the wrong eligibility or Priority decision.
 
 **Keep successful no-op lifecycle jobs for approvals and comments.** That preserves a green job presentation but allocates a runner for an event with no lifecycle command. Lifecycle is separate from the retained required policy job.
 
@@ -40,4 +42,4 @@ Omitted lifecycle events cannot repair stale Project state. Event replay and con
 
 ## Verification
 
-[Policy tests](../../../../.github/issue-management/policy.test.mjs) verify early exemptions, REST-only informational references, actual-Issue filtering, resolving Priority reads and failures, and the lifecycle command selection. [Workflow tests](../../../../scripts/ci-workflow.spec.ts) verify Project-token conditions, the retained required job, pruned subscriptions, and runner-level lifecycle filtering. Local fixtures do not establish live webhook delivery or billing outcomes.
+[Policy tests](../../../../.github/issue-management/policy.test.mjs) verify early exemptions, fork-local REST reads, repository mismatch and redirect rejection, actual-Issue filtering, resolving Priority reads and failures, and the lifecycle command selection. [Workflow tests](../../../../scripts/ci-workflow.spec.ts) verify Project-token conditions, the retained required job, pruned subscriptions, and runner-level lifecycle filtering. Local fixtures do not establish live webhook delivery or billing outcomes.
