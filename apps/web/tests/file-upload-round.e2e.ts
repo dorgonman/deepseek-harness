@@ -20,16 +20,21 @@ import {
 } from './scaffold.ts'
 import { connectFreshWorkspace, newEnglishPage, saveFailureShot } from './support.ts'
 
-const SNAPSHOT_DIR = fileURLToPath(new URL('../../../snapshots/web/file-upload-round', import.meta.url))
-const FIXTURE = fileURLToPath(new URL('../../../snapshots/web/file-upload-round/session.v3.jsonl', import.meta.url))
-const UI_EXPECTED = fileURLToPath(new URL('../../../snapshots/web/file-upload-round/ui.expected.md', import.meta.url))
-const TRAJECTORY_EXPECTED = fileURLToPath(new URL('../../../snapshots/web/file-upload-round/trajectory.expected.md', import.meta.url))
-const TRAJECTORY_STATUS_EXPECTED = fileURLToPath(new URL('../../../snapshots/web/file-upload-round/trajectory-status.expected.md', import.meta.url))
-const OVERRIDE = fileURLToPath(new URL('../../../snapshots/web/file-upload-round/replay.override.json', import.meta.url))
+const WINDOWS = process.platform === 'win32'
+const SNAPSHOT_ROOT = new URL(WINDOWS
+  ? '../../../snapshots/web/file-upload-round-windows/'
+  : '../../../snapshots/web/file-upload-round/', import.meta.url)
+const SNAPSHOT_DIR = fileURLToPath(SNAPSHOT_ROOT)
+const FIXTURE = fileURLToPath(new URL(WINDOWS ? 'session.v4.jsonl' : 'session.v3.jsonl', SNAPSHOT_ROOT))
+const UI_EXPECTED = fileURLToPath(new URL('ui.expected.md', SNAPSHOT_ROOT))
+const TRAJECTORY_EXPECTED = fileURLToPath(new URL('trajectory.expected.md', SNAPSHOT_ROOT))
+const TRAJECTORY_STATUS_EXPECTED = fileURLToPath(new URL('trajectory-status.expected.md', SNAPSHOT_ROOT))
+const OVERRIDE = fileURLToPath(new URL('replay.override.json', SNAPSHOT_ROOT))
 const DRAFT_EXPECTED = fileURLToPath(new URL('./expected/file-upload-round/draft.expected.md', import.meta.url))
 const HISTORY_EXPECTED = fileURLToPath(new URL('./expected/file-upload-round/history.expected.md', import.meta.url))
 const IMAGE_FIXTURE = fileURLToPath(new URL('../../../snapshots/session/read-image/workspace/red.png', import.meta.url))
 const MODE = webSnapshotMode()
+const SHARED_GOLDEN_MODE = WINDOWS && MODE === 'refresh' ? 'replay' : MODE
 
 /** The uploaded fixture file: constant bytes so record and replay share one content digest. */
 const FILE_NAME = 'poem.txt'
@@ -267,7 +272,7 @@ describe('web e2e: generic file upload through the real assembly', () => {
         noWrap: getComputedStyle(element).flexWrap === 'nowrap',
       }
     })
-    await compareOrRefreshGolden(DRAFT_EXPECTED, renderDraftRailGeometry(geometry), MODE)
+    await compareOrRefreshGolden(DRAFT_EXPECTED, renderDraftRailGeometry(geometry), SHARED_GOLDEN_MODE)
     for (const name of IMAGE_NAMES.slice(1)) {
       await page.getByRole('button', { name: `Remove image ${name}` }).click({ force: true })
     }
@@ -367,7 +372,7 @@ describe('web e2e: generic file upload through the real assembly', () => {
         rightAligned: getComputedStyle(element).justifyContent === 'flex-end',
       }
     })
-    await compareOrRefreshGolden(HISTORY_EXPECTED, renderHistoryAttachmentGeometry(geometry), MODE)
+    await compareOrRefreshGolden(HISTORY_EXPECTED, renderHistoryAttachmentGeometry(geometry), SHARED_GOLDEN_MODE)
   })
 
   it.skipIf(MODE === 'record')('shows both attachment kinds throughout the Trajectory inspector', async () => {

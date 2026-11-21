@@ -1,0 +1,11 @@
+version: 1
+scenario: default-workspace-windows
+profile: web
+composition: web-default
+recording: authored
+platform: pwsh
+workspace:
+  final: true
+header:
+  class: web-default-windows
+  pin: true

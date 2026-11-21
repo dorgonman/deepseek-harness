@@ -10,8 +10,14 @@ import {
 } from './scaffold.ts'
 import { newEnglishPage, saveFailureShot } from './support.ts'
 
-const FIXTURE = fileURLToPath(new URL('../../../snapshots/web/fresh-round-trip/session.v3.jsonl', import.meta.url))
-const EXPECTED = fileURLToPath(new URL('../../../snapshots/web/default-workspace/ui.expected.md', import.meta.url))
+const WINDOWS = process.platform === 'win32'
+const SNAPSHOT = fileURLToPath(new URL(WINDOWS
+  ? '../../../snapshots/web/default-workspace-windows'
+  : '../../../snapshots/web/default-workspace', import.meta.url))
+const FIXTURE = WINDOWS
+  ? join(SNAPSHOT, 'session.v4.jsonl')
+  : fileURLToPath(new URL('../../../snapshots/web/fresh-round-trip/session.v3.jsonl', import.meta.url))
+const EXPECTED = join(SNAPSHOT, 'ui.expected.md')
 const FAILURE_EXPECTED = fileURLToPath(new URL('./expected/default-workspace/failure.expected.md', import.meta.url))
 const MODE = webSnapshotMode()
 
@@ -21,8 +27,8 @@ describe.skipIf(MODE === 'record')('web e2e: default Workspace', () => {
     const scaffold = await launchWebScaffold({
       firstUse: true,
       replayFixture: fixture,
-      // The shared recording remains read-only; replay compares the complete persisted Session.
-      compareReplaySession: MODE === 'replay',
+      // Windows owns its recording. The shared POSIX recording remains read-only.
+      compareReplaySession: WINDOWS || MODE === 'replay',
       paceMs: 5,
     })
     onTestFinished(() => scaffold.close())
@@ -55,8 +61,22 @@ describe.skipIf(MODE === 'record')('web e2e: default Workspace', () => {
         expect(workspace.path).toBe(join(scaffold.workspaceCwd, 'Documents', 'deepseek-harness', 'default-workspace'))
         expect((await stat(workspace.path)).isDirectory()).toBe(true)
         expect(workspace.sessionIds).toContain(sessionId)
-        expect(scaffold.ctx.sessions.get(sessionId)?.header.cwd).toBe(workspace.path)
-        await assertFinalWorkspaceSnapshot(fileURLToPath(new URL('../../../snapshots/web/default-workspace', import.meta.url)), workspace.path)
+        const session = scaffold.ctx.sessions.get(sessionId)
+        expect(session?.header.cwd).toBe(workspace.path)
+        if (WINDOWS) {
+          const events = session?.snapshotEvents() ?? []
+          const calls = events.filter(event => event.type === 'tool/call')
+          const results = events.filter(event => event.type === 'tool/result')
+          expect(calls).toHaveLength(1)
+          expect(calls[0]?.data.name).toBe('pwsh')
+          expect(results).toHaveLength(1)
+          expect(results[0]?.data.message).toMatchObject({
+            toolCallId: calls[0]?.data.callId,
+            isError: false,
+            content: [{ type: 'text', text: 'PWSH_OK' }],
+          })
+        }
+        await assertFinalWorkspaceSnapshot(SNAPSHOT, workspace.path)
         await page.getByText('DONE', { exact: true }).waitFor()
         await compareOrRefreshGolden(EXPECTED, await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd), MODE)
         expect(tripwire.pageErrors).toEqual([])
