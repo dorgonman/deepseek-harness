@@ -209,7 +209,8 @@ export interface PiAiProviderProfile {
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
 export interface ResolvedPiAiProviderProfile
-  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName'> {
+  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName'>,
+  Omit<RouteCatalog, 'models'> {
   /** Harness route key and the `Models` collection key (the configuration dict key). */
   provider: string
   /** Resolved display name for selectors and configuration surfaces. */
@@ -237,26 +238,6 @@ export interface ResolvedPiAiProviderProfile
   piProvider?: Provider
   /** First model diagnostic, or the route failure when no model diagnostic is available. */
   catalogError?: string
-  /** Per-model failures reported before attempting a request. */
-  modelErrors: ReadonlyMap<string, string>
-  /**
-   * Per-request output caps this profile explicitly configured, by model id.
-   * The seam materializes one only into a request that names no cap of its
-   * own, so a catalog capability must not appear here.
-   */
-  configuredMaxTokens: ReadonlyMap<string, number>
-  /** Wire model ids keyed by the unchanged selector id. */
-  requestModels: ReadonlyMap<string, string>
-  /** Explicit native request adapters keyed by selector id. */
-  requestProtocols: ReadonlyMap<string, 'kinf-decision-v1'>
-  /** Explicit native tool support by selector; omission retains normal tool admission. */
-  nativeTools: ReadonlyMap<string, boolean>
-  /** Explicit model request headers layered above provider headers. */
-  modelHeaders: ReadonlyMap<string, Readonly<Record<string, string>>>
-  /** Explicit model stream-read idle intervals; absent selectors inherit {@link streamIdleTimeoutMs}. */
-  modelStreamIdleTimeouts: ReadonlyMap<string, number>
-  /** Models whose endpoint override cannot inherit provider credentials. */
-  crossOriginModels: ReadonlySet<string>
 }
 
 /** Plugin configuration: the provider routes this instance owns. */
