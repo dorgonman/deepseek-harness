@@ -7,6 +7,8 @@ import { createSystemMessage } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import {
   assertFixtureInventory,
+  bindWebFixtureAttachmentHome,
+  captureWebFixtureAttachmentHome,
   normalizeAria,
   parseSeedFixture,
   recordedSessionFixturePath,
@@ -23,6 +25,39 @@ describe('Web aria workspace normalization', () => {
   it.each([String.raw`D:\temp\dsh-web-e2e-ws-generated`, '/tmp/dsh-web-e2e-ws-generated'])('normalizes the workspace path and basename from %s', (workspaceCwd) => {
     const snapshot = `- text: dsh-web-e2e-ws-generated\n- text: ${workspaceCwd}`
     expect(normalizeAria(snapshot, workspaceCwd, false)).toBe('- text: {{workspace}}\n- text: {{cwd}}')
+  })
+})
+
+describe('Web fixture attachment home', () => {
+  it.each([
+    [String.raw`D:\with spaces\.dsh-home`, String.raw`D:\with spaces\.dsh-home\attachments\v1\files\poem.txt`],
+    ['/tmp/sandbox/.dsh-home', '/tmp/sandbox/.dsh-home/attachments/v1/files/poem.txt'],
+  ])('round-trips the owned home in tool arguments and read results from %s', (home, nativePath) => {
+    const fixturePath = '{{harnessHome}}/attachments/v1/files/poem.txt'
+    const misleadingText = '<path>{{harnessHome}}/attachments/v1/files/poem.txt</path> is literal user and model text.'
+    const log = (path: string) => {
+      const args = `{ "file_path" : ${JSON.stringify(path)}, "limit": 2 }`
+      const call = { type: 'tool-call', name: 'read', arguments: args }
+      return [
+        { type: 'user/message', data: { content: [{ type: 'text', text: misleadingText }] } },
+        { type: 'assistant/message', data: {
+          message: { content: [call, { type: 'text', text: misleadingText }] },
+          stream: [{ type: 'chunk', time: 1, chunk: { type: 'block-end', block: call } }],
+        } },
+        { type: 'tool/call', data: { name: 'read', callId: 'read-owned', arguments: args } },
+        { type: 'tool/result', data: {
+          message: { toolCallId: 'read-owned', content: [{ type: 'text', text: `<path>${path}</path>\n${misleadingText}` }] },
+          meta: { path },
+        } },
+        { type: 'tool/call', data: { name: 'read', callId: 'read-unowned', arguments: '{"file_path":"/tmp/unowned/attachments/poem.txt"}' } },
+        { type: 'tool/result', data: {
+          message: { toolCallId: 'unrelated-tool', content: [{ type: 'text', text: misleadingText }] },
+        } },
+      ].map(row => JSON.stringify(row)).join('\n') + '\n'
+    }
+
+    expect(bindWebFixtureAttachmentHome(log(fixturePath), home)).toBe(log(nativePath))
+    expect(captureWebFixtureAttachmentHome(log(nativePath), home)).toBe(log(fixturePath))
   })
 })
 
