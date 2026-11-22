@@ -145,11 +145,11 @@ function assertSummarizer(summarizer: unknown): void {
 
 function assertCarried(carried: unknown): void {
   if (carried === undefined) return
-  if (typeof carried !== 'object' || carried === null) malformed('carried basis is not an object')
+  if (typeof carried !== 'object' || carried === null) malformed('carried checkpoint reference is not an object')
   const candidate = carried as Partial<NonNullable<CompactionIncrementalCoverage['carried']>>
   if (typeof candidate.summarySeq !== 'number' || !Number.isInteger(candidate.summarySeq)
     || typeof candidate.digest !== 'string' || candidate.digest.length === 0) {
-    malformed('carried basis is incomplete')
+    malformed('carried checkpoint reference is incomplete')
   }
 }
 
@@ -321,13 +321,13 @@ export function hasUnprocessedRawEvents(
   return events.some(event => event.seq >= from && isAppendSurfaceEvent(event))
 }
 
-/** Identity and basis supplied by the backend when it commits coverage. */
+/** Identity and checkpoint reference supplied by the backend when it commits coverage. */
 export interface IncrementalAdvanceMeta {
   /** Digest of the resolved compaction policy. */
   readonly policyDigest: string
   /** Summarizer identity, when a model call produced new text. */
   readonly summarizer?: CompactionIncrementalCoverage['summarizer']
-  /** Basis of checkpoint text carried forward from an earlier summary. */
+  /** Checkpoint text carried forward from an earlier summary. */
   readonly carried?: CompactionIncrementalCoverage['carried']
 }
 
@@ -341,7 +341,7 @@ export interface IncrementalAdvanceMeta {
  * @param events - the session log, in sequence order.
  * @param start - first newly covered seq, inclusive.
  * @param end - last newly covered seq, inclusive.
- * @param meta - policy and basis identity for the new record.
+ * @param meta - policy and checkpoint reference identity for the new record.
  * @returns the next coverage record with an incremented revision.
  */
 export function advanceCoverage(

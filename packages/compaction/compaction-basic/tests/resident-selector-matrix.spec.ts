@@ -207,7 +207,7 @@ rejectRows([
   ['Decision capability instead of text', (row) => { row.model.capabilities = ['decision'] }],
   ['wrongly cased text capability', (row) => { row.model.capabilities = ['Text'] }],
   ['text declared only by configuration', (row) => { row.model.capabilitySource = 'configuration' }],
-  ['text capability basis unknown', (row) => { row.model.capabilitySource = 'unknown' }],
+  ['text capability source unknown', (row) => { row.model.capabilitySource = 'unknown' }],
 ])
 
 it('ordinary Chat with verified text may also provide vision', () => {

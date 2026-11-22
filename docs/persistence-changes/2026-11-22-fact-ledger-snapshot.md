@@ -35,12 +35,12 @@ changes:
 <a id="compatibility"></a>
 ## Compatibility
 
-Existing records remain valid and keep their full-surface behavior. Absence of the field means no committed ledger. Older V4 readers retain the payload as data and restore the same Surface. Current readers validate source event ids, content digests, seen bounds and supersede lineage before using a snapshot, and a summary without its replacement message or a clean compaction/end never commits derived state.
+Existing records remain valid and keep their full-surface behavior. Absence of the field means no committed ledger. Older V4 readers retain the payload as data and restore the same Surface. Current readers validate source event ids, content digests, seen bounds and supersede lineage before using a snapshot, and a summary without its replacement message or a clean compaction/end never commits derived state. The ledger's origin label was renamed in place to `basis` (same `asserted | inferred` values) before this record was finalized: no released format carried the earlier label, and a snapshot that used it fails validation instead of being silently reinterpreted.
 
 <a id="verification"></a>
 ## Verification
 
-node node_modules/vitest/vitest.mjs run --config vitest.config.ts packages/compaction/compaction-basic/tests/fact-ledger.spec.ts packages/compaction/compaction-basic/tests/incremental.spec.ts scripts/stable-compaction-hybrid.spec.ts: 40 tests passed (9 ledger, 8 incremental, 23 hybrid).
+node node_modules/vitest/vitest.mjs run --config vitest.config.ts packages/compaction/compaction-basic/tests/fact-extraction.spec.ts packages/compaction/compaction-basic/tests/fact-ledger.spec.ts packages/compaction/compaction-basic/tests/incremental.spec.ts scripts/stable-compaction-hybrid.spec.ts: 53 tests passed (6 extraction, 9 ledger, 8 incremental, 30 hybrid).
 
 <a id="dev-note"></a>
 ## Dev Note

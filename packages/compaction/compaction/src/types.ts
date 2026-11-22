@@ -43,7 +43,7 @@ export interface CompactionIncrementalCoverage {
   policyDigest: string
   /** Summarizer identity that produced the new text, when one was called. */
   summarizer?: { provider: string; model: string; maxTokens: number }
-  /** Basis of checkpoint text carried forward from an earlier summary. */
+  /** Checkpoint text carried forward from an earlier summary. */
   carried?: { summarySeq: SessionSeq; digest: string }
 }
 
