@@ -215,6 +215,14 @@ export class BasicCompactionEngine extends CompactionEngine {
           'CONTEXT_ADMISSION_REFUSED',
         )
       }
+      // Prefer trimming oversized tool output over shadowing history: a trim
+      // changes the Surface, and the loop rebuilds and prices it again.
+      const pruner = this.ctx.get('toolResultPruner')
+      if (pruner !== undefined) {
+        const generation = agent.session.surface.contentGeneration
+        pruner.pruneSession(agent.session)
+        if (agent.session.surface.contentGeneration !== generation) return
+      }
       let compacted: CompactionResult | null
       try {
         compacted = await this.compactIfNeeded(agent, 'pressure', signal)

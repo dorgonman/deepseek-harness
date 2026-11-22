@@ -24,6 +24,7 @@ import { deriveReplayScript } from '@deepseek-ai/dsh-llm-replay'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
+import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { expect, it, vi } from 'vitest'
@@ -1379,6 +1380,40 @@ it('prices the tool declarations the request will send, not the previous header'
     await owned.dispose()
   }, {
     auto: true, thresholdRatio: 0.95, maxTokens: 1_024,
+    summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
+  })
+}, 60_000)
+
+it('trims oversized tool output at admission before shadowing history', async () => {
+  await withContext(async (ctx, root) => {
+    await ctx.plugin(ToolResultPruner)
+    ctx.tools.register(defineContentToolFixture({
+      name: 'fixture_prune', description: 'Return a large body.', parameters: {},
+      async execute() { return [{ type: 'text', text: 'TOOL_BODY '.repeat(2_950) }] },
+    }))
+    const chat = new WindowAdapter([toolCallResponse('call-prune', 'fixture_prune', {}), textResponse('done')])
+    chat.windows.set('small', 8_192)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    const summary = new WindowAdapter([textResponse('Compacted.')])
+    summary.windows.set('summary', 8_192)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-envelope-prune')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: 'synthetic-chat', model: 'small', maxTokens: 1_024 },
+      meta: { cwd: root },
+    })
+    await send(owned.agent, 'Read it.')
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(events.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
+    // A trim, not a checkpoint: the pruner keeps the recent result readable.
+    expect(checkpoints(events)).toHaveLength(0)
+    expect(summary.requests).toHaveLength(0)
+    expect(chat.requests).toHaveLength(2)
+    expect(requestText(chat.requests[1]!)).toContain('tool result middle pruned')
+    await owned.dispose()
+  }, {
+    auto: true, thresholdRatio: 0.99, maxTokens: 1_024,
     summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
   })
 }, 60_000)
