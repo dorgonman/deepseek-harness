@@ -1319,7 +1319,7 @@ it('prices a tool continuation whose result alone would not fit the window', asy
     chat.windows.set('tool-small', 8_192)
     ctx.llm.registerAdapter(['synthetic-chat'], chat)
     const summary = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Result retained by source reference.')))
-    summary.windows.set('summary', 16_384)
+    summary.windows.set('summary', 8_192)
     ctx.llm.registerAdapter(['synthetic-summary'], summary)
     const sessionId = SessionId('hybrid-envelope-tool-continuation')
     const owned = await ctx.agents.create({

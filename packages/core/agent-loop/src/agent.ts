@@ -503,7 +503,12 @@ export class ReactLoopAgent implements Agent {
           : await this.admitEnvelope(header, preparedCall, plan, position, signal)
       } catch (error: unknown) {
         // A refused admission must not consume the input it refused to price.
-        this.restoreClaimedInput(decision.messages)
+        // Only the first attempt owns that claim: a retry already committed it.
+        try {
+          if (firstAttempt) this.restoreClaimedInput(decision.messages)
+        } catch {
+          // A failed restore must not mask why the request was refused.
+        }
         throw error
       }
       this.appendStepAdmission(this.session, admitted, position)
