@@ -889,7 +889,12 @@ it('chunks a >1M-token switch through a 262,144-token summarizer inside the dest
       setup: async (agentCtx) => { await ctx.agentPresets.mount(agentCtx, 'standard') },
     })
     expect(ctx.agentPresets.serviceFor(owned.agent, 'compaction')).toBeInstanceOf(HybridCompactionEngine)
-    const filler = 'x'.repeat(72_000)
+    const cjk = '压缩上下文必须保留原始事件、精确标识符与工具事务。'.repeat(120)
+    const json = JSON.stringify({
+      ticket: 'DSH-TSK-0014', related: ['DSH-TSK-0012', 'DSH-TSK-0009'],
+      policy: { provider: 'kinf-native-mservice', model: 'chat-qwen-27b-autoround-int4-vllm-dflash2-tp2@local' },
+    })
+    const filler = `${'x'.repeat(68_000)}${cjk}${json}`
     for (let turn = 0; turn < 60; turn += 1) await send(owned.agent, `${filler}${turn}`)
     const before = (await ctx.sessionQuery.readSession(sessionId)).events
     expect(ctx.tokenMeter.measure(owned.agent.session).totalTokens).toBeGreaterThan(1_000_000)
@@ -906,6 +911,8 @@ it('chunks a >1M-token switch through a 262,144-token summarizer inside the dest
     const after = (await ctx.sessionQuery.readSession(sessionId)).events
     expect(checkpoints(after)).toHaveLength(1)
     expect(after.slice(0, before.length)).toEqual(before)
+    expect(summary.requests.some(request => requestText(request).includes('压缩上下文'))).toBe(true)
+    expect(summary.requests.some(request => requestText(request).includes('DSH-TSK-0014'))).toBe(true)
     const receipt = after.find(event => event.type === 'compaction/summary')
     expect(receipt?.data.chunkCalls).toHaveLength(summary.requests.length)
     const destination = chat.requests.at(-1)
@@ -916,6 +923,8 @@ it('chunks a >1M-token switch through a 262,144-token summarizer inside the dest
     ) + ctx.tokenMeter.estimateTools(destination.tools) + (destination.maxTokens ?? 0)
     expect(requested).toBeLessThanOrEqual(262_144)
     await owned.dispose()
+    const reopened = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(reopened).toEqual(after)
   }, { auto: false })
 })
 
