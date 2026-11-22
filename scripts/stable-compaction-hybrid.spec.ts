@@ -21,7 +21,8 @@ import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { expect, it, vi } from 'vitest'
-import { advanceCoverage, deriveCommittedCoverage } from '../packages/compaction/compaction-basic/src/incremental.ts'
+import { advanceCoverage, deriveCommittedCoverage, digestCanonical } from '../packages/compaction/compaction-basic/src/incremental.ts'
+import { validateLedger } from '../packages/compaction/compaction-basic/src/fact-ledger.ts'
 import { MockAdapter, textResponse, toolCallResponse } from '../packages/core/agent-loop/tests/mock-adapter.ts'
 
 class WindowAdapter extends MockAdapter {
@@ -695,6 +696,94 @@ it('compacts through the fact ledger and keeps sourced facts across passes', asy
     expect(checkpointText).toContain('Claim 0 keeps DSH-TSK-0012')
     expect(checkpointText).toContain('Claim 1 keeps DSH-TSK-0012')
     expect(checkpointText).toContain('source events')
+    await owned.dispose()
+  }, {
+    incremental: true, factLedger: true, auto: true, thresholdRatio: 0.95,
+    summarizationProvider: 'synthetic-summary', summarizationModel: 'summary', maxTokens: 1_024,
+  })
+})
+
+it('keeps seeded facts, updates and conflicts across a >1M fact-ledger compaction', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 70 }, () => textResponse('Reply.')))
+    const legacyId = digestCanonical(['decision', 'auth-mode', 'legacy'])
+    const claimsFor = (options: GenerateOptions): string => {
+      const text = requestText(options)
+      const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
+      const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
+      const first = seqs[0] ?? 1
+      const claims: object[] = [{ kind: 'observation', key: `chunk-${String(first)}`, claim: `Chunk at ${String(first)} reviewed.`, sourceSeqs: [first] }]
+      if (text.includes('EARLY_MARKER')) {
+        claims.push({ kind: 'constraint', key: 'early', claim: 'Early fact keeps DSH-TSK-0012 and 1066429.', sourceSeqs: [first], provenance: 'asserted' })
+        claims.push({ kind: 'decision', key: 'auth-mode', claim: 'legacy', sourceSeqs: [first] })
+      }
+      if (text.includes('MIDDLE_MARKER')) {
+        claims.push({ kind: 'identifier', key: 'middle', claim: 'Middle fact keeps DSH-TSK-0012.', sourceSeqs: [first] })
+      }
+      if (text.includes('CONFLICT_A')) {
+        claims.push({ kind: 'decision', key: 'deploy-target', claim: 'staging', sourceSeqs: [first] })
+      }
+      if (text.includes('CONFLICT_B')) {
+        claims.push({ kind: 'decision', key: 'deploy-target', claim: 'prod', sourceSeqs: [first] })
+      }
+      if (text.includes('LATE_MARKER')) {
+        claims.push({ kind: 'decision', key: 'auth-mode', claim: 'resident', sourceSeqs: [first], supersedes: [legacyId] })
+        claims.push({ kind: 'tool-evidence', key: 'late', claim: 'Late fact keeps DSH-TSK-0012.', sourceSeqs: [first] })
+      }
+      return JSON.stringify(claims)
+    }
+    const summary = new WindowAdapter(Array.from({ length: 10 }, () => (options: GenerateOptions) => textResponse(claimsFor(options))))
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-fact-ledger-million')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, maxTokens: 1_024 }, meta: { cwd: root },
+    })
+    const filler = 'x'.repeat(72_000)
+    for (let turn = 0; turn < 60; turn += 1) {
+      const marker = turn === 0 ? 'EARLY_MARKER '
+        : turn === 20 ? 'CONFLICT_A '
+          : turn === 40 ? 'CONFLICT_B '
+            : turn === 50 ? 'MIDDLE_MARKER '
+              : turn === 59 ? 'LATE_MARKER ' : ''
+      await send(owned.agent, `${marker}${filler}${turn}`)
+    }
+    expect(ctx.tokenMeter.measure(owned.agent.session).totalTokens).toBeGreaterThan(1_000_000)
+    await ctx.compaction.compactNow(owned.agent, signal)
+    const firstPassRequests = summary.requests.length
+    expect(firstPassRequests).toBeGreaterThan(1)
+
+    const before = (await ctx.sessionQuery.readSession(sessionId)).events
+    const firstRecord = before.find(event => event.type === 'compaction/summary' && event.data.ledger !== undefined)
+    expect(firstRecord?.type).toBe('compaction/summary')
+    if (firstRecord?.type !== 'compaction/summary' || firstRecord.data.ledger === undefined) {
+      throw new Error('The first compaction committed no ledger')
+    }
+    const ledger = firstRecord.data.ledger
+    const fact = (key: string, claim: string) => ledger.find(entry => entry.key === key && entry.claim === claim)
+    expect(fact('auth-mode', 'legacy')?.status).toBe('superseded')
+    expect(fact('auth-mode', 'resident')?.status).toBe('active')
+    expect(fact('deploy-target', 'staging')?.status).toBe('disputed')
+    expect(fact('deploy-target', 'prod')?.status).toBe('disputed')
+    expect(fact('early', 'Early fact keeps DSH-TSK-0012 and 1066429.')?.status).toBe('active')
+    expect(fact('middle', 'Middle fact keeps DSH-TSK-0012.')?.status).toBe('active')
+    expect(fact('late', 'Late fact keeps DSH-TSK-0012.')?.status).toBe('active')
+    validateLedger(ledger, before)
+
+    await send(owned.agent, `DELTA_MARKER ${filler}`)
+    await ctx.compaction.compactNow(owned.agent, signal)
+    for (const request of summary.requests.slice(firstPassRequests)) {
+      expect(requestText(request)).not.toContain('Early fact keeps DSH-TSK-0012')
+      expect(requestText(request)).not.toContain('Sourced facts from compacted history')
+    }
+    const after = (await ctx.sessionQuery.readSession(sessionId)).events
+    const records = after.filter(event => event.type === 'compaction/summary' && event.data.ledger !== undefined)
+    expect(records.length).toBe(2)
+    const second = records[1]!
+    if (second.type !== 'compaction/summary' || second.data.ledger === undefined) throw new Error('missing second ledger')
+    expect(second.data.ledger.find(entry => entry.key === 'auth-mode' && entry.claim === 'resident')?.status).toBe('active')
+    expect(second.data.ledger.find(entry => entry.key === 'early')?.status).toBe('active')
+    validateLedger(second.data.ledger, after)
     await owned.dispose()
   }, {
     incremental: true, factLedger: true, auto: true, thresholdRatio: 0.95,
