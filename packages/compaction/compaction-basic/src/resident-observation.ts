@@ -44,6 +44,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/** Trusted provider seam that returns normalized resident candidates for one bounded scope. */
 export interface ResidentObservationSource {
   /**
    * Read one bounded snapshot for the declared nodes.

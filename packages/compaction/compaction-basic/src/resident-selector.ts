@@ -10,6 +10,7 @@
  */
 export const RESIDENT_ONLY_V1 = 'kinf.resident-only.v1' as const
 
+/** Immutable resident identity a gateway receipt must match for one prepared dispatch. */
 export interface ResidentPrecondition {
   readonly schema: typeof RESIDENT_ONLY_V1
   readonly instance: string
@@ -39,6 +40,7 @@ type Size = Readonly<{
   source: 'authoritative' | 'unknown'
 }>
 
+/** One normalized observation row: node, host, loaded model, route and request measurement. */
 export interface Candidate {
   readonly node: Readonly<{
     id: string
@@ -97,6 +99,7 @@ export interface Candidate {
   }>
 }
 
+/** One selection request: scope, projected envelope identity and observed candidates. */
 export interface SelectionInput {
   readonly nowMs: number
   readonly maxAgeMs: number
@@ -112,6 +115,7 @@ export interface SelectionInput {
   readonly candidates: readonly Candidate[]
 }
 
+/** Closed outcome: one frozen target with its receipt reason, or a typed refusal code. */
 export type SelectionResult = Readonly<{
   ok: true
   target: Readonly<{
@@ -277,6 +281,11 @@ function selected(row: Candidate, reason: SelectionReason): SelectionResult {
   })
 }
 
+/**
+ * Select one already-loaded, usable resident Chat deployment for one compaction.
+ * @param input - validated scope, projection identity, output budget and observations.
+ * @returns the frozen target with its receipt reason, or a typed refusal code.
+ */
 export function selectResidentSummary(input: SelectionInput): SelectionResult {
   if (!input || !count(input.nowMs) || !positive(input.maxAgeMs) || input.maxAgeMs > 60_000 ||
       !token(input.gatewayId) || !token(input.projectionId) || !positive(input.outputTokens) || !count(input.reserveTokens) ||

@@ -430,6 +430,11 @@
     },
     {
       "doc": "docs/subsystems/llm-streaming.md",
+      "symbol": "LlmCompletionReservation",
+      "source": "packages/llm/llm/src/index.ts"
+    },
+    {
+      "doc": "docs/subsystems/llm-streaming.md",
       "symbol": "PreparedLlmCall",
       "source": "packages/llm/llm/src/index.ts"
     },
