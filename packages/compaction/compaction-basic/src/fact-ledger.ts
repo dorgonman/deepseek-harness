@@ -10,7 +10,7 @@ import {
   COMPACTION_FACT_KINDS,
   type CompactionFact,
   type CompactionFactKind,
-  type CompactionFactProvenance,
+  type CompactionFactBasis,
   type CompactionFactStatus,
 } from '@deepseek-ai/dsh-compaction'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -26,7 +26,7 @@ export type FactKind = CompactionFactKind
 export type FactStatus = CompactionFactStatus
 
 /** How the claim reached the ledger. An inference is never promoted to RAW truth. */
-export type FactProvenance = CompactionFactProvenance
+export type FactBasis = CompactionFactBasis
 
 /** Input supplied by an extractor before validation. */
 export interface FactInput {
@@ -38,8 +38,8 @@ export interface FactInput {
   readonly claim: string
   /** Exact source event ids the claim cites. */
   readonly sourceEventIds: readonly SessionSeq[]
-  /** Extraction provenance. */
-  readonly provenance: FactProvenance
+  /** Extraction basis. */
+  readonly basis: FactBasis
   /** Session branch scope, when the fact is branch-limited. */
   readonly branch?: string
   /** Earlier fact ids this fact explicitly replaces. */
@@ -72,8 +72,8 @@ function nonEmpty(value: unknown): value is string {
 function factsOf(input: FactInput, events: readonly SessionEvent[]): FactRecord {
   if (!FACT_KINDS.includes(input.kind)) malformed(`unknown fact kind ${String(input.kind)}`)
   if (!nonEmpty(input.key) || !nonEmpty(input.claim)) malformed('key and claim must be non-empty')
-  if (input.provenance !== 'asserted' && input.provenance !== 'inferred') {
-    malformed('provenance must be asserted or inferred')
+  if (input.basis !== 'asserted' && input.basis !== 'inferred') {
+    malformed('basis must be asserted or inferred')
   }
   if (!Array.isArray(input.sourceEventIds) || input.sourceEventIds.length === 0) {
     malformed('at least one source event is required')
@@ -98,7 +98,7 @@ function factsOf(input: FactInput, events: readonly SessionEvent[]): FactRecord 
     firstSeenSeq: first,
     lastSeenSeq: last,
     status: 'active' as const,
-    provenance: input.provenance,
+    basis: input.basis,
     ...input.branch === undefined ? {} : { branch: input.branch },
     ...input.supersedes === undefined ? {} : { supersedes: Object.freeze([...input.supersedes]) },
   })
@@ -190,7 +190,7 @@ export function mergeFacts(existing: readonly FactRecord[], incoming: readonly F
  * Validate one durable ledger snapshot against the log it cites.
  *
  * Checks identity uniqueness, source existence and digest, seen bounds, status
- * and provenance values, and supersede lineage. A snapshot that fails any check
+ * and basis values, and supersede lineage. A snapshot that fails any check
  * is refused rather than repaired, because a wrong ledger silently drops or
  * misattributes sourced history.
  * @param facts - the snapshot read from a summary event.
@@ -220,8 +220,8 @@ export function validateLedger(facts: readonly FactRecord[], events: readonly Se
     if (fact.status !== 'active' && fact.status !== 'superseded' && fact.status !== 'disputed') {
       malformed('fact status is invalid')
     }
-    if (fact.provenance !== 'asserted' && fact.provenance !== 'inferred') {
-      malformed('fact provenance is invalid')
+    if (fact.basis !== 'asserted' && fact.basis !== 'inferred') {
+      malformed('fact basis is invalid')
     }
     if (fact.branch !== undefined && !nonEmpty(fact.branch)) malformed('fact branch is empty')
     if (fact.supersedes !== undefined && (!Array.isArray(fact.supersedes)

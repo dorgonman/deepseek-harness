@@ -914,7 +914,7 @@ interface LlmCompletionReservation {
 interface PreparedLlmCall {
   /** Detached, deep-frozen config with any adapter-owned default materialized. */
   readonly config: LlmCallConfig
-  /** Output budget admission must price, with the provenance that produced it. */
+  /** Output budget admission must price, with the source layer that produced it. */
   readonly completion: LlmCompletionReservation
   /** Immutable retry policy captured with the adapter registration. */
   readonly retryPolicy: ResolvedRetryPolicy

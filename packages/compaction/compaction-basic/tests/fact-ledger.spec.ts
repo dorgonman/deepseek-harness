@@ -41,8 +41,8 @@ function inputs(session: Session): FactInput[] {
   const user = events.find(event => event.type === 'user/message')!.seq
   const assistant = events.find(event => event.type === 'assistant/message')!.seq
   return [
-    { kind: 'decision', key: 'auth-mode', claim: 'Use local resident summarizers.', sourceEventIds: [user, assistant], provenance: 'asserted' },
-    { kind: 'constraint', key: 'no-cloud', claim: 'Never fall back to a cloud summarizer.', sourceEventIds: [user], provenance: 'asserted', branch: 'main' },
+    { kind: 'decision', key: 'auth-mode', claim: 'Use local resident summarizers.', sourceEventIds: [user, assistant], basis: 'asserted' },
+    { kind: 'constraint', key: 'no-cloud', claim: 'Never fall back to a cloud summarizer.', sourceEventIds: [user], basis: 'asserted', branch: 'main' },
   ]
 }
 
@@ -55,7 +55,7 @@ it('creates immutable sourced facts with a deterministic identity and digest', (
     sourceEventIds: [...inputs(session)[0]!.sourceEventIds].reverse(),
   }], events)
   expect(first).toMatchObject({
-    kind: 'decision', key: 'auth-mode', status: 'active', provenance: 'asserted',
+    kind: 'decision', key: 'auth-mode', status: 'active', basis: 'asserted',
   })
   expect(first!.factId).toBe(reordered!.factId)
   expect(first!.evidenceDigest).toBe(reordered!.evidenceDigest)
@@ -141,13 +141,13 @@ it('bounds the view and reports omitted facts and source ids explicitly', () => 
   expect(() => composeCompactView(facts, { maxTokens: 10, tokensOf: () => Number.NaN })).toThrow(/tokensOf/)
 })
 
-it('preserves inferred provenance and branch scope without promoting either', () => {
+it('preserves inferred basis and branch scope without promoting either', () => {
   const session = conversation()
   const events = session.snapshotEvents()
   const [fact] = createFacts([{
-    ...inputs(session)[0]!, provenance: 'inferred', branch: 'feature-x',
+    ...inputs(session)[0]!, basis: 'inferred', branch: 'feature-x',
   }], events)
-  expect(fact!.provenance).toBe('inferred')
+  expect(fact!.basis).toBe('inferred')
   expect(fact!.branch).toBe('feature-x')
   expect(fact!.status).toBe('active')
 })

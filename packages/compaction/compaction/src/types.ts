@@ -43,7 +43,7 @@ export interface CompactionIncrementalCoverage {
   policyDigest: string
   /** Summarizer identity that produced the new text, when one was called. */
   summarizer?: { provider: string; model: string; maxTokens: number }
-  /** Provenance of checkpoint text carried forward from an earlier summary. */
+  /** Basis of checkpoint text carried forward from an earlier summary. */
   carried?: { summarySeq: SessionSeq; digest: string }
 }
 
@@ -73,7 +73,7 @@ export type CompactionFactKind = typeof COMPACTION_FACT_KINDS[number]
 export type CompactionFactStatus = 'active' | 'superseded' | 'disputed'
 
 /** How a fact reached the ledger; an inference is never RAW truth. */
-export type CompactionFactProvenance = 'asserted' | 'inferred'
+export type CompactionFactBasis = 'asserted' | 'inferred'
 
 /** One validated, sourced fact committed with a checkpoint. */
 export interface CompactionFact {
@@ -91,7 +91,7 @@ export interface CompactionFact {
   readonly firstSeenSeq: SessionSeq
   readonly lastSeenSeq: SessionSeq
   readonly status: CompactionFactStatus
-  readonly provenance: CompactionFactProvenance
+  readonly basis: CompactionFactBasis
   /** Session branch scope, when the fact is branch-limited. */
   readonly branch?: string
   /** Earlier fact ids this fact explicitly replaces. */

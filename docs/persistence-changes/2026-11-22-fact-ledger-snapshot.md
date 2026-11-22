@@ -28,7 +28,7 @@ baseline: false
 changes:
   - root: "event:compaction/summary"
     previous: "2026-11-22-incremental-raw-coverage"
-    after: "be8be7717d085cb7380fb0df12239f2996ef85fdf55e26cc1f8240e2ff2b6bd2"
+    after: "d40046c5f7d040ae58a4550a8a606ee68fa5b48cf367b742b8000435af2ff4e8"
     decision: same-version
 ```
 

@@ -15,7 +15,7 @@ import type { CompactionCheckpointSource } from './checkpoint.ts'
 
 export type {
   CompactionResult, SummaryRequestProjection, CompactionCoveredRange, CompactionIncrementalCoverage,
-  CompactionFact, CompactionFactKind, CompactionFactStatus, CompactionFactProvenance,
+  CompactionFact, CompactionFactKind, CompactionFactStatus, CompactionFactBasis,
 } from './types.ts'
 export { COMPACTION_FACT_KINDS } from './types.ts'
 export { CompactionId } from './brand.ts'

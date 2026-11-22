@@ -48,12 +48,12 @@ it('parses validated claims with inferred default and explicit assertions', () =
   const { user, assistant } = sourcesOf(session)
   const text = JSON.stringify([
     { kind: 'decision', key: 'auth-mode', claim: 'Use DSH-TSK-0014 IDs exactly.', sourceSeqs: [user, assistant] },
-    { kind: 'constraint', key: 'no-cloud', claim: 'Never cloud fallback.', sourceSeqs: [user], provenance: 'asserted' },
+    { kind: 'constraint', key: 'no-cloud', claim: 'Never cloud fallback.', sourceSeqs: [user], basis: 'asserted' },
   ])
   const parsed = parseFactExtraction(text, [user, assistant], OPTIONS)
   expect(parsed).toHaveLength(2)
-  expect(parsed[0]).toMatchObject({ kind: 'decision', key: 'auth-mode', provenance: 'inferred' })
-  expect(parsed[1]).toMatchObject({ provenance: 'asserted' })
+  expect(parsed[0]).toMatchObject({ kind: 'decision', key: 'auth-mode', basis: 'inferred' })
+  expect(parsed[1]).toMatchObject({ basis: 'asserted' })
   expect(parsed[0]!.claim).toBe('Use DSH-TSK-0014 IDs exactly.')
 })
 
@@ -68,15 +68,15 @@ it('refuses invalid JSON, non-arrays and out-of-bounds counts', () => {
   expect(() => parseFactExtraction(JSON.stringify(many), [user], OPTIONS)).toThrow(/1-8 claims/)
 })
 
-it('refuses unknown kinds, empty fields, oversized claims and bad provenance', () => {
+it('refuses unknown kinds, empty fields, oversized claims and bad basis', () => {
   const session = conversation()
   const { user } = sourcesOf(session)
   const parse = (claim: object) => parseFactExtraction(JSON.stringify([claim]), [user], OPTIONS)
   expect(() => parse({ kind: 'rumor', key: 'k', claim: 'c', sourceSeqs: [user] })).toThrow(/unknown kind/)
   expect(() => parse({ kind: 'decision', key: ' ', claim: 'c', sourceSeqs: [user] })).toThrow(/empty key or claim/)
   expect(() => parse({ kind: 'decision', key: 'k', claim: 'x'.repeat(501), sourceSeqs: [user] })).toThrow(/exceeds/)
-  expect(() => parse({ kind: 'decision', key: 'k', claim: 'c', sourceSeqs: [user], provenance: 'trusted' }))
-    .toThrow(/invalid provenance/)
+  expect(() => parse({ kind: 'decision', key: 'k', claim: 'c', sourceSeqs: [user], basis: 'trusted' }))
+    .toThrow(/invalid basis/)
   expect(() => parse({ kind: 'decision', key: 'k', claim: 'c', sourceSeqs: [user], supersedes: [''] }))
     .toThrow(/supersedes/)
 })
@@ -97,11 +97,11 @@ it('merges an explicit update into the ledger and rejects a dangling supersede',
   const { events, user, assistant } = sourcesOf(session)
   const [prior] = createFacts([{
     kind: 'decision', key: 'auth-mode', claim: 'Use the fixed summarizer.', sourceEventIds: [user],
-    provenance: 'asserted',
+    basis: 'asserted',
   }], events)
   const updated = JSON.stringify([{
     kind: 'decision', key: 'auth-mode', claim: 'Use the resident selector.', sourceSeqs: [assistant],
-    provenance: 'asserted', supersedes: [prior!.factId],
+    basis: 'asserted', supersedes: [prior!.factId],
   }])
   const merged = mergeExtractedFacts([prior!], updated, [user, assistant], events, OPTIONS)
   expect(merged.find(fact => fact.factId === prior!.factId)).toMatchObject({

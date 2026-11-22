@@ -12,7 +12,7 @@ import {
   FACT_KINDS,
   mergeFacts,
   type FactInput,
-  type FactProvenance,
+  type FactBasis,
   type FactRecord,
 } from './fact-ledger.ts'
 
@@ -52,7 +52,7 @@ function isSeqSet(value: unknown): value is number[] {
  * Parse one structured claim response.
  *
  * Accepted shape: a JSON array of
- * `{ kind, key, claim, sourceSeqs, provenance?, supersedes? }`. Provenance
+ * `{ kind, key, claim, sourceSeqs, basis?, supersedes? }`. Basis
  * defaults to `inferred` so extracted prose is never silently promoted to a
  * RAW assertion. Every cited source must belong to the summarized chunk.
  * @param text - raw summarizer output.
@@ -102,9 +102,9 @@ export function parseFactExtraction(
         throw new FactExtractionError('unknown-source', `fact extraction: claim ${index} cites event ${source} outside its chunk`)
       }
     }
-    const provenance = record.provenance ?? 'inferred'
-    if (provenance !== 'asserted' && provenance !== 'inferred') {
-      malformed(`claim ${index} has an invalid provenance`)
+    const basis = record.basis ?? 'inferred'
+    if (basis !== 'asserted' && basis !== 'inferred') {
+      malformed(`claim ${index} has an invalid basis`)
     }
     const supersedes = record.supersedes
     if (supersedes !== undefined
@@ -116,7 +116,7 @@ export function parseFactExtraction(
       key: key.trim(),
       claim: claim.trim(),
       sourceEventIds: sources.map(source => source as SessionSeq),
-      provenance: provenance as FactProvenance,
+      basis: basis as FactBasis,
       ...supersedes === undefined ? {} : { supersedes: (supersedes as string[]).map(target => target.trim()) },
     }
   })

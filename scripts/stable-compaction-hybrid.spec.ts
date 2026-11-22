@@ -664,7 +664,7 @@ it('compacts through the fact ledger and keeps sourced facts across passes', asy
       const key = text.includes('SECOND_SEGMENT') ? 'second' : 'first'
       return textResponse(JSON.stringify([{
         kind: 'decision', key, claim: `Claim ${index} keeps DSH-TSK-0012.`, sourceSeqs: [seqs[0] ?? 1],
-        provenance: 'asserted',
+        basis: 'asserted',
       }]))
     }))
     ctx.llm.registerAdapter([wide.provider], chat)
@@ -723,7 +723,7 @@ it('keeps seeded facts, updates and conflicts across a >1M fact-ledger compactio
       const first = seqs[0] ?? 1
       const claims: object[] = [{ kind: 'observation', key: `chunk-${String(first)}`, claim: `Chunk at ${String(first)} reviewed.`, sourceSeqs: [first] }]
       if (text.includes('EARLY_MARKER')) {
-        claims.push({ kind: 'constraint', key: 'early', claim: 'Early fact keeps DSH-TSK-0012 and 1066429.', sourceSeqs: [first], provenance: 'asserted' })
+        claims.push({ kind: 'constraint', key: 'early', claim: 'Early fact keeps DSH-TSK-0012 and 1066429.', sourceSeqs: [first], basis: 'asserted' })
         claims.push({ kind: 'decision', key: 'auth-mode', claim: 'legacy', sourceSeqs: [first] })
       }
       if (text.includes('MIDDLE_MARKER')) {
@@ -1064,7 +1064,7 @@ it('measures the fact-extraction envelope when the resident target and fact ledg
       const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
       return textResponse(JSON.stringify([{
         kind: 'observation', key: 'resident-fact', claim: 'Resident target and fact ledger combine.',
-        sourceSeqs: [seqs[0] ?? 1], provenance: 'asserted',
+        sourceSeqs: [seqs[0] ?? 1], basis: 'asserted',
       }]))
     }))
     summary.windows.set('fixed-model', 262_144)
