@@ -42,6 +42,9 @@ const BASIC_COMPACT_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'modelPolicies',
   'auto',
   'incremental',
+  'factLedger',
+  'factMaxClaims',
+  'factMaxClaimChars',
 ])
 
 /** Complete exact-target override key set. */
@@ -76,6 +79,14 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
   if (config.incremental !== undefined && typeof config.incremental !== 'boolean') {
     throw new Error('BasicCompactionConfig: incremental must be a boolean')
   }
+  if (config.factLedger !== undefined && typeof config.factLedger !== 'boolean') {
+    throw new Error('BasicCompactionConfig: factLedger must be a boolean')
+  }
+  if (config.factLedger === true && config.incremental !== true) {
+    throw new Error('BasicCompactionConfig: factLedger requires incremental: true')
+  }
+  if (config.factMaxClaims !== undefined) assertPositiveInteger('BasicCompactionConfig.factMaxClaims', config.factMaxClaims)
+  if (config.factMaxClaimChars !== undefined) assertPositiveInteger('BasicCompactionConfig.factMaxClaimChars', config.factMaxClaimChars)
 
   const headroomTokens = config.headroomTokens ?? 65_536
   const maxTokens = config.maxTokens ?? headroomTokens
@@ -116,6 +127,9 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     modelPolicies,
     auto: config.auto ?? true,
     incremental: config.incremental ?? false,
+    factLedger: config.factLedger ?? false,
+    factMaxClaims: config.factMaxClaims ?? 64,
+    factMaxClaimChars: config.factMaxClaimChars ?? 2_000,
   })
 }
 

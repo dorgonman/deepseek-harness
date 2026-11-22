@@ -150,7 +150,7 @@ declare module '@deepseek-ai/dsh-session/types' {
        * Merged sourced facts committed with this checkpoint. Chunk progress and
        * ledger snapshots share one log event; a dangling summary is not coverage.
        */
-      ledger?: CompactionFact[]
+      ledger?: readonly CompactionFact[]
     } & (
       | {
         /** Complete provider output before the backend's safe summary projection. */

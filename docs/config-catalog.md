@@ -798,6 +798,16 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
    * the default keeps full-surface behavior so this setting is opt-in.
    */
   incremental?: boolean
+  /**
+   * With `incremental`, extract typed sourced facts per chunk, commit the merged
+   * ledger, and compose the checkpoint from the bounded fact view instead of
+   * carrying prior summary text. Defaults to `false`.
+   */
+  factLedger?: boolean
+  /** Maximum facts accepted from one chunk response. Defaults to `64`. */
+  factMaxClaims?: number
+  /** Maximum characters in one extracted claim. Defaults to `2000`. */
+  factMaxClaimChars?: number
 }
 
 /** Policy fields shared by the default policy and exact model overrides. */

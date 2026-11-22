@@ -643,3 +643,61 @@ it('dispatches no summarizer call when committed coverage reaches the last RAW e
     summarizationModel: 'summary', maxTokens: 1_024,
   })
 })
+
+it('compacts through the fact ledger and keeps sourced facts across passes', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 8 }, () => textResponse('Reply.')))
+    const summary = new WindowAdapter(Array.from({ length: 8 }, (_, index) => (options: GenerateOptions) => {
+      const text = requestText(options)
+      const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
+      const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
+      const key = text.includes('SECOND_SEGMENT') ? 'second' : 'first'
+      return textResponse(JSON.stringify([{
+        kind: 'decision', key, claim: `Claim ${index} keeps DSH-TSK-0012.`, sourceSeqs: [seqs[0] ?? 1],
+        provenance: 'asserted',
+      }]))
+    }))
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-fact-ledger')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, maxTokens: 1_024 }, meta: { cwd: root },
+    })
+
+    await send(owned.agent, 'FIRST_SEGMENT '.repeat(150))
+    await ctx.compaction.compactNow(owned.agent, signal)
+    const firstPassRequests = summary.requests.length
+    expect(firstPassRequests).toBeGreaterThan(0)
+    expect(requestText(summary.requests[0]!)).toContain('Extract durable facts')
+
+    await send(owned.agent, 'SECOND_SEGMENT raw history.')
+    await ctx.compaction.compactNow(owned.agent, signal)
+    for (const request of summary.requests.slice(firstPassRequests)) {
+      expect(requestText(request)).not.toContain('Claim 0 keeps')
+      expect(requestText(request)).not.toContain('Sourced facts from compacted history')
+    }
+
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    const records = events.filter((event): event is SessionEvent<'compaction/summary'> =>
+      event.type === 'compaction/summary' && event.data.ledger !== undefined)
+    expect(records).toHaveLength(2)
+    expect(records[0]!.data.ledger).toHaveLength(1)
+    expect(records[1]!.data.ledger).toHaveLength(2)
+    expect(records[1]!.data.ledger!.every(fact => fact.status === 'active')).toBe(true)
+    expect(records[1]!.data.ledger![0]!.sourceEventIds.length).toBeGreaterThan(0)
+    expect(records[1]!.data.ledger![0]!.evidenceDigest).toMatch(/^[0-9a-f]{64}$/)
+    expect(records[1]!.data.incremental!.revision).toBe(2)
+
+    const checkpointText = checkpoints(events).flatMap(event => event.type === 'user/message'
+      ? event.data.content.flatMap(block => block.type === 'text' ? [block.text] : [])
+      : []).join('\n')
+    expect(checkpointText).toContain('Sourced facts from compacted history')
+    expect(checkpointText).toContain('Claim 0 keeps DSH-TSK-0012')
+    expect(checkpointText).toContain('Claim 1 keeps DSH-TSK-0012')
+    expect(checkpointText).toContain('source events')
+    await owned.dispose()
+  }, {
+    incremental: true, factLedger: true, auto: true, thresholdRatio: 0.95,
+    summarizationProvider: 'synthetic-summary', summarizationModel: 'summary', maxTokens: 1_024,
+  })
+})

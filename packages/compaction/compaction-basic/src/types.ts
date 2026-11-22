@@ -65,6 +65,16 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
    * the default keeps full-surface behavior so this setting is opt-in.
    */
   incremental?: boolean
+  /**
+   * With `incremental`, extract typed sourced facts per chunk, commit the merged
+   * ledger, and compose the checkpoint from the bounded fact view instead of
+   * carrying prior summary text. Defaults to `false`.
+   */
+  factLedger?: boolean
+  /** Maximum facts accepted from one chunk response. Defaults to `64`. */
+  factMaxClaims?: number
+  /** Maximum characters in one extracted claim. Defaults to `2000`. */
+  factMaxClaimChars?: number
 }
 
 /** Exactly one validated retention form. */
@@ -91,6 +101,9 @@ export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & {
   readonly modelPolicies: readonly Readonly<ModelCompactPolicyConfig>[]
   readonly auto: boolean
   readonly incremental: boolean
+  readonly factLedger: boolean
+  readonly factMaxClaims: number
+  readonly factMaxClaimChars: number
 }
 
 /** Fully merged policy for one routed conversation target, before capacity scaling. */
