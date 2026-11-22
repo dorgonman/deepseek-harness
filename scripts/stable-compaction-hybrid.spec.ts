@@ -13,7 +13,9 @@ import Commands from '@deepseek-ai/dsh-commands'
 import { CompactionId, compactCheckpointSource, isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import HybridCompactionEngine from '@deepseek-ai/dsh-compaction-basic/hybrid'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
-import { CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import {
+  CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, type GenerateOptions, type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import { deriveReplayScript } from '@deepseek-ai/dsh-llm-replay'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -784,6 +786,64 @@ it('keeps seeded facts, updates and conflicts across a >1M fact-ledger compactio
     expect(second.data.ledger.find(entry => entry.key === 'auth-mode' && entry.claim === 'resident')?.status).toBe('active')
     expect(second.data.ledger.find(entry => entry.key === 'early')?.status).toBe('active')
     validateLedger(second.data.ledger, after)
+    await owned.dispose()
+  }, {
+    incremental: true, factLedger: true, auto: true, thresholdRatio: 0.95,
+    summarizationProvider: 'synthetic-summary', summarizationModel: 'summary', maxTokens: 1_024,
+  })
+})
+
+it('omits facts explicitly when the destination cannot hold the whole view', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 70 }, () => textResponse('Reply.')))
+    const longText = (text: string): StreamChunk[] => [
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text },
+      { type: 'block-end', index: 0, block: { type: 'text', text } },
+      { type: 'usage', usage: { inputTokens: 10, outputTokens: 1_020 } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]
+    const claimsFor = (options: GenerateOptions): string => {
+      const text = requestText(options)
+      const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
+      const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
+      const first = seqs[0] ?? 1
+      return JSON.stringify(Array.from({ length: 12 }, (_, index) => ({
+        kind: 'observation', key: `fact-${String(first)}-${String(index)}`,
+        claim: `Fact ${String(first)}-${String(index)} ${'y'.repeat(300)}`, sourceSeqs: [first],
+      })))
+    }
+    const summary = new WindowAdapter(
+      Array.from({ length: 8 }, () => (options: GenerateOptions) => longText(claimsFor(options))),
+    )
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-fact-ledger-view-budget')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, maxTokens: 1_024 }, meta: { cwd: root },
+    })
+    const filler = 'x'.repeat(72_000)
+    for (let turn = 0; turn < 60; turn += 1) await send(owned.agent, `${filler}${turn}`)
+    owned.agent.model.select({ provider: wide.provider, model: 'narrow' })
+    await send(owned.agent, 'Switch to the narrow destination.')
+
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    const record = events.find(event => event.type === 'compaction/summary' && event.data.ledger !== undefined)
+    expect(record?.type).toBe('compaction/summary')
+    if (record?.type !== 'compaction/summary' || record.data.ledger === undefined) {
+      throw new Error('The switch committed no ledger')
+    }
+    expect(record.data.ledger).toHaveLength(60)
+    validateLedger(record.data.ledger, events)
+    const checkpointText = checkpoints(events).flatMap(event => event.type === 'user/message'
+      ? event.data.content.flatMap(block => block.type === 'text' ? [block.text] : [])
+      : []).join('\n')
+    expect(checkpointText).toContain('Omitted ')
+    expect(checkpointText).toContain('exact originals remain retrievable from session events')
+    const rendered = checkpointText.split('\n').filter(line => line.startsWith('- (observation fact-')).length
+    expect(rendered).toBeGreaterThan(0)
+    expect(rendered).toBeLessThan(60)
+    expect(chat.requests.at(-1)?.model).toBe('narrow')
     await owned.dispose()
   }, {
     incremental: true, factLedger: true, auto: true, thresholdRatio: 0.95,

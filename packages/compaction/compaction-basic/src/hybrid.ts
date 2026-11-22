@@ -23,7 +23,7 @@ import {
 import { projectSummaryTranscript } from './request-projection.ts'
 import { selectCompactableRange } from './region.ts'
 import type { CompactionChunkCall, RegionSummary, SurfaceSelection } from './region.ts'
-import { prepareSummaryCall, unframeSummary } from './summarizer.ts'
+import { frameSummary, prepareSummaryCall, unframeSummary } from './summarizer.ts'
 import type { SummarizationInput } from './summarizer.ts'
 
 interface OriginalMessage {
@@ -403,8 +403,33 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       if (ledger === undefined || ledger.length === 0) {
         throw new Error('compaction: fact extraction produced no ledger facts')
       }
+      // Reserve the non-view part of the destination envelope: the retained
+      // tail, any pending request, and the checkpoint framing. The final
+      // combined envelope is still checked by validateCommit.
+      const measurement = meter.measure(session, destinationHeader)
+      const shadowed = measurement.nodes.slice(selection.startIdx, selection.endIdx + 1)
+      const retainedTokens = Math.max(0, measurement.totalTokens
+        - shadowed.reduce((sum, node) => sum + node.tokens, 0))
+      let pendingReserve = 0
+      if (admission !== undefined) {
+        const empty = createUserMessage({ content: [], source: { kind: 'user' } })
+        const preview = admission.preview(events, {
+          start: selection.start,
+          end: selection.end,
+          shadowedSeqs: selection.shadowedSeqs,
+          replacementSeq: SessionSeq(session.seq + 1),
+          message: empty,
+        })
+        pendingReserve = Math.max(0, meter.measure(preview, destinationHeader).totalTokens
+          - retainedTokens - meter.estimateMessage(empty))
+      }
+      const frameTokens = meter.estimateMessage(createUserMessage({
+        content: frameSummary([]),
+        source: { kind: 'user' },
+      }))
+      const viewBudget = Math.max(0, destinationBudget - retainedTokens - pendingReserve - frameTokens)
       const view = composeCompactView(ledger, {
-        maxTokens: destinationBudget,
+        maxTokens: viewBudget,
         tokensOf: fact => meter.estimateMessage(createUserMessage({
           content: [{ type: 'text', text: renderFact(fact) }],
           source: { kind: 'user' },
