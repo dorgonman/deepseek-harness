@@ -1302,3 +1302,38 @@ it('compacts for an over-budget envelope that stays under the pressure threshold
     summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
   })
 }, 60_000)
+
+it('prices a tool continuation whose result alone would not fit the window', async () => {
+  await withContext(async (ctx, root) => {
+    ctx.tools.register(defineContentToolFixture({
+      name: 'fixture_huge', description: 'Return a large synthetic body.', parameters: {},
+      async execute() { return [{ type: 'text', text: 'TOOL_BODY '.repeat(4_000) }] },
+    }))
+    const chat = new WindowAdapter([toolCallResponse('call-huge', 'fixture_huge', {}), textResponse('done')])
+    chat.windows.set('tool-small', 8_192)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    const summary = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Result retained by source reference.')))
+    summary.windows.set('summary', 8_192)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-envelope-tool-continuation')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: 'synthetic-chat', model: 'tool-small', maxTokens: 1_024 },
+      meta: { cwd: root },
+    })
+    await send(owned.agent, 'Read the fixture.')
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    const turnEnd = events.findLast(event => event.type === 'turn/end')
+    // Either the continuation is refused before dispatch, or compaction removed
+    // the unwieldy result and the turn completed; both must be explicit.
+    // The unwieldy result cannot be summarized below the window, so the
+    // continuation is refused before a second provider request.
+    expect(turnEnd?.data.reason).toMatchObject({
+      kind: 'error',
+      error: { code: 'CONTEXT_ADMISSION_REFUSED' },
+    })
+    expect(chat.requests).toHaveLength(1)
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024,
+    summarizationProvider: 'synthetic-summary', summarizationModel: 'summary' })
+}, 60_000)
