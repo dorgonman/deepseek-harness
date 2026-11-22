@@ -423,6 +423,14 @@ export class PiAiAdapter extends LlmAdapter {
     options: GenerateOptions,
     snapshot: PiAiSnapshot,
   ): AsyncIterable<StreamChunk> {
+    if (options.residentBinding !== undefined) {
+      // A resident selection must be enforced by the transport that owns the
+      // deployment; this adapter cannot carry the identity, so it refuses.
+      throw new LlmError(
+        'llm-pi-ai: resident dispatch binding is unsupported by this transport',
+        'UNSUPPORTED_RESIDENT_TRANSPORT',
+      )
+    }
     if (options.stop !== undefined) {
       throw new LlmError('llm-pi-ai does not support GenerateOptions.stop', 'UNSUPPORTED_OPTION')
     }

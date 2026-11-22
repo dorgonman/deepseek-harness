@@ -578,6 +578,37 @@ export type LlmRequestPurpose = Extract<keyof LlmRequestPurposeMap, string>
  * A single model request, fully assembled.
  * @typeParam Purpose - declared purpose keys for callers; forwarding adapters may accept `string`.
  */
+/**
+ * Immutable resident dispatch identity bound to one prepared call. A transport
+ * that cannot enforce this identity must refuse the call instead of dispatching
+ * it under a merely resolved alias.
+ */
+export interface ResidentCallBinding {
+  /** Resident-only precondition schema declared by the selected deployment. */
+  readonly schema: string
+  /** Runtime instance that owns the loaded deployment. */
+  readonly instance: string
+  /** Host generation that must still be serving the deployment. */
+  readonly hostGeneration: string
+  /** Serving variant and revision the caller measured. */
+  readonly servingVariantId: string
+  /** Exact variant revision. */
+  readonly servingVariantRevision: string
+  /** Loaded model artifact identity. */
+  readonly modelArtifact: string
+  /** Artifact revision. */
+  readonly artifactRevision: string
+  /** Target configuration revision the deployment was validated against. */
+  readonly targetConfigRevision: string
+  /** Resident generation that must not rotate before acceptance. */
+  readonly residentGeneration: string
+  /** Opaque identity of the projected summary envelope this binding priced. */
+  readonly projectionId: string
+}
+/**
+ * A single model request, fully assembled.
+ * @typeParam Purpose - declared purpose keys for callers; forwarding adapters may accept `string`.
+ */
 export interface GenerateOptions<Purpose extends string = LlmRequestPurpose> {
   /** Registered provider route selecting the adapter instance. */
   provider: string
@@ -602,6 +633,11 @@ export interface GenerateOptions<Purpose extends string = LlmRequestPurpose> {
   toolHistory?: ToolHistory
   temperature?: number
   maxTokens?: number
+  /**
+   * Immutable resident dispatch identity when the caller selected a loaded
+   * resident deployment. A transport without resident support must refuse it.
+   */
+  residentBinding?: ResidentCallBinding
   /**
    * Stop sequences: generation halts as soon as the model produces any one of
    * these strings (adapters map to the provider's stop field, e.g. OpenAI

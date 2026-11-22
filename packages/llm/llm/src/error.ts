@@ -72,6 +72,7 @@ export const LLM_FAILURE_CODES = {
   UNSUPPORTED_CONTENT: {},
   UNSUPPORTED_OPTION: {},
   UNSUPPORTED_REASONING_EFFORT: {},
+  UNSUPPORTED_RESIDENT_TRANSPORT: {},
   UNSUPPORTED_TOOLS: {},
 } as const satisfies Readonly<Record<string, { readonly retryChoice?: true }>>
 

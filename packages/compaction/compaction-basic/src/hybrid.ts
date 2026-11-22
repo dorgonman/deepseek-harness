@@ -7,7 +7,7 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import {
   BlockAssembler, createSystemMessage, createUserMessage, LlmError, type ContentBlock, type Message,
-  type RequestMessage,
+  type RequestMessage, type ResidentCallBinding,
 } from '@deepseek-ai/dsh-llm'
 import {
   deriveEventMessage, foldSurface, isAppendSurfaceEvent, SessionSeq, type EpochHeader, type SessionEvent,
@@ -295,6 +295,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     // packed envelope, so this guarantees instruction agreement, not identity.
     const instruction = factLedger ? factInstruction : summaryInstruction
     const prepare = () => prepareSummaryCall(ctx, { ...target, maxTokens: policy.maxTokens }, signal, resolveMaxTokens)
+    let residentBinding: ResidentCallBinding | undefined
     let first = await prepare()
     if (this.config.summarizationMode === 'resident-preferred') {
       const resolved = await resolveResidentSummary(
@@ -326,6 +327,19 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
         { ...signal === undefined ? {} : { signal } },
       )
       target = { provider: resolved.provider, model: resolved.model }
+      const precondition = resolved.receipt.precondition
+      residentBinding = {
+        schema: precondition.schema,
+        instance: precondition.instance,
+        hostGeneration: precondition.host_generation,
+        servingVariantId: precondition.serving_variant_id,
+        servingVariantRevision: precondition.serving_variant_revision,
+        modelArtifact: precondition.model_artifact,
+        artifactRevision: precondition.artifact_revision,
+        targetConfigRevision: precondition.target_config_revision,
+        residentGeneration: precondition.resident_generation,
+        projectionId: resolved.receipt.projectionId,
+      }
       first = await prepare()
       ctx.logger.info(`compaction: resident summarizer ${JSON.stringify(resolved.receipt)}`)
     }
@@ -401,6 +415,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       const assembler = new BlockAssembler()
       for await (const item of call.stream({
         ...call.config, messages: chunk.messages, purpose: 'compaction', sessionId: session.id,
+        ...residentBinding === undefined ? {} : { residentBinding },
         ...signal === undefined ? {} : { signal },
       })) assembler.push(item)
       assertCurrent()

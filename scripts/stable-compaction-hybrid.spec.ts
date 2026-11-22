@@ -1038,6 +1038,17 @@ it('resolves one resident target for every chunk behind fixed mode', async () =>
 
     expect(summary.requests.length).toBeGreaterThan(0)
     expect(summary.requests.every(request => request.model === alias)).toBe(true)
+    // Every chunk is dispatched under the same immutable resident identity.
+    const bindings = summary.requests.map(request => request.residentBinding)
+    for (const binding of bindings) {
+      expect(binding).toMatchObject({
+        schema: RESIDENT_ONLY_V1, instance: 'fixture-instance', hostGeneration: 'host-1',
+        servingVariantId: 'variant-1', servingVariantRevision: 'variant-rev-1',
+        modelArtifact: 'artifact-1', artifactRevision: 'artifact-rev-1',
+        targetConfigRevision: 'config-1', residentGeneration: 'resident-1',
+      })
+    }
+    expect(new Set(bindings.map(binding => JSON.stringify(binding))).size).toBe(1)
     const events = (await ctx.sessionQuery.readSession(sessionId)).events
     const summaryEvent = events.findLast(event => event.type === 'compaction/summary')
     expect(summaryEvent).toMatchObject({

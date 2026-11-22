@@ -708,6 +708,11 @@ interface GenerateOptions<Purpose extends string = LlmRequestPurpose> {
   temperature?: number
   maxTokens?: number
   /**
+   * Immutable resident dispatch identity when the caller selected a loaded
+   * resident deployment. A transport without resident support must refuse it.
+   */
+  residentBinding?: ResidentCallBinding
+  /**
    * Stop sequences: generation halts as soon as the model produces any one of
    * these strings (adapters map to the provider's stop field, e.g. OpenAI
    * `stop`). The stop string itself is not included in the output.

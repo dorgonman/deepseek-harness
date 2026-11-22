@@ -7,7 +7,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
-import type { PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import type { PreparedLlmCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import * as PiAi from '../src/index.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
@@ -94,4 +94,25 @@ it('prefers a deployment request default over the transport fallback', async () 
 
   const body = await dispatchBody(prepared, server)
   expect(wireCompletionCap(body)).toBe(2_048)
+}, 20_000)
+
+it('refuses a resident dispatch binding before any provider request', async () => {
+  const server = await mockServer([{ events: textEvents }])
+  const ctx = await harness(server.url, [{ id: 'canonical', contextWindow: 65_536 }], 4_096)
+  const prepared = await ctx.llm.prepareCall({ provider: 'gateway', model: 'canonical' })
+  const residentBinding = {
+    schema: 'kinf.resident-only.v1', instance: 'fixture-instance', hostGeneration: 'boot-1',
+    servingVariantId: 'variant-1', servingVariantRevision: 'variant-rev-1',
+    modelArtifact: 'artifact-1', artifactRevision: 'artifact-rev-1',
+    targetConfigRevision: 'config-1', residentGeneration: 'resident-1', projectionId: 'projection-1',
+  }
+  const chunks: StreamChunk[] = []
+  for await (const chunk of prepared.stream(
+    { ...prepared.config, messages: [], residentBinding },
+  )) chunks.push(chunk)
+  expect(chunks.at(-1)).toMatchObject({
+    type: 'finish',
+    reason: { kind: 'error', failure: { code: 'UNSUPPORTED_RESIDENT_TRANSPORT' } },
+  })
+  expect(server.requests).toHaveLength(0)
 }, 20_000)
