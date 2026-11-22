@@ -16,6 +16,7 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import { resolveCompactSpec, resolveSummaryMaxTokens, resolveTargetPolicy } from './config.ts'
 import { parseFactExtraction } from './fact-extraction.ts'
 import { composeCompactView, createFacts, deriveCommittedLedger, mergeFacts } from './fact-ledger.ts'
+import { resolveResidentSummary } from './resident-resolution.ts'
 import {
   advanceCoverage, assertCoverageRevision, deriveCommittedCoverage, digestPolicy, digestRange,
   hasUnprocessedRawEvents, type IncrementalAdvanceMeta,
@@ -279,7 +280,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     if (policy.summarizationProvider === '' && policy.summarizationFallback === 'error') {
       throw new LlmError('compaction: Hybrid requires a configured summarizer', 'SUMMARY_TARGET_UNCONFIGURED')
     }
-    const target = policy.summarizationProvider === ''
+    let target = policy.summarizationProvider === ''
       ? { provider: sourceRoute.provider, model: sourceRoute.model }
       : { provider: policy.summarizationProvider, model: policy.summarizationModel }
     const resolveMaxTokens = policy.adaptiveHeadroom === 'pressure-and-summary'
@@ -290,8 +291,40 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       }
       : undefined
     const prepare = () => prepareSummaryCall(ctx, { ...target, maxTokens: policy.maxTokens }, signal, resolveMaxTokens)
-    const first = await prepare()
-    const { window, maxTokens } = first
+    let first = await prepare()
+    if (this.config.summarizationMode === 'resident-preferred') {
+      const resolved = await resolveResidentSummary(
+        ctx.get('residentSummarySource'),
+        {
+          mode: 'resident-preferred',
+          ...this.config.residentGatewayId === undefined ? {} : { gatewayId: this.config.residentGatewayId },
+          ...this.config.residentPinnedNodeId === undefined ? {} : { pinnedNodeId: this.config.residentPinnedNodeId },
+          ...this.config.residentAllowedNodeIds === undefined ? {} : { allowedNodeIds: this.config.residentAllowedNodeIds },
+          ...this.config.residentPreferredVariantIds === undefined
+            ? {}
+            : { preferredVariantIds: this.config.residentPreferredVariantIds },
+          ...this.config.residentProvider === undefined ? {} : { provider: this.config.residentProvider },
+          maxAgeMs: this.config.residentMaxAgeMs,
+        },
+        (() => {
+          const sample = groups[0]
+          if (sample === undefined) throw new Error('compaction: no RAW group selected')
+          const projection: RequestMessage = {
+            role: 'user',
+            content: [
+              { type: 'text', text: `Session ${session.id} source events: ${sample.map(({ event }) => event.seq).join(', ')}.` },
+              ...projectSummaryTranscript(sample.map(({ message }) => message), ref => ctx.llm.fileRequestText(ref))
+                .flatMap(message => message.content),
+            ],
+          }
+          return { messages: [summaryInstruction, projection], maxTokens: first.maxTokens, reserveTokens: 0 }
+        })(),
+        { ...signal === undefined ? {} : { signal } },
+      )
+      target = { provider: resolved.provider, model: resolved.model }
+      first = await prepare()
+      ctx.logger.info(`compaction: resident summarizer ${JSON.stringify(resolved.receipt)}`)
+    }    const { window, maxTokens } = first
     const destinationCall = admission === undefined ? await ctx.llm.prepareCall(destination.config, signal) : undefined
     const destinationWindow = admission?.contextWindow ?? destinationCall?.context?.contextWindow
     const destinationHeader = destinationCall === undefined ? destination : { ...destination, config: destinationCall.config }

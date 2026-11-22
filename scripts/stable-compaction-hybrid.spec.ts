@@ -28,6 +28,10 @@ import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { expect, it, vi } from 'vitest'
 import { advanceCoverage, deriveCommittedCoverage, digestCanonical } from '../packages/compaction/compaction-basic/src/incremental.ts'
 import { validateLedger } from '../packages/compaction/compaction-basic/src/fact-ledger.ts'
+import type { ResidentObservationRequest, ResidentObservationSource } from '../packages/compaction/compaction-basic/src/resident-observation.ts'
+import {
+  RESIDENT_ONLY_V1, type Candidate, type ResidentPrecondition,
+} from '../packages/compaction/compaction-basic/src/resident-selector.ts'
 import { MockAdapter, textResponse, toolCallResponse } from '../packages/core/agent-loop/tests/mock-adapter.ts'
 
 class WindowAdapter extends MockAdapter {
@@ -963,5 +967,88 @@ it('binds Hybrid through the product preset registry composition', async () => {
     expect(ctx.agentPresets.inspectCompositions(owned.agent.ctx)[0]?.modules.map(row => row.moduleName))
       .toContain('cordis:hybrid-fixture')
     await owned.dispose()
+  })
+})
+
+function residentRow(logicalModel: string): Candidate {
+  const identity: ResidentPrecondition = {
+    schema: RESIDENT_ONLY_V1,
+    instance: 'fixture-instance',
+    host_generation: 'host-1',
+    serving_variant_id: 'variant-1',
+    serving_variant_revision: 'variant-rev-1',
+    model_artifact: 'artifact-1',
+    artifact_revision: 'artifact-rev-1',
+    target_config_revision: 'config-1',
+    resident_generation: 'resident-1',
+  }
+  return {
+    node: {
+      id: 'fixture-local', name: 'fixture-alpha', bootGeneration: 'boot-1',
+      registered: true, authorized: true, freshness: 'fresh', observedAtMs: Date.now() - 10,
+    },
+    host: { identity, mode: 'mservice', state: 'ready', enabled: true, usable: true, admissionOpen: true },
+    model: {
+      logicalModel, servingVariantId: 'variant-1', servingVariantRevision: 'variant-rev-1',
+      artifactId: 'artifact-1', targetConfigRevision: 'config-1', loaded: true, ready: true,
+      configurationValidated: true, operations: ['chat'], capabilitySource: 'runtime', capabilities: ['text'],
+      budget: { contextTokens: 262_144, maxOutputTokens: 1_024, maxInputTokensAtMaxOutput: 261_120 },
+    },
+    route: {
+      id: 'route-1', gatewayId: 'fixture-gateway', nodeId: 'fixture-local', bootGeneration: 'boot-1',
+      instance: 'fixture-instance', logicalModel, servingVariantId: 'variant-1',
+      alias: `${logicalModel}@fixture-alpha`, healthy: true, contract: RESIDENT_ONLY_V1,
+      noRetry: true, noFallback: true, verifiedAtMs: Date.now() - 20,
+    },
+    queue: { pending: 0, active: 0, maxPending: 8 },
+    measurement: {
+      projectionId: '', hostGeneration: 'host-1', residentGeneration: 'resident-1',
+      targetConfigRevision: 'config-1', renderedPromptTokens: 100,
+    },
+  }
+}
+
+it('resolves one resident target for every chunk behind fixed mode', async () => {
+  await withContext(async (ctx, root) => {
+    const alias = 'resident-model@fixture-alpha'
+    const row = residentRow('resident-model')
+    const source: ResidentObservationSource = {
+      observe: (request: ResidentObservationRequest) => {
+        const fresh = { ...row, node: { ...row.node, observedAtMs: Date.now() }, route: { ...row.route, verifiedAtMs: Date.now() } }
+        return Promise.resolve([{
+          ...fresh,
+          measurement: { ...fresh.measurement!, projectionId: request.projection?.id ?? '' },
+        }])
+      },
+    }
+    ctx.provide('residentSummarySource', source)
+    const chat = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Reply.')))
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const summary = new WindowAdapter(Array.from({ length: 8 }, () => textResponse('Resident summary.')))
+    summary.windows.set('fixed-model', 262_144)
+    summary.windows.set(alias, 262_144)
+    ctx.llm.registerAdapter(['fixture-provider'], summary)
+    const sessionId = SessionId('hybrid-resident-target')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, maxTokens: 1_024 }, meta: { cwd: root },
+    })
+    await send(owned.agent, 'RESIDENT_MODE_HISTORY '.repeat(200))
+    await ctx.compaction.compactNow(owned.agent, signal)
+
+    expect(summary.requests.length).toBeGreaterThan(0)
+    expect(summary.requests.every(request => request.model === alias)).toBe(true)
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    const summaryEvent = events.findLast(event => event.type === 'compaction/summary')
+    expect(summaryEvent).toMatchObject({
+      type: 'compaction/summary',
+      data: { provider: 'fixture-provider', model: alias },
+    })
+    expect(checkpoints(events)).toHaveLength(1)
+    await owned.dispose()
+  }, {
+    auto: true, thresholdRatio: 0.95, summarizationProvider: 'fixture-provider',
+    summarizationModel: 'fixed-model', maxTokens: 1_024,
+    summarizationMode: 'resident-preferred', residentGatewayId: 'fixture-gateway',
+    residentPinnedNodeId: 'fixture-local', residentProvider: 'fixture-provider', residentMaxAgeMs: 500,
   })
 })

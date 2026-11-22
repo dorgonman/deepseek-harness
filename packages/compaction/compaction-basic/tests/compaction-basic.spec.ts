@@ -328,6 +328,8 @@ describe('compact configuration and defaults', () => {
       factLedger: false,
       factMaxClaims: 64,
       factMaxClaimChars: 2_000,
+      summarizationMode: 'fixed',
+      residentMaxAgeMs: 60_000,
     })
     expect(Object.isFrozen(resolved)).toBe(true)
   })
@@ -340,6 +342,29 @@ describe('compact configuration and defaults', () => {
     })
     expect(() => resolveConfig({ incremental: true, factMaxClaims: 0 })).toThrow(/factMaxClaims/)
     expect(() => resolveConfig({ incremental: true, factMaxClaimChars: 0 })).toThrow(/factMaxClaimChars/)
+  })
+
+  it('validates resident-preferred scope, gateway and age bounds', () => {
+    expect(() => resolveConfig({
+      summarizationMode: 'resident-preferred', residentProvider: 'fixture-provider', residentPinnedNodeId: 'node-a',
+    })).toThrow(/residentGatewayId/)
+    expect(() => resolveConfig({
+      summarizationMode: 'resident-preferred', residentGatewayId: 'gateway-a', residentProvider: 'fixture-provider',
+    })).toThrow(/requires residentPinnedNodeId or residentAllowedNodeIds/)
+    expect(() => resolveConfig({ residentMaxAgeMs: 60_001 })).toThrow(/residentMaxAgeMs/)
+    expect(() => resolveConfig({
+      summarizationMode: 'resident-preferred', residentGatewayId: 'gateway-a', residentProvider: 'fixture-provider',
+      residentAllowedNodeIds: [],
+    })).toThrow(/residentAllowedNodeIds/)
+    const resolved = resolveConfig({
+      summarizationMode: 'resident-preferred', residentGatewayId: 'gateway-a',
+      residentProvider: 'fixture-provider', residentPinnedNodeId: 'node-a', residentMaxAgeMs: 1_000,
+    })
+    expect(resolved).toMatchObject({
+      summarizationMode: 'resident-preferred', residentGatewayId: 'gateway-a',
+      residentProvider: 'fixture-provider', residentPinnedNodeId: 'node-a', residentMaxAgeMs: 1_000,
+    })
+    expect(resolved.residentAllowedNodeIds).toBeUndefined()
   })
 
   it('defaults summary generation to headroom and preserves explicit caps', () => {

@@ -313,6 +313,9 @@ export class BasicCompactionEngine extends CompactionEngine {
     agent: Agent,
     signal?: AbortSignal,
   ): Promise<SummaryResult> {
+    if (this.config.summarizationMode === 'resident-preferred') {
+      throw new Error('compaction: resident-preferred summarization requires the Hybrid backend')
+    }
     const target = conversationTarget(agent)
     if (target === undefined) return summarizeWithLlm(this.ctx, this.config, input, agent, signal)
     const policy = resolveTargetPolicy(this.config, target)

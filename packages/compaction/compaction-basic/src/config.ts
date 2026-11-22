@@ -45,6 +45,13 @@ const BASIC_COMPACT_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'factLedger',
   'factMaxClaims',
   'factMaxClaimChars',
+  'summarizationMode',
+  'residentGatewayId',
+  'residentPinnedNodeId',
+  'residentAllowedNodeIds',
+  'residentPreferredVariantIds',
+  'residentProvider',
+  'residentMaxAgeMs',
 ])
 
 /** Complete exact-target override key set. */
@@ -62,6 +69,26 @@ export class TargetPressureConfigError extends Error {
    */
   constructor(readonly targetKey: string, message: string) {
     super(message)
+  }
+}
+
+/**
+ * Validate one optional resident node/variant identity list.
+ * @param name - configuration field name.
+ * @param value - list to validate, or undefined when omitted.
+ */
+function validateResidentList(name: string, value: readonly unknown[] | undefined): void {
+  if (value === undefined) return
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32) {
+    throw new Error(`BasicCompactionConfig: ${name} must be a non-empty list of at most 32 entries`)
+  }
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (typeof item !== 'string' || item.trim() === '') {
+      throw new Error(`BasicCompactionConfig: ${name} entries must be non-empty strings`)
+    }
+    if (seen.has(item)) throw new Error(`BasicCompactionConfig: ${name} repeats ${item}`)
+    seen.add(item)
   }
 }
 
@@ -87,6 +114,31 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
   }
   if (config.factMaxClaims !== undefined) assertPositiveInteger('BasicCompactionConfig.factMaxClaims', config.factMaxClaims)
   if (config.factMaxClaimChars !== undefined) assertPositiveInteger('BasicCompactionConfig.factMaxClaimChars', config.factMaxClaimChars)
+  if (config.summarizationMode !== undefined
+    && config.summarizationMode !== 'fixed' && config.summarizationMode !== 'resident-preferred') {
+    throw new Error('BasicCompactionConfig: summarizationMode must be fixed or resident-preferred')
+  }
+  if (config.residentMaxAgeMs !== undefined
+    && (!Number.isSafeInteger(config.residentMaxAgeMs) || config.residentMaxAgeMs < 1 || config.residentMaxAgeMs > 60_000)) {
+    throw new Error('BasicCompactionConfig: residentMaxAgeMs must be an integer between 1 and 60000')
+  }
+  if (config.summarizationMode === 'resident-preferred') {
+    if (typeof config.residentGatewayId !== 'string' || config.residentGatewayId.trim() === '') {
+      throw new Error('BasicCompactionConfig: residentGatewayId is required for resident-preferred mode')
+    }
+    if (typeof config.residentProvider !== 'string' || config.residentProvider.trim() === '') {
+      throw new Error('BasicCompactionConfig: residentProvider is required for resident-preferred mode')
+    }
+    if (config.residentPinnedNodeId !== undefined
+      && (typeof config.residentPinnedNodeId !== 'string' || config.residentPinnedNodeId.trim() === '')) {
+      throw new Error('BasicCompactionConfig: residentPinnedNodeId must be a non-empty string')
+    }
+    if (config.residentPinnedNodeId === undefined && config.residentAllowedNodeIds === undefined) {
+      throw new Error('BasicCompactionConfig: resident-preferred mode requires residentPinnedNodeId or residentAllowedNodeIds')
+    }
+    validateResidentList('residentAllowedNodeIds', config.residentAllowedNodeIds)
+    validateResidentList('residentPreferredVariantIds', config.residentPreferredVariantIds)
+  }
 
   const headroomTokens = config.headroomTokens ?? 65_536
   const maxTokens = config.maxTokens ?? headroomTokens
@@ -130,6 +182,13 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     factLedger: config.factLedger ?? false,
     factMaxClaims: config.factMaxClaims ?? 64,
     factMaxClaimChars: config.factMaxClaimChars ?? 2_000,
+    summarizationMode: config.summarizationMode ?? 'fixed',
+    ...config.residentGatewayId === undefined ? {} : { residentGatewayId: config.residentGatewayId },
+    ...config.residentPinnedNodeId === undefined ? {} : { residentPinnedNodeId: config.residentPinnedNodeId },
+    ...config.residentAllowedNodeIds === undefined ? {} : { residentAllowedNodeIds: config.residentAllowedNodeIds },
+    ...config.residentPreferredVariantIds === undefined ? {} : { residentPreferredVariantIds: config.residentPreferredVariantIds },
+    ...config.residentProvider === undefined ? {} : { residentProvider: config.residentProvider },
+    residentMaxAgeMs: config.residentMaxAgeMs ?? 60_000,
   })
 }
 
