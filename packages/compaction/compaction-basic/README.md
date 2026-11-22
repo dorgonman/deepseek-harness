@@ -92,7 +92,7 @@ All settings are optional. With context window `W`, effective request output cap
 | `factLedger` | `false` | With `incremental`, extract typed sourced facts per chunk, commit the merged ledger, and compose the checkpoint from the bounded fact view. Requires `incremental: true`. |
 | `factMaxClaims` | `64` | Maximum facts accepted from one chunk response. |
 | `factMaxClaimChars` | `2000` | Maximum characters in one extracted claim. |
-| `summarizationMode` | `fixed` | `resident-preferred` resolves one already-loaded resident deployment per compaction through the mounted observation source; `fixed` keeps the configured or routed target. |
+| `summarizationMode` | `fixed` | `resident-preferred` resolves one already-loaded resident deployment per compaction through the mounted observation source and binds its identity to the dispatch; the transport must enforce that binding, and an unsupported transport refuses with `UNSUPPORTED_RESIDENT_TRANSPORT` instead of falling back. `fixed` keeps the configured or routed target. |
 | `residentGatewayId` | — | Authorized gateway identity; required for resident-preferred. |
 | `residentPinnedNodeId` | — | Conversation-pinned node used when no allowlist is supplied. |
 | `residentAllowedNodeIds` | — | Explicit compaction node allowlist; replaces the pin. |

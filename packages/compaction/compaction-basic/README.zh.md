@@ -92,7 +92,7 @@ Hybrid 按来源顺序合并分块结果。切换模型时，它按照解析后�
 | `factLedger` | `false` | 与 `incremental` 配合：逐块提取带来源的类型化事实，提交合并账本，并用有界事实视图组装检查点。需要 `incremental: true`。 |
 | `factMaxClaims` | `64` | 单次分块响应接受的最大事实数。 |
 | `factMaxClaimChars` | `2000` | 单条提取事实的最大字符数。 |
-| `summarizationMode` | `fixed` | `resident-preferred` 通过已挂载的观察源为每次压缩解析一个已加载的常驻部署；`fixed` 保持配置或路由目标。 |
+| `summarizationMode` | `fixed` | `resident-preferred` 通过已挂载的观察源为每次压缩解析一个已加载的常驻部署，并把它绑进该次分派；传输层必须强制该绑定，不支持的传输会以 `UNSUPPORTED_RESIDENT_TRANSPORT` 拒绝而不是回退。`fixed` 保持配置或路由目标。 |
 | `residentGatewayId` | — | 已授权网关标识；resident-preferred 必填。 |
 | `residentPinnedNodeId` | — | 未提供允许列表时使用的会话固定节点。 |
 | `residentAllowedNodeIds` | — | 显式压缩节点允许列表；替代固定节点。 |
