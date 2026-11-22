@@ -1269,3 +1269,36 @@ it('restores a fact-ledger checkpoint in a fresh Basic context (rollback compati
     await rm(root, { recursive: true, force: true })
   }
 }, 120_000)
+
+it('compacts for an over-budget envelope that stays under the pressure threshold', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('First reply.'), textResponse('Second reply.')])
+    chat.windows.set('roomy', 16_384)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    const summary = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Compacted history.')))
+    summary.windows.set('summary', 16_384)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-envelope-pressure-fallback')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: 'synthetic-chat', model: 'roomy', maxTokens: 1_024 },
+      meta: { cwd: root },
+    })
+    await send(owned.agent, 'HISTORY '.repeat(3_000))
+    expect(chat.requests).toHaveLength(1)
+    await send(owned.agent, 'PENDING '.repeat(5_000))
+
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(events.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
+    expect(checkpoints(events)).toHaveLength(1)
+    expect(chat.requests).toHaveLength(2)
+    // The fallback compacted the durable history, and the pending input survived.
+    const second = requestText(chat.requests[1]!)
+    expect(second).not.toContain('HISTORY HISTORY')
+    expect(second).toContain('PENDING PENDING')
+    await owned.dispose()
+  }, {
+    auto: true, thresholdRatio: 0.95, maxTokens: 1_024,
+    summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
+  })
+}, 60_000)

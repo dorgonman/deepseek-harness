@@ -199,7 +199,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     // context, tools, retained history and the bound completion reservation.
     // `preview` may commit a checkpoint (the loop rebuilds and re-admits);
     // `verify` sees the frozen request and may only refuse.
-    ctx.on('agent/request-envelope', async ({ agent, view, contextWindow, completionMaxTokens, phase, signal }) => {
+    ctx.on('agent/request-envelope', async ({ agent, header, view, contextWindow, completionMaxTokens, completionSource, phase, signal }) => {
       if (signal.aborted || contextWindow === undefined) return
       const meter = this.ctx.tokenMeter
       const prompt = view.deriveMessages().reduce((total, message) => total + meter.estimateMessage(message), 0)
@@ -207,7 +207,8 @@ export class BasicCompactionEngine extends CompactionEngine {
       const reserve = completionMaxTokens ?? 0
       const total = prompt + reserve
       if (total <= contextWindow) return
-      const detail = `~${total} tokens (${prompt} request + ${reserve} reserved) exceed the ${contextWindow}-token window`
+      const detail = `~${total} tokens (${prompt} request + ${reserve} reserved, ${completionSource}) `
+        + `exceed the ${contextWindow}-token window`
       if (phase === 'verify') {
         throw new LlmError(
           `compaction: request refused before dispatch; ${detail}`,
@@ -217,6 +218,10 @@ export class BasicCompactionEngine extends CompactionEngine {
       let compacted: CompactionResult | null
       try {
         compacted = await this.compactIfNeeded(agent, 'pressure', signal)
+        // The pressure threshold can sit above the exact envelope: the durable
+        // surface is still "cheap enough" while pending input pushes this
+        // request over. Fall back to a range selected for the envelope itself.
+        if (compacted === null) compacted = await this.compactEnvelopeOverflow(agent, header, signal)
       } catch (error: unknown) {
         signal.throwIfAborted()
         const reason = error instanceof Error ? error.message : String(error)
@@ -393,6 +398,27 @@ export class BasicCompactionEngine extends CompactionEngine {
     return this.compactRegion(start, end, agent, signal)
   }
 
+  /**
+   * Compact one range selected for an exact-envelope overflow rather than for
+   * the pressure threshold. Retains nothing: the loop rebuilds the envelope and
+   * prices it again, so an unnecessary second reduction is bounded by the
+   * caller's rebuild budget.
+   * @param agent - agent whose Surface is reduced.
+   * @param header - proposed envelope the reduction is priced against.
+   * @param signal - current turn cancellation.
+   * @returns the committed result, or null when no safe range remains.
+   */
+  private async compactEnvelopeOverflow(
+    agent: Agent,
+    header: EpochHeader,
+    signal: AbortSignal,
+  ): Promise<CompactionResult | null> {
+    signal.throwIfAborted()
+    const measurement = this.ctx.tokenMeter.measure(agent.session, header)
+    const range = selectCompactableRange(agent.session, measurement, 0)
+    if (range === null) return null
+    return this.compactPressureRegion(range.start, range.end, agent, header, signal)
+  }
   /** Supply a durability checkpoint for automatic and explicit transactions. */
   protected regionFlush(_agent: Agent): (() => Promise<void>) | undefined {
     return undefined
