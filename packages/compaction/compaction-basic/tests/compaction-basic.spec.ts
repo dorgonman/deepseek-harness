@@ -324,8 +324,22 @@ describe('compact configuration and defaults', () => {
       maxOverflowRetries: 1,
       modelPolicies: [],
       auto: true,
+      incremental: false,
+      factLedger: false,
+      factMaxClaims: 64,
+      factMaxClaimChars: 2_000,
     })
     expect(Object.isFrozen(resolved)).toBe(true)
+  })
+
+  it('requires incremental mode before enabling the fact ledger', () => {
+    expect(() => resolveConfig({ factLedger: true })).toThrow(/factLedger requires incremental/)
+    const resolved = resolveConfig({ incremental: true, factLedger: true, factMaxClaims: 8, factMaxClaimChars: 100 })
+    expect(resolved).toMatchObject({
+      incremental: true, factLedger: true, factMaxClaims: 8, factMaxClaimChars: 100,
+    })
+    expect(() => resolveConfig({ incremental: true, factMaxClaims: 0 })).toThrow(/factMaxClaims/)
+    expect(() => resolveConfig({ incremental: true, factMaxClaimChars: 0 })).toThrow(/factMaxClaimChars/)
   })
 
   it('defaults summary generation to headroom and preserves explicit caps', () => {
