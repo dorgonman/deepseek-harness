@@ -291,7 +291,8 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       }
       : undefined
     // One instruction shape feeds both the resident sample projection and every
-    // dispatched chunk: the selector must measure the prompt that will run.
+    // dispatched chunk. The sample remains the first RAW group rather than the
+    // packed envelope, so this guarantees instruction agreement, not identity.
     const instruction = factLedger ? factInstruction : summaryInstruction
     const prepare = () => prepareSummaryCall(ctx, { ...target, maxTokens: policy.maxTokens }, signal, resolveMaxTokens)
     let first = await prepare()
