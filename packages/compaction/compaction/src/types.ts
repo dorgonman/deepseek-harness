@@ -17,6 +17,36 @@ export type { CompactionId }
 /** The selected input representation of one auxiliary summarization call. */
 export type SummaryRequestProjection = 'conversation-prefix-v1' | 'text-transcript-v1'
 
+/** One contiguous append-origin event range represented by a checkpoint. */
+export interface CompactionCoveredRange {
+  /** First append-origin seq, inclusive. */
+  start: SessionSeq
+  /** Last append-origin seq, inclusive. */
+  end: SessionSeq
+  /** SHA-256 over the canonical content of every event in the range. */
+  digest: string
+}
+
+/**
+ * Durable incremental RAW coverage carried by a committed summary. Its
+ * presence marks a summary produced by incremental extraction; absence keeps
+ * the full-surface behavior of earlier backends and never implies coverage.
+ */
+export interface CompactionIncrementalCoverage {
+  /** Compare-and-set generation; incremented once per committed incremental summary. */
+  revision: number
+  /** Highest append-origin seq whose content this checkpoint accounts for. */
+  highWatermark: SessionSeq
+  /** Disjoint, ordered raw ranges represented by the checkpoint. */
+  covered: CompactionCoveredRange[]
+  /** Digest of the resolved compaction policy that produced the coverage. */
+  policyDigest: string
+  /** Summarizer identity that produced the new text, when one was called. */
+  summarizer?: { provider: string; model: string; maxTokens: number }
+  /** Provenance of checkpoint text carried forward from an earlier summary. */
+  carried?: { summarySeq: SessionSeq; digest: string }
+}
+
 /** Replay facts for one successful Hybrid summarizer call. */
 interface CompactionChunkCall {
   /** Original event groups in request order, with any tool-body substitution. */
@@ -73,6 +103,11 @@ declare module '@deepseek-ai/dsh-session/types' {
       requestProjection?: SummaryRequestProjection
       /** Provider-reported token usage for the summarization request, when emitted. */
       usage?: TokenUsage
+      /**
+       * Incremental RAW coverage committed with this checkpoint. Absent on a
+       * full-surface summary; readers must not infer coverage for that case.
+       */
+      incremental?: CompactionIncrementalCoverage
     } & (
       | {
         /** Complete provider output before the backend's safe summary projection. */
