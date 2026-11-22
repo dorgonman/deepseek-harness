@@ -1112,3 +1112,51 @@ it('measures the fact-extraction envelope when the resident target and fact ledg
     residentPinnedNodeId: 'fixture-local', residentProvider: 'fixture-provider', residentMaxAgeMs: 500,
   })
 }, 60_000)
+
+it('refuses a first request whose envelope exceeds the window before any provider call', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Reply.')))
+    chat.windows.set('tight', 4_096)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    const sessionId = SessionId('hybrid-envelope-first-refusal')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: 'synthetic-chat', model: 'tight', maxTokens: 3_900 },
+      meta: { cwd: root },
+    })
+    await send(owned.agent, 'FIRST_REQUEST_REFUSAL '.repeat(40))
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    const turnEnd = events.findLast(event => event.type === 'turn/end')
+    expect(turnEnd?.data.reason).toMatchObject({
+      kind: 'error',
+      error: { code: 'CONTEXT_ADMISSION_REFUSED' },
+    })
+    expect(chat.requests).toHaveLength(0)
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
+}, 60_000)
+
+it('refuses a same-route next turn whose envelope exceeds the window', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Reply.')))
+    chat.windows.set('small', 8_192)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    const sessionId = SessionId('hybrid-envelope-next-turn-refusal')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: 'synthetic-chat', model: 'small', maxTokens: 1_024 },
+      meta: { cwd: root },
+    })
+    await send(owned.agent, 'accepted first turn')
+    expect(chat.requests).toHaveLength(1)
+    await send(owned.agent, 'NEXT_TURN_OVERSIZE '.repeat(3_000))
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    const turnEnd = events.findLast(event => event.type === 'turn/end')
+    expect(turnEnd?.data.reason).toMatchObject({
+      kind: 'error',
+      error: { code: 'CONTEXT_ADMISSION_REFUSED' },
+    })
+    expect(chat.requests).toHaveLength(1)
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
+}, 60_000)

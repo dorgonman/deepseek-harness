@@ -19,7 +19,7 @@ class CompactionAdapter extends LlmAdapter {
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return Promise.resolve({
       provider, id: model, name: model,
-      context: { contextWindow: model === 'mock-summary' ? 16_384 : 2048 },
+      context: { contextWindow: 8_192 },
     })
   }
 
@@ -61,7 +61,7 @@ it('retains required cwd in the first request after proactive compaction with op
     const harness = await mountAgentLoopTestHarness(ctx)
     const agent = await harness.create(SessionId('compaction-admission'), { provider: 'mock', model: 'mock' }, { cwd: root })
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: 'Old context evidence. '.repeat(700) + 'Do work once, then finish.' }], source: { kind: 'user' },
+      content: [{ type: 'text', text: 'Old context evidence. '.repeat(1_200) + 'Do work once, then finish.' }], source: { kind: 'user' },
     }))
     await agent.whenIdle()
     const events = agent.session.snapshotEvents()

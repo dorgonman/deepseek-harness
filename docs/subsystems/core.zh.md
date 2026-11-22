@@ -1072,6 +1072,37 @@ Types: [Scoped](scope.zh.md)
 
 Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
 
+<a id="agentrequest-envelope--serial"></a>
+
+#### `agent/request-envelope` — serial
+
+Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen request that dispatch will send, so a listener may only refuse. A refusal throws, and no request reaches the provider.
+
+```ts cordis-catalog
+/**
+ * Price the request envelope before it is committed or dispatched. The
+ * `preview` phase runs before the step commits its admission, so a listener
+ * may commit a checkpoint (the loop then rebuilds the preview and re-admits);
+ * the `verify` phase runs on the frozen request that dispatch will send, so
+ * a listener may only refuse. A refusal throws, and no request reaches the
+ * provider.
+ * @param payload.agent - the agent whose request is being admitted.
+ * @param payload.header - the resolved envelope logged for this attempt.
+ * @param payload.view - Session whose derived messages are priced (a preview clone, or the live Session for verification).
+ * @param payload.contextWindow - the destination model's window when known.
+ * @param payload.completionMaxTokens - the output reservation bound to this attempt, when any.
+ * @param payload.completionSource - which layer supplied that reservation.
+ * @param payload.phase - `preview` may compact; `verify` may only refuse.
+ * @param payload.signal - the current turn's cancellation signal.
+ * @mode serial
+ */
+'agent/request-envelope'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader view: Session contextWindow?: number completionMaxTokens?: number completionSource: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown' phase: 'preview' | 'verify' signal: AbortSignal }): Promise<void> | void
+```
+
+Types: [EpochHeader](session.zh.md) · [Scoped](scope.zh.md) · [Session](session.zh.md)
+
+Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
+
 <a id="agentrequest-error--waterfall"></a>
 
 #### `agent/request-error` — waterfall

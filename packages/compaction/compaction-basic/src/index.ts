@@ -195,6 +195,45 @@ export class BasicCompactionEngine extends CompactionEngine {
       return next()
     })
 
+    // Last gate: price the exact envelope — pending input, system/runtime
+    // context, tools, retained history and the bound completion reservation.
+    // `preview` may commit a checkpoint (the loop rebuilds and re-admits);
+    // `verify` sees the frozen request and may only refuse.
+    ctx.on('agent/request-envelope', async ({ agent, view, contextWindow, completionMaxTokens, phase, signal }) => {
+      if (signal.aborted || contextWindow === undefined) return
+      const meter = this.ctx.tokenMeter
+      const prompt = view.deriveMessages().reduce((total, message) => total + meter.estimateMessage(message), 0)
+        + meter.estimateTools(view.requestHeader()?.tools)
+      const reserve = completionMaxTokens ?? 0
+      const total = prompt + reserve
+      if (total <= contextWindow) return
+      const detail = `~${total} tokens (${prompt} request + ${reserve} reserved) exceed the ${contextWindow}-token window`
+      if (phase === 'verify') {
+        throw new LlmError(
+          `compaction: request refused before dispatch; ${detail}`,
+          'CONTEXT_ADMISSION_REFUSED',
+        )
+      }
+      let compacted: CompactionResult | null
+      try {
+        compacted = await this.compactIfNeeded(agent, 'pressure', signal)
+      } catch (error: unknown) {
+        signal.throwIfAborted()
+        const reason = error instanceof Error ? error.message : String(error)
+        throw new LlmError(
+          `compaction: request refused before dispatch; ${detail} and compaction failed: ${reason}`,
+          'CONTEXT_ADMISSION_REFUSED',
+        )
+      }
+      if (compacted === null) {
+        throw new LlmError(
+          `compaction: request refused before dispatch; ${detail} and no safe range remains`,
+          'CONTEXT_ADMISSION_REFUSED',
+        )
+      }
+      logResult(compacted, 'request envelope')
+    })
+
     ctx.on('agent/status', ({ agent, status }) => {
       if (status === 'idle') this.overflowRetries.delete(agent)
     })
