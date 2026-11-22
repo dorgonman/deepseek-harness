@@ -2117,6 +2117,31 @@ describe('model-switch pressure', () => {
     const selected = { provider: 'missing', model: 'missing' }
     await expect(request(ctx, conversation(4), selected)).resolves.toEqual(selected)
   })
+
+  it('refuses a >1M-token switch when the 262K summarizer cannot hold the selected prefix', async () => {
+    const { ctx } = harness({
+      maxTokens: 1_024, summarizationProvider: 'summary', summarizationModel: 'summary',
+    })
+    const summary = new ContextAdapter(262_144)
+    const dispatch = vi.spyOn(summary, 'stream')
+    ctx.llm.registerAdapter(['summary'], summary)
+    ctx.llm.registerAdapter(['dest'], new ContextAdapter(262_144))
+    const session = conversation(45, 'x'.repeat(50_000))
+    const previous = session.requestHeader()
+    expect(ctx.tokenMeter.measure(session).totalTokens).toBeGreaterThan(1_000_000)
+
+    const switching = request(ctx, session, { provider: 'dest', model: 'dest' })
+    await expect(switching).rejects.toMatchObject({
+      code: 'MODEL_SWITCH_COMPACTION_FAILED',
+      cause: { code: 'SUMMARY_CAPACITY_EXCEEDED' },
+    })
+    await expect(switching).rejects.toThrow(
+      /estimated \d+ input \+ 1024 output tokens exceed its 262144-token context window/,
+    )
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(session.requestHeader()).toEqual(previous)
+    expect(session.snapshotEvents().filter(event => event.type === 'compaction/summary')).toHaveLength(0)
+  })
 })
 
 describe('summary target preflight', () => {
