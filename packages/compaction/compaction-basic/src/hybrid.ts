@@ -290,6 +290,9 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
         return resolveSummaryMaxTokens(policy, window - reserve)
       }
       : undefined
+    // One instruction shape feeds both the resident sample projection and every
+    // dispatched chunk: the selector must measure the prompt that will run.
+    const instruction = factLedger ? factInstruction : summaryInstruction
     const prepare = () => prepareSummaryCall(ctx, { ...target, maxTokens: policy.maxTokens }, signal, resolveMaxTokens)
     let first = await prepare()
     if (this.config.summarizationMode === 'resident-preferred') {
@@ -317,14 +320,15 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
                 .flatMap(message => message.content),
             ],
           }
-          return { messages: [summaryInstruction, projection], maxTokens: first.maxTokens, reserveTokens: 0 }
+          return { messages: [instruction, projection], maxTokens: first.maxTokens, reserveTokens: 0 }
         })(),
         { ...signal === undefined ? {} : { signal } },
       )
       target = { provider: resolved.provider, model: resolved.model }
       first = await prepare()
       ctx.logger.info(`compaction: resident summarizer ${JSON.stringify(resolved.receipt)}`)
-    }    const { window, maxTokens } = first
+    }
+    const { window, maxTokens } = first
     const destinationCall = admission === undefined ? await ctx.llm.prepareCall(destination.config, signal) : undefined
     const destinationWindow = admission?.contextWindow ?? destinationCall?.context?.contextWindow
     const destinationHeader = destinationCall === undefined ? destination : { ...destination, config: destinationCall.config }
@@ -338,7 +342,6 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       ? Math.min(destinationWindow - reserve, resolveCompactSpec(destinationPolicy, destinationWindow, reserve).thresholdTokens - 1)
       : destinationWindow - reserve
     const meter = ctx.tokenMeter
-    const instruction = factLedger ? factInstruction : summaryInstruction
     const fixed = meter.estimateMessage(instruction)
 
     const project = (group: readonly OriginalMessage[], omitToolContent: boolean): RequestMessage => {

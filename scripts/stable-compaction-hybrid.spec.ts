@@ -1052,3 +1052,63 @@ it('resolves one resident target for every chunk behind fixed mode', async () =>
     residentPinnedNodeId: 'fixture-local', residentProvider: 'fixture-provider', residentMaxAgeMs: 500,
   })
 })
+
+it('measures the fact-extraction envelope when the resident target and fact ledger combine', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Reply.')))
+    chat.windows.set('wide', 4_000_000)
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const summary = new WindowAdapter(Array.from({ length: 8 }, () => (options: GenerateOptions) => {
+      const text = requestText(options)
+      const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
+      const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
+      return textResponse(JSON.stringify([{
+        kind: 'observation', key: 'resident-fact', claim: 'Resident target and fact ledger combine.',
+        sourceSeqs: [seqs[0] ?? 1], provenance: 'asserted',
+      }]))
+    }))
+    summary.windows.set('fixed-model', 262_144)
+    summary.windows.set('resident-fact@fixture-alpha', 262_144)
+    ctx.llm.registerAdapter(['fixture-provider'], summary)
+
+    const row = residentRow('resident-fact')
+    const observations: ResidentObservationRequest[] = []
+    ctx.provide('residentSummarySource', {
+      observe: (request) => {
+        observations.push(request)
+        const fresh = {
+          ...row,
+          node: { ...row.node, observedAtMs: Date.now() },
+          route: { ...row.route, verifiedAtMs: Date.now() },
+        }
+        return Promise.resolve([{
+          ...fresh,
+          measurement: { ...fresh.measurement!, projectionId: request.projection?.id ?? '' },
+        }])
+      },
+    })
+    const sessionId = SessionId('hybrid-resident-fact-ledger')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, maxTokens: 1_024 }, meta: { cwd: root },
+    })
+    await send(owned.agent, 'RESIDENT_FACT_HISTORY '.repeat(200))
+    expect(await ctx.compaction.compactNow(owned.agent, signal)).not.toBeNull()
+
+    // The resident source is asked to measure the envelope that will actually run.
+    expect(observations).toHaveLength(1)
+    const projectionText = (observations[0]?.projection?.messages ?? [])
+      .flatMap(message => message.content)
+      .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+    expect(projectionText).toContain('Extract durable facts')
+    expect(projectionText).not.toContain('Summarize the quoted history')
+    // And every dispatched chunk carries that same instruction shape.
+    expect(summary.requests.length).toBeGreaterThan(0)
+    for (const request of summary.requests) expect(requestText(request)).toContain('Extract durable facts')
+    await owned.dispose()
+  }, {
+    incremental: true, factLedger: true, auto: true, thresholdRatio: 0.95,
+    summarizationProvider: 'fixture-provider', summarizationModel: 'fixed-model', maxTokens: 1_024,
+    summarizationMode: 'resident-preferred', residentGatewayId: 'fixture-gateway',
+    residentPinnedNodeId: 'fixture-local', residentProvider: 'fixture-provider', residentMaxAgeMs: 500,
+  })
+}, 60_000)
