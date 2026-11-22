@@ -6,6 +6,7 @@
  * @module @deepseek-ai/dsh-compaction-basic/resident-observation
  */
 
+import type { RequestMessage } from '@deepseek-ai/dsh-llm'
 import {
   selectResidentSummary,
   type Candidate,
@@ -21,6 +22,15 @@ export interface ResidentObservationRequest {
   readonly nodeIds: readonly string[]
   /** Cooperative cancellation for the transport call. */
   readonly signal?: AbortSignal
+  /**
+   * Exact projected summary envelope, so the source can measure every
+   * candidate with its own target tokenizer for this projection.
+   */
+  readonly projection?: {
+    readonly id: string
+    readonly messages: readonly RequestMessage[]
+    readonly outputTokens: number
+  }
 }
 
 /**
@@ -54,6 +64,8 @@ export interface ResidentSelectionRequest {
   readonly reserveTokens: number
   /** Maximum observation age accepted by the selector. */
   readonly maxAgeMs: number
+  /** Exact projected summary envelope; the source measures it per candidate. */
+  readonly projectionMessages?: readonly RequestMessage[]
 }
 
 /** Selection evidence identifying the exact accepted deployment. */
@@ -141,6 +153,13 @@ export async function selectResidentFromSource(
     gatewayId: request.gatewayId,
     nodeIds,
     ...options.signal === undefined ? {} : { signal: options.signal },
+    ...request.projectionMessages === undefined ? {} : {
+      projection: {
+        id: request.projectionId,
+        messages: request.projectionMessages,
+        outputTokens: request.outputTokens,
+      },
+    },
   })
   const result = selectResidentSummary({
     nowMs: (options.now ?? Date.now)(),
