@@ -14,6 +14,7 @@ import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import * as CommandCompact from '@deepseek-ai/dsh-command-compact'
 import Commands from '@deepseek-ai/dsh-commands'
 import { CompactionId, compactCheckpointSource, isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
+import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import HybridCompactionEngine from '@deepseek-ai/dsh-compaction-basic/hybrid'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import {
@@ -1160,3 +1161,100 @@ it('refuses a same-route next turn whose envelope exceeds the window', async () 
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
 }, 60_000)
+
+it('restores a fact-ledger checkpoint in a fresh Basic context (rollback compatibility)', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-hybrid-cold-'))
+  const sessionId = SessionId('hybrid-cold-ledger')
+  const mount = async (engine: 'hybrid' | 'basic', config: object) => {
+    const ctx = new Context()
+    await mountAgentLoopTestDependencies(ctx)
+    await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'zstd' })
+    await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'never' })
+    await ctx.plugin(TokenMeter)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(Commands)
+    await ctx.plugin(Loader)
+    ctx.loader.builtins.include = Include
+    ctx.loader.builtins['hybrid-fixture'] = HybridCompactionEngine
+    ctx.loader.builtins['basic-fixture'] = BasicCompactionEngine
+    ctx.loader.builtins['compact-fixture'] = CommandCompact
+    const composition = join(root, `cordis-${engine}.yml`)
+    await writeFile(composition, [
+      `- name: 'cordis:${engine}-fixture'`,
+      `  config: ${JSON.stringify({
+        auto: false, maxTokens: 1_024, retainTokens: 0, headroomTokens: 0,
+        summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
+        summarizationFallback: 'error', ...config,
+      })}`,
+      "- name: 'cordis:compact-fixture'",
+      '',
+    ].join('\n'))
+    await ctx.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(composition).href } })
+    await ctx.loader.await()
+    return ctx
+  }
+  try {
+    let factCount = 0
+    let coverageRevision = 0
+    {
+      const ctx = await mount('hybrid', { incremental: true, factLedger: true })
+      try {
+        const chat = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Reply.')))
+        chat.windows.set('wide', 4_000_000)
+        ctx.llm.registerAdapter([wide.provider], chat)
+        const summary = new WindowAdapter(Array.from({ length: 8 }, () => (options: GenerateOptions) => {
+          const text = requestText(options)
+          const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
+          const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
+          return textResponse(JSON.stringify([{
+            kind: 'observation', key: 'cold-ledger', claim: 'Cold resume keeps the ledger.',
+            sourceSeqs: [seqs[0] ?? 1], basis: 'asserted',
+          }]))
+        }))
+        summary.windows.set('summary', 262_144)
+        ctx.llm.registerAdapter(['synthetic-summary'], summary)
+        const owned = await ctx.agents.create({
+          sessionId, agentOptions: { ...wide, maxTokens: 1_024 }, meta: { cwd: root },
+        })
+        await send(owned.agent, 'COLD_LEDGER_HISTORY '.repeat(400))
+        expect(await ctx.compaction.compactNow(owned.agent, signal)).not.toBeNull()
+        const events = (await ctx.sessionQuery.readSession(sessionId)).events
+        factCount = events.flatMap(event => event.type === 'compaction/summary' ? event.data.ledger ?? [] : []).length
+        coverageRevision = deriveCommittedCoverage(events)?.revision ?? 0
+        expect(factCount).toBeGreaterThan(0)
+        expect(coverageRevision).toBeGreaterThan(0)
+        await owned.dispose()
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    }
+
+    // Roll back to Basic: a fresh graph loads the same persisted session.
+    const ctx = await mount('basic', {})
+    try {
+      const chat = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Reply.')))
+      chat.windows.set('wide', 4_000_000)
+      ctx.llm.registerAdapter([wide.provider], chat)
+      const events = (await ctx.sessionQuery.readSession(sessionId)).events
+      const ledger = events.flatMap(event => event.type === 'compaction/summary' ? event.data.ledger ?? [] : [])
+      expect(ledger).toHaveLength(factCount)
+      validateLedger(ledger, events)
+      expect(deriveCommittedCoverage(events)?.revision).toBe(coverageRevision)
+      expect(checkpoints(events)).toHaveLength(1)
+
+      const handle = await ctx.agents.resume({
+        resumeSessionId: sessionId, agentOptions: { ...wide, maxTokens: 1_024 },
+      })
+      await send(handle.agent, 'after rollback')
+      const restored = (await ctx.sessionQuery.readSession(sessionId)).events
+      expect(restored.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
+      // The restored surface still carries the Hybrid checkpoint text.
+      expect(restored.filter(event => event.type === 'user/message' && isCompactCheckpointSource(event.data.source))).toHaveLength(1)
+      await handle.dispose()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 120_000)
