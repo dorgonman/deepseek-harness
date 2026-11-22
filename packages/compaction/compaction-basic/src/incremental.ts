@@ -36,6 +36,15 @@ function malformed(message: string): never {
  * @returns lowercase hex SHA-256 of its canonical JSON.
  */
 export function digestPolicy(value: unknown): string {
+  return digestCanonical(value)
+}
+
+/**
+ * Stable digest of one JSON-serializable value under canonical key order.
+ * @param value - JSON-serializable content.
+ * @returns lowercase hex SHA-256.
+ */
+export function digestCanonical(value: unknown): string {
   return createHash('sha256').update(canonicalJson(value)).digest('hex')
 }
 
@@ -84,6 +93,26 @@ export function digestRange(
   return hash.digest('hex')
 }
 
+/**
+ * SHA-256 over the canonical content of an explicit set of event ids.
+ * @param events - the session log, in sequence order.
+ * @param ids - the exact source event ids to bind.
+ * @returns lowercase hex digest over those events in log order.
+ */
+export function digestEventIds(events: readonly SessionEvent[], ids: readonly SessionSeq[]): string {
+  const wanted = new Set<number>(ids)
+  if (wanted.size !== ids.length) malformed('event ids are not unique')
+  const hash = createHash('sha256')
+  let found = 0
+  for (const event of events) {
+    if (!wanted.has(event.seq)) continue
+    hash.update(canonicalJson({ type: event.type, seq: event.seq, time: event.time, data: event.data }))
+    hash.update('\n')
+    found += 1
+  }
+  if (found !== wanted.size) malformed('event ids reference events outside the log')
+  return hash.digest('hex')
+}
 function assertRevision(revision: unknown): asserts revision is number {
   if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 0) {
     malformed('revision is not a non-negative integer')
