@@ -800,6 +800,24 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
    * the default keeps full-surface behavior so this setting is opt-in.
    */
   incremental?: boolean
+  /**
+   * Summarizer target policy. `fixed` keeps the configured or routed target;
+   * `resident-preferred` resolves one already-loaded resident deployment per
+   * compaction through a trusted observation source. Defaults to `fixed`.
+   */
+  summarizationMode?: 'fixed' | 'resident-preferred'
+  /** Authorized gateway identity for resident-preferred mode. */
+  residentGatewayId?: string
+  /** Conversation-pinned node used when no allowlist is supplied. */
+  residentPinnedNodeId?: string
+  /** Explicit compaction node allowlist; replaces the pin. */
+  residentAllowedNodeIds?: string[]
+  /** Configured quality preference for resident variants, most preferred first. */
+  residentPreferredVariantIds?: string[]
+  /** DSH LLM provider route that fronts the resident gateway. */
+  residentProvider?: string
+  /** Maximum accepted observation age in milliseconds; at most 60000. Defaults to 60000. */
+  residentMaxAgeMs?: number
 }
 
 /** Policy fields shared by the default policy and exact model overrides. */

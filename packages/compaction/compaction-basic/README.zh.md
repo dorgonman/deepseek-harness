@@ -89,6 +89,13 @@ Hybrid 按来源顺序合并分块结果。切换模型时，它按照解析后�
 | `modelPolicies` | `[]` | 针对个别模型路由的精确 `{ provider, model, ...partialPolicy }` 覆盖。 |
 | `auto` | `true` | 启用自动压缩与溢出恢复；设为 `false` 则仅手动执行。 |
 | `incremental` | `false` | 仅 Hybrid：在每次摘要中记录追加原始事件的覆盖范围，后续只引用水位线以上的 RAW 事件。被结转的检查点在本地组装，绝不发送给摘要模型。 |
+| `summarizationMode` | `fixed` | `resident-preferred` 通过已挂载的观察源为每次压缩解析一个已加载的常驻部署；`fixed` 保持配置或路由目标。 |
+| `residentGatewayId` | — | 已授权网关标识；resident-preferred 必填。 |
+| `residentPinnedNodeId` | — | 未提供允许列表时使用的会话固定节点。 |
+| `residentAllowedNodeIds` | — | 显式压缩节点允许列表；替代固定节点。 |
+| `residentPreferredVariantIds` | — | 配置的质量偏好，越靠前越优先。 |
+| `residentProvider` | — | 网关前面的 DSH LLM 提供方路由。 |
+| `residentMaxAgeMs` | `60000` | 接受的最大观察年龄，1–60000 毫秒。 |
 
 配置错误会快速失败：未知设置、重复的按模型覆盖、无效 token 数、两种保留形式同时出现，或保留比例不小于阈值比例，都会在加载时拒绝插件。模型首次使用时，`W − O − B` 必须为正，且解析出的保留预算必须低于触发阈值。余量为零时，必须在全局或对应模型策略中显式设置正数 `maxTokens`。显式余量必须符合窗口容量。摘要沿用已声明窗口的对话路由时，省略的摘要上限跟随调整后的余量，至少为一个 token。显式摘要目标保留其配置或继承的上限。降低 `thresholdRatio` 可以提早压缩。
 

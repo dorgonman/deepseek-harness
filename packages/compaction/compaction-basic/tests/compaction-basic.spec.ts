@@ -324,8 +324,34 @@ describe('compact configuration and defaults', () => {
       maxOverflowRetries: 1,
       modelPolicies: [],
       auto: true,
+      incremental: false,
+      summarizationMode: 'fixed',
+      residentMaxAgeMs: 60_000,
     })
     expect(Object.isFrozen(resolved)).toBe(true)
+  })
+
+  it('validates resident-preferred scope, gateway and age bounds', () => {
+    expect(() => resolveConfig({
+      summarizationMode: 'resident-preferred', residentProvider: 'fixture-provider', residentPinnedNodeId: 'node-a',
+    })).toThrow(/residentGatewayId/)
+    expect(() => resolveConfig({
+      summarizationMode: 'resident-preferred', residentGatewayId: 'gateway-a', residentProvider: 'fixture-provider',
+    })).toThrow(/requires residentPinnedNodeId or residentAllowedNodeIds/)
+    expect(() => resolveConfig({ residentMaxAgeMs: 60_001 })).toThrow(/residentMaxAgeMs/)
+    expect(() => resolveConfig({
+      summarizationMode: 'resident-preferred', residentGatewayId: 'gateway-a', residentProvider: 'fixture-provider',
+      residentAllowedNodeIds: [],
+    })).toThrow(/residentAllowedNodeIds/)
+    const resolved = resolveConfig({
+      summarizationMode: 'resident-preferred', residentGatewayId: 'gateway-a',
+      residentProvider: 'fixture-provider', residentPinnedNodeId: 'node-a', residentMaxAgeMs: 1_000,
+    })
+    expect(resolved).toMatchObject({
+      summarizationMode: 'resident-preferred', residentGatewayId: 'gateway-a',
+      residentProvider: 'fixture-provider', residentPinnedNodeId: 'node-a', residentMaxAgeMs: 1_000,
+    })
+    expect(resolved.residentAllowedNodeIds).toBeUndefined()
   })
 
   it('defaults summary generation to headroom and preserves explicit caps', () => {

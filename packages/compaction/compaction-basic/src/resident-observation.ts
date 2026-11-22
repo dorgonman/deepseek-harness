@@ -37,6 +37,13 @@ export interface ResidentObservationRequest {
  * Provider of normalized resident candidates. The implementation owns
  * transport, authorization and normalization; this module owns only scope.
  */
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Optional trusted provider of resident summarizer observations. */
+    residentSummarySource?: ResidentObservationSource
+  }
+}
+
 export interface ResidentObservationSource {
   /**
    * Read one bounded snapshot for the declared nodes.

@@ -89,6 +89,13 @@ All settings are optional. With context window `W`, effective request output cap
 | `modelPolicies` | `[]` | Exact `{ provider, model, ...partialPolicy }` overrides for individual model routes. |
 | `auto` | `true` | Enable automatic condensation and overflow recovery; set `false` for manual-only operation. |
 | `incremental` | `false` | Hybrid only: record append-origin coverage on each summary and later quote only RAW events above the committed watermark. A carried checkpoint is assembled locally and never sent to a summarizer. |
+| `summarizationMode` | `fixed` | `resident-preferred` resolves one already-loaded resident deployment per compaction through the mounted observation source; `fixed` keeps the configured or routed target. |
+| `residentGatewayId` | — | Authorized gateway identity; required for resident-preferred. |
+| `residentPinnedNodeId` | — | Conversation-pinned node used when no allowlist is supplied. |
+| `residentAllowedNodeIds` | — | Explicit compaction node allowlist; replaces the pin. |
+| `residentPreferredVariantIds` | — | Configured quality preference, most preferred first. |
+| `residentProvider` | — | DSH LLM provider route that fronts the gateway. |
+| `residentMaxAgeMs` | `60000` | Maximum accepted observation age, 1–60000 ms. |
 
 Misconfiguration fails fast: unknown settings, duplicate per-model overrides, invalid token counts, both retention forms together, or a retention ratio at least as large as the threshold ratio reject the plugin at load. When the model is first used, `W − O − B` must be positive and the resolved retained budget must be below the trigger. Zero headroom requires an explicit positive `maxTokens`, globally or in that model policy. Explicit headroom must fit the window. An omitted summary cap follows the adjusted headroom on the conversation route when it declares a window, with a minimum of one token. Explicit summary targets keep their configured or inherited cap. Lower `thresholdRatio` to compact earlier.
 
