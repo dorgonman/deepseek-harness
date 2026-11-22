@@ -30,6 +30,15 @@ function malformed(message: string): never {
   throw new IncrementalCoverageError('malformed', `compaction: incremental coverage ${message}`)
 }
 
+/**
+ * Stable digest of one resolved policy object.
+ * @param value - JSON-serializable policy identity.
+ * @returns lowercase hex SHA-256 of its canonical JSON.
+ */
+export function digestPolicy(value: unknown): string {
+  return createHash('sha256').update(canonicalJson(value)).digest('hex')
+}
+
 /** JSON with recursively sorted object keys, so equal content hashes equally. */
 function canonicalJson(value: unknown): string {
   if (value === null) return 'null'
@@ -254,6 +263,20 @@ export function selectUnprocessedRawEvents(
     }
   }
   return selected
+}
+
+/**
+ * Whether any append-origin event above the committed watermark exists.
+ * @param events - the session log, in sequence order.
+ * @param coverage - committed coverage, or undefined for a full RAW selection.
+ * @returns true when a summarizer call could process new RAW evidence.
+ */
+export function hasUnprocessedRawEvents(
+  events: readonly SessionEvent[],
+  coverage: CompactionIncrementalCoverage | undefined,
+): boolean {
+  const from = coverage === undefined ? 0 : coverage.highWatermark + 1
+  return events.some(event => event.seq >= from && isAppendSurfaceEvent(event))
 }
 
 /** Identity and provenance supplied by the backend when it commits coverage. */

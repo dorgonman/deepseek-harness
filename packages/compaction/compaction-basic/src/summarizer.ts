@@ -312,6 +312,24 @@ export function frameSummary(summary: readonly ContentBlock[]): ContentBlock[] {
   ]
 }
 
+/**
+ * Recover the summary blocks from a checkpoint message produced by
+ * {@link frameSummary}, so a later incremental checkpoint can carry the prior
+ * derived text forward without nesting the frame.
+ * @param content - checkpoint message content, framed or unframed.
+ * @returns the inner summary blocks; the original content when no frame matches.
+ */
+export function unframeSummary(content: readonly ContentBlock[]): ContentBlock[] {
+  const first = content[0]
+  const last = content.at(-1)
+  if (content.length >= 3 && first?.type === 'text'
+    && first.text === `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}`
+    && last?.type === 'text' && last.text === SUMMARY_CLOSE_TAG) {
+    return content.slice(1, -1).map(block => ({ ...block }))
+  }
+  return content.map(block => ({ ...block }))
+}
+
 /** Map a terminal summarization finish to its fail-closed error. */
 function finishError(finish: FinishReason): Error | undefined {
   switch (finish.kind) {

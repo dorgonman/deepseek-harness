@@ -792,6 +792,12 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   modelPolicies?: ModelCompactPolicyConfig[]
   /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
   auto?: boolean
+  /**
+   * Record append-origin coverage on each summary and, on later compactions,
+   * quote only RAW events above the committed watermark. Defaults to `false`;
+   * the default keeps full-surface behavior so this setting is opt-in.
+   */
+  incremental?: boolean
 }
 
 /** Policy fields shared by the default policy and exact model overrides. */

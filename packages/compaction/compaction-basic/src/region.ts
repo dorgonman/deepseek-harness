@@ -14,7 +14,7 @@ import {
   toolPairingBalancedAfter,
   toolPairingBalancedBefore,
 } from '@deepseek-ai/dsh-compaction'
-import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
+import type { CompactionResult, CompactionIncrementalCoverage } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
@@ -44,6 +44,8 @@ export type CompactionChunkCall = NonNullable<SessionEvent<'compaction/summary'>
 /** Summary output and optional provider requirements for replacement. */
 export type RegionSummary = SummaryResult & {
   chunkCalls?: CompactionChunkCall[]
+  /** Incremental RAW coverage committed with this checkpoint. */
+  incremental?: CompactionIncrementalCoverage
   /** Optional provider-owned guard evaluated synchronously before replacement. */
   validateCommit?: (checkpoint: UserMessage) => void
 }
@@ -519,6 +521,7 @@ function commitCompactionBody(
     ...maxTokens === undefined ? {} : { maxTokens },
     ...summarized.requestProjection === undefined ? {} : { requestProjection: summarized.requestProjection },
     ...usage === undefined ? {} : { usage },
+    ...summarized.incremental === undefined ? {} : { incremental: summarized.incremental },
   })
   session.append('user/message', checkpointMessage, {
     surfaceOp: { op: 'replace', startSeq: start, endSeq: end },

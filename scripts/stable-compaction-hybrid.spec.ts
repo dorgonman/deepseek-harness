@@ -10,7 +10,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import * as CommandCompact from '@deepseek-ai/dsh-command-compact'
 import Commands from '@deepseek-ai/dsh-commands'
-import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
+import { CompactionId, compactCheckpointSource, isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import HybridCompactionEngine from '@deepseek-ai/dsh-compaction-basic/hybrid'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
@@ -21,6 +21,7 @@ import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { expect, it, vi } from 'vitest'
+import { advanceCoverage } from '../packages/compaction/compaction-basic/src/incremental.ts'
 import { MockAdapter, textResponse, toolCallResponse } from '../packages/core/agent-loop/tests/mock-adapter.ts'
 
 class WindowAdapter extends MockAdapter {
@@ -530,5 +531,111 @@ it.each(['cancellation', 'mutation'] as const)('refuses a checkpoint after %s du
     expect(typeof (end?.type === 'compaction/end' ? end.data.error : undefined)).toBe('string')
     if (condition === 'mutation') expect(after).toContainEqual(mutation)
     await owned.dispose()
+  })
+})
+
+it('records disjoint incremental coverage and carries the checkpoint forward', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 12 }, () => textResponse('Short reply.')))
+    const summary = new WindowAdapter(Array.from({ length: 8 }, (_, index) => textResponse(`CHECKPOINT_${index}`)))
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('incremental-three-pass')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { ...wide, maxTokens: 1_024 },
+      meta: { cwd: root },
+    })
+    const compact = async () => { await ctx.compaction.compactNow(owned.agent, signal) }
+
+    await send(owned.agent, 'EARLY_ALPHA '.repeat(40))
+    await compact()
+    await send(owned.agent, 'MIDDLE_BETA '.repeat(40))
+    await send(owned.agent, 'MIDDLE_GAMMA '.repeat(40))
+    await compact()
+    await send(owned.agent, 'LATE_DELTA '.repeat(40))
+    await compact()
+
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    const records = events.filter((event): event is SessionEvent<'compaction/summary'> =>
+      event.type === 'compaction/summary' && event.data.incremental !== undefined)
+    expect(records).toHaveLength(3)
+    expect(records.map(record => record.data.incremental!.revision)).toEqual([1, 2, 3])
+
+    const passes = records.map(record => (record.data.chunkCalls ?? []).flatMap(call =>
+      call.groups.flatMap(group => group.eventSeqs.map(Number))))
+    for (const [index, pass] of passes.entries()) {
+      if (index === 0) continue
+      expect(Math.min(...pass)).toBeGreaterThan(records[index - 1]!.data.incremental!.highWatermark)
+    }
+    const all = passes.flat()
+    expect(new Set(all).size).toBe(all.length)
+
+    for (const request of summary.requests.slice(1, 3)) {
+      expect(requestText(request)).not.toContain('<compacted-summary>')
+      expect(requestText(request)).not.toContain('CHECKPOINT_0')
+    }
+    const checkpointText = checkpoints(events).flatMap(event => event.type === 'user/message'
+      ? event.data.content.flatMap(block => block.type === 'text' ? [block.text] : [])
+      : []).join('\n')
+    expect(checkpointText).toContain('CHECKPOINT_0')
+    expect(checkpointText).toContain('CHECKPOINT_1')
+    expect(checkpointText).toContain('CHECKPOINT_2')
+
+    await owned.dispose()
+  }, {
+    incremental: true, auto: true, thresholdRatio: 0.95, summarizationProvider: 'synthetic-summary',
+    summarizationModel: 'summary', maxTokens: 1_024,
+  })
+})
+
+it('dispatches no summarizer call when committed coverage reaches the last RAW event', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Covered reply.')])
+    const summary = new WindowAdapter([textResponse('UNUSED')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('incremental-precovered')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, maxTokens: 1_024 }, meta: { cwd: root },
+    })
+    await send(owned.agent, 'Covered history.')
+    const events = owned.agent.session.snapshotEvents()
+    const nodes = [...owned.agent.session.surface.nodes]
+    const head = events.find(event => event.seq === nodes[0])
+    const firstIdx = head?.type === 'system/message' ? 1 : 0
+    const start = nodes[firstIdx]!
+    const end = nodes.at(-1)!
+    const last = events.at(-1)!.seq
+    const coverage = advanceCoverage(undefined, events, start, last, { policyDigest: 'precommitted' })
+    const id = CompactionId('precommitted')
+    const startEvent = owned.agent.session.append('compaction/start', { compactionId: id, turn: null })
+    const summaryEvent = owned.agent.session.append('compaction/summary', {
+      compactionId: id,
+      summary: [{ type: 'text', text: 'Precommitted checkpoint.' }],
+      shadowedRange: { start, end },
+      shadowedSeqs: nodes.slice(firstIdx),
+      shadowedTokenCount: 1,
+      provider: 'test-provider',
+      model: 'test-model',
+      chunkCalls: [],
+      incremental: coverage,
+    })
+    owned.agent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Precommitted checkpoint.' }],
+      source: compactCheckpointSource(id),
+    }), {
+      surfaceOp: { op: 'replace', startSeq: start, endSeq: end },
+      sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...nodes.slice(firstIdx)],
+    })
+    owned.agent.session.append('compaction/end', { compactionId: id, turn: null })
+
+    const callsBefore = summary.requests.length
+    expect(await ctx.compaction.compactNow(owned.agent, signal)).toBeNull()
+    expect(summary.requests).toHaveLength(callsBefore)
+    await owned.dispose()
+  }, {
+    incremental: true, auto: true, thresholdRatio: 0.95, summarizationProvider: 'synthetic-summary',
+    summarizationModel: 'summary', maxTokens: 1_024,
   })
 })
