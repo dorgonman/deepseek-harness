@@ -227,6 +227,19 @@ function transactionCommitted(
 }
 
 /**
+ * Whether the summary event at `index` closed with its checkpoint replacement
+ * and a clean `compaction/end`. Dangling or failed summaries never commit
+ * derived state.
+ * @param events - the session log, in sequence order.
+ * @param index - candidate summary event index.
+ * @returns true only for a complete successful transaction.
+ */
+export function summaryTransactionCommitted(events: readonly SessionEvent[], index: number): boolean {
+  const event = events[index]
+  if (event?.type !== 'compaction/summary') return false
+  return transactionCommitted(events, index, event.data.compactionId)
+}
+/**
  * Read the latest committed incremental coverage from the session log.
  * @param events - the session log, in sequence order.
  * @returns the newest complete record, or undefined when none is committed.

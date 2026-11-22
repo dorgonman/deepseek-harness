@@ -1,11 +1,14 @@
+import { CompactionId, compactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
 import {
   composeCompactView,
   createFacts,
+  deriveCommittedLedger,
   FactLedgerError,
   mergeFacts,
+  validateLedger,
   type FactInput,
 } from '../src/fact-ledger.ts'
 
@@ -147,4 +150,54 @@ it('preserves inferred provenance and branch scope without promoting either', ()
   expect(fact!.provenance).toBe('inferred')
   expect(fact!.branch).toBe('feature-x')
   expect(fact!.status).toBe('active')
+})
+
+function commitLedger(session: Session, facts: ReturnType<typeof createFacts>, dangling = false): void {
+  const id = CompactionId(`ledger-${facts[0]?.factId.slice(0, 8) ?? 'empty'}-${nextSession}`)
+  const nodes = [...session.surface.nodes]
+  const start = nodes[0]!
+  const end = nodes.at(-1)!
+  session.append('compaction/start', { compactionId: id, turn: null })
+  session.append('compaction/summary', {
+    compactionId: id,
+    summary: [{ type: 'text', text: 'ledger checkpoint' }],
+    shadowedRange: { start, end },
+    shadowedSeqs: nodes,
+    shadowedTokenCount: 1,
+    provider: 'test-provider',
+    model: 'test-model',
+    chunkCalls: [],
+    ledger: facts,
+  })
+  if (dangling) return
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: 'ledger checkpoint' }],
+    source: compactCheckpointSource(id),
+  }), { surfaceOp: { op: 'replace', startSeq: start, endSeq: end }, sourceEventSeqs: nodes })
+  session.append('compaction/end', { compactionId: id, turn: null })
+}
+
+it('derives a committed ledger only from a complete transaction', () => {
+  const session = conversation()
+  const facts = createFacts(inputs(session), session.snapshotEvents())
+  commitLedger(session, facts)
+  const committed = deriveCommittedLedger(session.snapshotEvents())
+  expect(committed).toHaveLength(facts.length)
+  expect(committed?.[0]).toMatchObject({ factId: facts[0]!.factId, status: 'active' })
+  validateLedger(committed!, session.snapshotEvents())
+
+  const danglingSession = conversation()
+  const danglingFacts = createFacts(inputs(danglingSession), danglingSession.snapshotEvents())
+  commitLedger(danglingSession, danglingFacts, true)
+  expect(deriveCommittedLedger(danglingSession.snapshotEvents())).toBeUndefined()
+})
+
+it('refuses a tampered ledger snapshot and inconsistent lineage', () => {
+  const session = conversation()
+  const facts = createFacts(inputs(session), session.snapshotEvents())
+  const tampered = [{ ...facts[0]!, evidenceDigest: '0'.repeat(64) }]
+  expect(() => validateLedger(tampered, session.snapshotEvents()))
+    .toThrow(/does not match its source digest/)
+  expect(() => validateLedger([{ ...facts[0]!, supersededBy: 'missing' }], session.snapshotEvents()))
+    .toThrow(FactLedgerError)
 })

@@ -15,7 +15,9 @@ import type { CompactionCheckpointSource } from './checkpoint.ts'
 
 export type {
   CompactionResult, SummaryRequestProjection, CompactionCoveredRange, CompactionIncrementalCoverage,
+  CompactionFact, CompactionFactKind, CompactionFactStatus, CompactionFactProvenance,
 } from './types.ts'
+export { COMPACTION_FACT_KINDS } from './types.ts'
 export { CompactionId } from './brand.ts'
 export { toolPairingBalancedAfter, toolPairingBalancedBefore } from './tool-pairing.ts'
 // The checkpoint source constructor and predicate are declared on the cordis-free

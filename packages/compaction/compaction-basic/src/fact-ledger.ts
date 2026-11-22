@@ -6,22 +6,27 @@
  * @module @deepseek-ai/dsh-compaction-basic/fact-ledger
  */
 
+import {
+  COMPACTION_FACT_KINDS,
+  type CompactionFact,
+  type CompactionFactKind,
+  type CompactionFactProvenance,
+  type CompactionFactStatus,
+} from '@deepseek-ai/dsh-compaction'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { digestCanonical, digestEventIds } from './incremental.ts'
+import { digestCanonical, digestEventIds, summaryTransactionCommitted } from './incremental.ts'
 
 /** Closed set of fact classes the ledger accepts. */
-export const FACT_KINDS = [
-  'decision', 'constraint', 'identifier', 'open-work', 'observation', 'tool-evidence',
-] as const
+export const FACT_KINDS = COMPACTION_FACT_KINDS
 
 /** One accepted fact class. */
-export type FactKind = typeof FACT_KINDS[number]
+export type FactKind = CompactionFactKind
 
 /** Lifecycle of a sourced fact. */
-export type FactStatus = 'active' | 'superseded' | 'disputed'
+export type FactStatus = CompactionFactStatus
 
 /** How the claim reached the ledger. An inference is never promoted to RAW truth. */
-export type FactProvenance = 'asserted' | 'inferred'
+export type FactProvenance = CompactionFactProvenance
 
 /** Input supplied by an extractor before validation. */
 export interface FactInput {
@@ -41,30 +46,14 @@ export interface FactInput {
   readonly supersedes?: readonly string[]
 }
 
-/** One validated, sourced fact. */
-export interface FactRecord {
-  /** Deterministic identity derived from kind, key and claim. */
-  readonly factId: string
-  readonly kind: FactKind
-  readonly key: string
-  readonly claim: string
-  readonly sourceEventIds: readonly SessionSeq[]
-  /** Digest binding the exact source event content. */
-  readonly evidenceDigest: string
-  readonly firstSeenSeq: SessionSeq
-  readonly lastSeenSeq: SessionSeq
-  readonly status: FactStatus
-  readonly provenance: FactProvenance
-  readonly branch?: string
-  readonly supersedes?: readonly string[]
-  readonly supersededBy?: string
-}
+/** One validated, sourced fact committed with the checkpoint. */
+export type FactRecord = CompactionFact
 
 /** Failure classes for ledger validation and composition. */
 export class FactLedgerError extends Error {
   constructor(
     /** Machine-readable cause. */
-    readonly code: 'malformed' | 'unknown-source' | 'dangling-supersede' | 'budget',
+    readonly code: 'malformed' | 'unknown-source' | 'dangling-supersede' | 'digest' | 'budget',
     message: string,
   ) {
     super(message)
@@ -197,6 +186,84 @@ export function mergeFacts(existing: readonly FactRecord[], incoming: readonly F
   })
 }
 
+/**
+ * Validate one durable ledger snapshot against the log it cites.
+ *
+ * Checks identity uniqueness, source existence and digest, seen bounds, status
+ * and provenance values, and supersede lineage. A snapshot that fails any check
+ * is refused rather than repaired, because a wrong ledger silently drops or
+ * misattributes sourced history.
+ * @param facts - the snapshot read from a summary event.
+ * @param events - the session log those facts cite.
+ */
+export function validateLedger(facts: readonly FactRecord[], events: readonly SessionEvent[]): void {
+  const known = new Set(events.map(event => event.seq))
+  const ids = new Set<string>()
+  for (const fact of facts) {
+    if (typeof fact.factId !== 'string' || fact.factId.length === 0) malformed('fact id is missing')
+    if (!FACT_KINDS.includes(fact.kind)) malformed(`unknown fact kind ${String(fact.kind)}`)
+    if (!nonEmpty(fact.key) || !nonEmpty(fact.claim)) malformed('fact key or claim is empty')
+    if (!Array.isArray(fact.sourceEventIds) || fact.sourceEventIds.length === 0) {
+      malformed('fact has no source event')
+    }
+    const sources = [...new Set(fact.sourceEventIds)]
+    if (sources.length !== fact.sourceEventIds.length) malformed('fact source ids are not unique')
+    for (const source of sources) {
+      if (!known.has(source)) throw new FactLedgerError('unknown-source', `fact ledger: source event ${source} is outside the log`)
+    }
+    if (typeof fact.evidenceDigest !== 'string' || fact.evidenceDigest.length === 0) {
+      malformed('fact evidence digest is missing')
+    }
+    if (fact.firstSeenSeq !== Math.min(...sources) || fact.lastSeenSeq !== Math.max(...sources)) {
+      malformed('fact seen bounds do not match its sources')
+    }
+    if (fact.status !== 'active' && fact.status !== 'superseded' && fact.status !== 'disputed') {
+      malformed('fact status is invalid')
+    }
+    if (fact.provenance !== 'asserted' && fact.provenance !== 'inferred') {
+      malformed('fact provenance is invalid')
+    }
+    if (fact.branch !== undefined && !nonEmpty(fact.branch)) malformed('fact branch is empty')
+    if (fact.supersedes !== undefined && (!Array.isArray(fact.supersedes)
+      || fact.supersedes.some(target => typeof target !== 'string' || target.length === 0))) {
+      malformed('fact supersedes list is invalid')
+    }
+    if (ids.has(fact.factId)) malformed('duplicate fact id')
+    ids.add(fact.factId)
+    if (digestEventIds(events, fact.sourceEventIds) !== fact.evidenceDigest) {
+      throw new FactLedgerError('digest', `fact ledger: fact ${fact.factId} does not match its source digest`)
+    }
+  }
+  for (const fact of facts) {
+    for (const target of fact.supersedes ?? []) {
+      if (!ids.has(target)) {
+        throw new FactLedgerError('dangling-supersede', `fact ledger: ${fact.factId} supersedes unknown ${target}`)
+      }
+    }
+    if (fact.supersededBy !== undefined) {
+      const replacer = facts.find(candidate => candidate.factId === fact.supersededBy)
+      if (replacer === undefined || !(replacer.supersedes ?? []).includes(fact.factId)) {
+        malformed('supersededBy lineage is inconsistent')
+      }
+    }
+  }
+}
+
+/**
+ * Read the latest committed Fact Ledger snapshot from the session log.
+ * @param events - the session log, in sequence order.
+ * @returns the newest complete validated snapshot, or undefined when none is committed.
+ */
+export function deriveCommittedLedger(events: readonly SessionEvent[]): readonly FactRecord[] | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'compaction/summary' || event.data.ledger === undefined) continue
+    if (!summaryTransactionCommitted(events, index)) continue
+    validateLedger(event.data.ledger, events)
+    return event.data.ledger
+  }
+  return undefined
+}
 /** Bounded Compact View over active sourced facts. */
 export interface CompactView {
   /** Included facts, active before disputed, in stable order. */

@@ -61,6 +61,44 @@ interface CompactionChunkCall {
   usage?: TokenUsage
 }
 
+/** Closed set of sourced fact classes a ledger snapshot may contain. */
+export const COMPACTION_FACT_KINDS = [
+  'decision', 'constraint', 'identifier', 'open-work', 'observation', 'tool-evidence',
+] as const
+
+/** One accepted sourced fact class. */
+export type CompactionFactKind = typeof COMPACTION_FACT_KINDS[number]
+
+/** Lifecycle of a sourced fact in the derived ledger. */
+export type CompactionFactStatus = 'active' | 'superseded' | 'disputed'
+
+/** How a fact reached the ledger; an inference is never RAW truth. */
+export type CompactionFactProvenance = 'asserted' | 'inferred'
+
+/** One validated, sourced fact committed with a checkpoint. */
+export interface CompactionFact {
+  /** Deterministic identity derived from kind, key and claim. */
+  readonly factId: string
+  readonly kind: CompactionFactKind
+  /** Stable subject key within the class. */
+  readonly key: string
+  /** Canonical claim or exact value. */
+  readonly claim: string
+  /** Exact source event ids the claim cites. */
+  readonly sourceEventIds: readonly SessionSeq[]
+  /** Digest binding the exact source event content. */
+  readonly evidenceDigest: string
+  readonly firstSeenSeq: SessionSeq
+  readonly lastSeenSeq: SessionSeq
+  readonly status: CompactionFactStatus
+  readonly provenance: CompactionFactProvenance
+  /** Session branch scope, when the fact is branch-limited. */
+  readonly branch?: string
+  /** Earlier fact ids this fact explicitly replaces. */
+  readonly supersedes?: readonly string[]
+  /** Later fact id that replaced this one. */
+  readonly supersededBy?: string
+}
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
@@ -108,6 +146,11 @@ declare module '@deepseek-ai/dsh-session/types' {
        * full-surface summary; readers must not infer coverage for that case.
        */
       incremental?: CompactionIncrementalCoverage
+      /**
+       * Merged sourced facts committed with this checkpoint. Chunk progress and
+       * ledger snapshots share one log event; a dangling summary is not coverage.
+       */
+      ledger?: CompactionFact[]
     } & (
       | {
         /** Complete provider output before the backend's safe summary projection. */
