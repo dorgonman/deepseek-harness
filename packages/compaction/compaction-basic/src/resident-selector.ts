@@ -262,6 +262,7 @@ function stableKey(row: Candidate): string {
 }
 function first<Value>(values: readonly Value[]): Value {
   const [value] = values
+  /* v8 ignore next -- callers pass a non-empty tier from a length check */
   if (value === undefined) throw new Error('resident selector: empty tier')
   return value
 }
