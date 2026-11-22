@@ -3,11 +3,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
+import Group from '@deepseek-ai/cordis-plugin-group'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import AgentPreset from '@deepseek-ai/dsh-agent-preset'
+import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import * as CommandCompact from '@deepseek-ai/dsh-command-compact'
 import Commands from '@deepseek-ai/dsh-commands'
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
@@ -528,6 +531,109 @@ it.each(['cancellation', 'mutation'] as const)('refuses a checkpoint after %s du
     expect(after.filter(event => event.type === 'compaction/summary')).toHaveLength(0)
     expect(after.at(-1)).toMatchObject({ type: 'compaction/end', data: { error: expect.any(String) } })
     if (condition === 'mutation') expect(after).toContainEqual(mutation)
+    await owned.dispose()
+  })
+})
+
+it('chunks a >1M-token switch through a 262,144-token summarizer inside the destination budget', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 64 }, () => () => textResponse('Continuing.')))
+    chat.windows.set('source', 4_000_000)
+    chat.windows.set('dest', 262_144)
+    const summary = new WindowAdapter(
+      Array.from({ length: 16 }, (_, index) => textResponse(`Chunk summary ${index}.`)),
+    )
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    ctx.loader.builtins.group = Group
+    await ctx.plugin(AgentPresetRegistry, { default: 'standard' })
+    await ctx.plugin(AgentPreset, {
+      id: 'standard',
+      plugins: [{
+        id: 'compaction', name: 'cordis:group', group: true,
+        isolate: { compaction: true },
+        config: [{
+          id: 'compaction-basic', name: 'cordis:hybrid-fixture',
+          config: {
+            auto: true, maxTokens: 1_024, retainTokens: 0, headroomTokens: 0, thresholdRatio: 0.95,
+            summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
+            summarizationFallback: 'error',
+          },
+        }],
+      }],
+    })
+    const sessionId = SessionId('hybrid-million-token-switch')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: wide.provider, model: 'source', maxTokens: 1_024 },
+      meta: { cwd: root, agentPreset: 'standard' },
+      setup: async (agentCtx) => { await ctx.agentPresets.mount(agentCtx, 'standard') },
+    })
+    expect(ctx.agentPresets.serviceFor(owned.agent, 'compaction')).toBeInstanceOf(HybridCompactionEngine)
+    const filler = 'x'.repeat(72_000)
+    for (let turn = 0; turn < 60; turn += 1) await send(owned.agent, `${filler}${turn}`)
+    const before = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(ctx.tokenMeter.measure(owned.agent.session).totalTokens).toBeGreaterThan(1_000_000)
+
+    owned.agent.model.select({ provider: wide.provider, model: 'dest' })
+    await send(owned.agent, 'Continue on the 262K destination.')
+
+    expect(summary.requests.length).toBeGreaterThanOrEqual(4)
+    for (const request of summary.requests) {
+      const input = request.messages.reduce((sum, message) => sum + ctx.tokenMeter.estimateMessage(message), 0)
+      expect(input + (request.maxTokens ?? 0)).toBeLessThanOrEqual(262_144)
+      expect(requestText(request)).not.toContain('<compacted-summary>')
+    }
+    const after = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(checkpoints(after)).toHaveLength(1)
+    expect(after.slice(0, before.length)).toEqual(before)
+    const receipt = after.find(event => event.type === 'compaction/summary')
+    expect(receipt?.data.chunkCalls).toHaveLength(summary.requests.length)
+    const destination = chat.requests.at(-1)
+    expect(destination?.model).toBe('dest')
+    if (destination === undefined) throw new Error('The destination did not receive a request')
+    const requested = destination.messages.reduce(
+      (sum, message) => sum + ctx.tokenMeter.estimateMessage(message), 0,
+    ) + ctx.tokenMeter.estimateTools(destination.tools) + (destination.maxTokens ?? 0)
+    expect(requested).toBeLessThanOrEqual(262_144)
+    await owned.dispose()
+  }, { auto: false })
+})
+
+it('binds Hybrid through the product preset registry composition', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Preset reply.')))
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.loader.builtins.group = Group
+    await ctx.plugin(AgentPresetRegistry, { default: 'standard' })
+    await ctx.plugin(AgentPreset, {
+      id: 'standard',
+      plugins: [{
+        id: 'compaction', name: 'cordis:group', group: true,
+        isolate: { compaction: true },
+        config: [{
+          id: 'compaction-basic', name: 'cordis:hybrid-fixture',
+          config: {
+            auto: true, maxTokens: 1_024, retainTokens: 0, headroomTokens: 0,
+            summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
+            summarizationFallback: 'error',
+          },
+        }],
+      }],
+    })
+    const sessionId = SessionId('hybrid-preset-binding')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: wide,
+      meta: { cwd: root, agentPreset: 'standard' },
+      setup: async (agentCtx) => { await ctx.agentPresets.mount(agentCtx, 'standard') },
+    })
+    expect(ctx.agentPresets.presetForSession(owned.agent.session)).toBe('standard')
+    expect(ctx.agentPresets.composedPreset(owned.agent.ctx)).toBe('standard')
+    expect(ctx.agentPresets.serviceFor(owned.agent, 'compaction')).toBeInstanceOf(HybridCompactionEngine)
+    await send(owned.agent, 'Short history stays below the pressure threshold.')
+    expect(ctx.agentPresets.inspectCompositions(owned.agent.ctx)[0]?.modules.map(row => row.moduleName))
+      .toContain('cordis:hybrid-fixture')
     await owned.dispose()
   })
 })
