@@ -488,14 +488,24 @@ export class ReactLoopAgent implements Agent {
       const baseline = this.session.requestHeader()
       const switching = baseline !== undefined
         && (baseline.config.provider !== config.provider || baseline.config.model !== config.model)
-      const admission = switching ? await this.admitSwitch(baseline, header, preparedCall, plan, position, signal) : undefined
-      signal.throwIfAborted()
-      // A switch commits its own priced replacement; every other path prices the
-      // pending envelope here, before the step commits it, so compaction cannot
-      // strand the runtime-context or system-prompt projection behind a shadow.
-      const admitted = switching
-        ? admission ?? plan(this.session)
-        : await this.admitEnvelope(header, preparedCall, plan, position, signal)
+      let admitted: StepAdmission
+      try {
+        const admission = switching
+          ? await this.admitSwitch(baseline, header, preparedCall, plan, position, signal)
+          : undefined
+        signal.throwIfAborted()
+        // A switch commits its own priced replacement; every other path prices
+        // the pending envelope here, before the step commits it, so compaction
+        // cannot strand the runtime-context or system-prompt projection behind a
+        // shadow.
+        admitted = switching
+          ? admission ?? plan(this.session)
+          : await this.admitEnvelope(header, preparedCall, plan, position, signal)
+      } catch (error: unknown) {
+        // A refused admission must not consume the input it refused to price.
+        this.restoreClaimedInput(decision.messages)
+        throw error
+      }
       this.appendStepAdmission(this.session, admitted, position)
       firstAttempt = false
       const request = this.buildRequest(header, preparedCall, position, startsRequestSeries, signal)
@@ -845,6 +855,11 @@ export class ReactLoopAgent implements Agent {
     signal.throwIfAborted()
   }
 
+  /** Return a step's claimed user input to the pending Inbox after an admission failure. */
+  private restoreClaimedInput(messages: readonly UserMessage[]): void {
+    const input = messages.filter(message => message.source.kind !== 'runtime-context')
+    if (input.length > 0) this.inbox.splice('next-step', 0, 0, [...input])
+  }
   /** Clone the Session with the pending admission committed, for pricing only. */
   private previewView(admission: StepAdmission, position: StepPosition): Session {
     const view = Session.fromRestore(this.session.id, this.session.snapshotEvents(), this.session.header,

@@ -203,7 +203,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       if (signal.aborted || contextWindow === undefined) return
       const meter = this.ctx.tokenMeter
       const prompt = view.deriveMessages().reduce((total, message) => total + meter.estimateMessage(message), 0)
-        + meter.estimateTools(view.requestHeader()?.tools)
+        + meter.estimateTools(header.tools)
       const reserve = completionMaxTokens ?? 0
       const total = prompt + reserve
       if (total <= contextWindow) return

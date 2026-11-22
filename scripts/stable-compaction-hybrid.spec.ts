@@ -1144,6 +1144,9 @@ it('refuses a first request whose envelope exceeds the window before any provide
       error: { code: 'CONTEXT_ADMISSION_REFUSED' },
     })
     expect(chat.requests).toHaveLength(0)
+    // The refused message stays pending instead of being consumed by the refusal.
+    expect(owned.agent.inbox.nextStep.some(message => message.content.some(block => block.type === 'text'
+      && block.text.includes('FIRST_REQUEST_REFUSAL')))).toBe(true)
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
 }, 60_000)
@@ -1169,6 +1172,9 @@ it('refuses a same-route next turn whose envelope exceeds the window', async () 
       error: { code: 'CONTEXT_ADMISSION_REFUSED' },
     })
     expect(chat.requests).toHaveLength(1)
+    // The refused next-turn message stays pending.
+    expect(owned.agent.inbox.nextStep.some(message => message.content.some(block => block.type === 'text'
+      && block.text.includes('NEXT_TURN_OVERSIZE')))).toBe(true)
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
 }, 60_000)
@@ -1313,7 +1319,7 @@ it('prices a tool continuation whose result alone would not fit the window', asy
     chat.windows.set('tool-small', 8_192)
     ctx.llm.registerAdapter(['synthetic-chat'], chat)
     const summary = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Result retained by source reference.')))
-    summary.windows.set('summary', 8_192)
+    summary.windows.set('summary', 16_384)
     ctx.llm.registerAdapter(['synthetic-summary'], summary)
     const sessionId = SessionId('hybrid-envelope-tool-continuation')
     const owned = await ctx.agents.create({
@@ -1336,4 +1342,43 @@ it('prices a tool continuation whose result alone would not fit the window', asy
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024,
     summarizationProvider: 'synthetic-summary', summarizationModel: 'summary' })
+}, 60_000)
+
+it('prices the tool declarations the request will send, not the previous header', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('First reply.'), textResponse('Second reply.')])
+    chat.windows.set('roomy', 16_384)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    const summary = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Compacted.')))
+    summary.windows.set('summary', 16_384)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-envelope-tool-declarations')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: 'synthetic-chat', model: 'roomy', maxTokens: 1_024 },
+      meta: { cwd: root },
+    })
+    await send(owned.agent, 'HISTORY '.repeat(2_000))
+    expect(chat.requests).toHaveLength(1)
+    // The declaration arrives after the committed header, so a preview that read
+    // the previous header would price zero tools.
+    ctx.tools.register(defineContentToolFixture({
+      name: 'fixture_wide', description: 'Wide declaration. ' + 'x'.repeat(8_000), parameters: {},
+      async execute() { return [{ type: 'text', text: 'ok' }] },
+    }))
+    await send(owned.agent, 'PENDING '.repeat(5_000))
+
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    // The preview saw the tool declarations, compacted the history and let the
+    // request through; before the fix it priced zero tools and the verify phase
+    // would have refused without attempting compaction.
+    expect(events.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
+    expect(checkpoints(events)).toHaveLength(1)
+    expect(chat.requests).toHaveLength(2)
+    expect(requestText(chat.requests[1]!)).toContain('PENDING PENDING')
+    await owned.dispose()
+  }, {
+    auto: true, thresholdRatio: 0.95, maxTokens: 1_024,
+    summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
+  })
 }, 60_000)
