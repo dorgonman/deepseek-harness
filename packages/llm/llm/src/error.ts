@@ -56,6 +56,7 @@ export const LLM_FAILURE_CODES = {
   QUOTA: { retryChoice: true },
   RATE_LIMIT: { retryChoice: true },
   REGISTRATION_DISPOSED: {},
+  REASONING_BUDGET_UNFIT: {},
   REQUEST_EXTENSION: {},
   REQUEST_HEADERS: {},
   SERVER: { retryChoice: true },

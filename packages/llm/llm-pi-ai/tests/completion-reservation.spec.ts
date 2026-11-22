@@ -7,9 +7,10 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { PreparedLlmCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import * as PiAi from '../src/index.ts'
-import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
+import { anthropicTextEvents, closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
 afterEach(async () => {
   await closeMockServers()
@@ -113,6 +114,87 @@ it('refuses a resident dispatch binding before any provider request', async () =
   expect(chunks.at(-1)).toMatchObject({
     type: 'finish',
     reason: { kind: 'error', failure: { code: 'UNSUPPORTED_RESIDENT_TRANSPORT' } },
+  })
+  expect(server.requests).toHaveLength(0)
+}, 20_000)
+
+interface AnthropicModelRow {
+  id: string
+  contextWindow?: number
+  maxTokens?: number
+  reasoningEfforts?: Record<string, string>
+  compat?: { forceAdaptiveThinking?: boolean }
+}
+
+async function anthropicHarness(baseURL: string, models: AnthropicModelRow[]): Promise<Context> {
+  vi.stubEnv('PI_RESERVATION_KEY', 'fixture-key')
+  const ctx = new Context()
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(PiAi, { providers: { anthropic: {
+    apiKeyEnv: 'PI_RESERVATION_KEY',
+    api: 'anthropic-messages',
+    baseURL,
+    models,
+  } } })
+  return ctx
+}
+
+it('keeps the prepared cap as the total ceiling on manual Anthropic thinking', async () => {
+  const server = await mockServer([{ events: anthropicTextEvents }])
+  const ctx = await anthropicHarness(server.url, [{
+    id: 'manual', contextWindow: 65_536, maxTokens: 16_384, reasoningEfforts: { low: 'low' },
+  }])
+  const prepared = await ctx.llm.prepareCall({
+    provider: 'anthropic', model: 'manual', maxTokens: 4_096, reasoningEffort: ReasoningEffortId('low'),
+  })
+  expect(prepared.completion).toEqual({ maxTokens: 4_096, source: 'explicit' })
+
+  const body = await dispatchBody(prepared, server)
+  expect(body['max_tokens']).toBe(4_096)
+  expect(body['max_tokens']).toBeLessThanOrEqual(prepared.completion.maxTokens ?? 0)
+  const thinking = body['thinking'] as { type?: string; budget_tokens?: number } | undefined
+  expect(thinking?.type).toBe('enabled')
+  expect(thinking?.budget_tokens ?? 0).toBeLessThanOrEqual(4_096 - 1_024)
+}, 20_000)
+
+it('leaves the prepared cap unchanged for adaptive Anthropic thinking', async () => {
+  const server = await mockServer([{ events: anthropicTextEvents }])
+  const ctx = await anthropicHarness(server.url, [{
+    id: 'adaptive', contextWindow: 65_536, maxTokens: 16_384,
+    reasoningEfforts: { low: 'low' }, compat: { forceAdaptiveThinking: true },
+  }])
+  const prepared = await ctx.llm.prepareCall({
+    provider: 'anthropic', model: 'adaptive', maxTokens: 4_096, reasoningEffort: ReasoningEffortId('low'),
+  })
+  const body = await dispatchBody(prepared, server)
+  expect(body['max_tokens']).toBe(4_096)
+  expect(body['max_tokens']).toBeLessThanOrEqual(prepared.completion.maxTokens ?? 0)
+}, 20_000)
+
+it('leaves the prepared cap unchanged when Anthropic thinking is disabled', async () => {
+  const server = await mockServer([{ events: anthropicTextEvents }])
+  const ctx = await anthropicHarness(server.url, [{
+    id: 'plain', contextWindow: 65_536, maxTokens: 16_384, reasoningEfforts: { low: 'low' },
+  }])
+  const prepared = await ctx.llm.prepareCall({ provider: 'anthropic', model: 'plain', maxTokens: 4_096 })
+  const body = await dispatchBody(prepared, server)
+  expect(body['max_tokens']).toBe(4_096)
+  expect(body).not.toHaveProperty('thinking')
+}, 20_000)
+
+it('refuses a prepared cap that cannot hold the Anthropic thinking budget', async () => {
+  const server = await mockServer([{ events: anthropicTextEvents }])
+  const ctx = await anthropicHarness(server.url, [{
+    id: 'manual', contextWindow: 65_536, maxTokens: 16_384, reasoningEfforts: { low: 'low' },
+  }])
+  const prepared = await ctx.llm.prepareCall({
+    provider: 'anthropic', model: 'manual', maxTokens: 2_048, reasoningEffort: ReasoningEffortId('low'),
+  })
+  const chunks: StreamChunk[] = []
+  for await (const chunk of prepared.stream({ ...prepared.config, messages: [] })) chunks.push(chunk)
+  expect(chunks.at(-1)).toMatchObject({
+    type: 'finish',
+    reason: { kind: 'error', failure: { code: 'REASONING_BUDGET_UNFIT' } },
   })
   expect(server.requests).toHaveLength(0)
 }, 20_000)
