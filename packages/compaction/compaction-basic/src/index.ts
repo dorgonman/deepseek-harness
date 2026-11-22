@@ -63,11 +63,12 @@ function routedTarget(
 /**
  * Output tokens the routed request reserves, which the provider charges to the
  * same window as the prompt. The effective envelope's own cap wins; otherwise
- * the adapter's per-request default, which the adapter materializes when that
- * envelope omits one. No declared cap means no reservation.
+ * the adapter's request default or the transport's own fallback, which the
+ * adapter materializes when that envelope omits one. No declared cap means no
+ * reservation.
  */
-function reservedCompletionTokens(header: EpochHeader, defaultMaxTokens: number | undefined): number {
-  return header.config.maxTokens ?? defaultMaxTokens ?? 0
+function reservedCompletionTokens(header: EpochHeader, fallbackMaxTokens: number | undefined): number {
+  return header.config.maxTokens ?? fallbackMaxTokens ?? 0
 }
 
 /** Resolve the conversation target used to select an optional policy override. */
@@ -328,7 +329,8 @@ export class BasicCompactionEngine extends CompactionEngine {
       return undefined
     })
     if (info?.context === undefined) return summarizeWithLlm(this.ctx, policy, input, agent, signal)
-    const reserve = agent.session.requestHeader()?.config.maxTokens ?? info.defaultMaxTokens ?? 0
+    const reserve = agent.session.requestHeader()?.config.maxTokens
+      ?? info.defaultMaxTokens ?? info.transportMaxTokens ?? 0
     const maxTokens = resolveSummaryMaxTokens(policy, info.context.contextWindow - reserve)
     return summarizeWithLlm(this.ctx, { ...policy, maxTokens }, input, agent, signal)
   }
@@ -434,7 +436,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     const spec = resolveCompactSpec(
       policy,
       info.context.contextWindow,
-      reservedCompletionTokens(header, info.defaultMaxTokens),
+      reservedCompletionTokens(header, info.defaultMaxTokens ?? info.transportMaxTokens),
     )
     if (measurement.totalTokens < spec.thresholdTokens) return null
 

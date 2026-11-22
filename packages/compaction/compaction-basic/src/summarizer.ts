@@ -153,7 +153,7 @@ export async function prepareSummaryCall(
       nativeTools = info.nativeTools
       const window = info.context?.contextWindow
       if (resolveMaxTokens !== undefined && window !== undefined) {
-        maxTokens = resolveMaxTokens(window, info.defaultMaxTokens)
+        maxTokens = resolveMaxTokens(window, info.defaultMaxTokens ?? info.transportMaxTokens)
       }
       return { ...controls, maxTokens }
     })

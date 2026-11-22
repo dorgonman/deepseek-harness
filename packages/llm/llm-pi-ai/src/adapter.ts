@@ -383,7 +383,9 @@ export class PiAiAdapter extends LlmAdapter {
     const resolvedModel = this.modelOf(snapshot, provider, model)
     const defaultLevel = describableReasoningLevel(resolvedModel, profile.reasoning)
     // Only a cap the deployment configured is a request default; the
-    // catalog's `maxTokens` sizes the model and stops there.
+    // catalog's `maxTokens` sizes the model and stops there. The transport still
+    // asks for that capability when a request omits a cap, so it is reported
+    // separately as the fallback admission must reserve.
     const configuredMaxTokens = profile.configuredMaxTokens.get(model)
     const requestProtocol = profile.requestProtocols.get(model)
     const nativeTools = requestProtocol === 'kinf-decision-v1' ? false : profile.nativeTools.get(model)
@@ -394,6 +396,7 @@ export class PiAiAdapter extends LlmAdapter {
       inputModalities: [...resolvedModel.input],
       context: { contextWindow: resolvedModel.contextWindow },
       ...configuredMaxTokens === undefined ? {} : { defaultMaxTokens: configuredMaxTokens },
+      transportMaxTokens: resolvedModel.maxTokens,
       ...nativeTools === undefined ? {} : { nativeTools },
       ...requestProtocol === 'kinf-decision-v1' ? {
         requestProtocol,

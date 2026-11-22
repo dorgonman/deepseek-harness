@@ -466,6 +466,13 @@ export interface LlmResolvedModelInfo extends LlmModelInfo {
   context?: LlmModelContext
   /** Adapter-configured per-request output cap materialized when callers omit one. */
   defaultMaxTokens?: number
+  /**
+   * Output cap the adapter's transport applies when the request omits one.
+   * This is the transport's own fallback (for pi-ai, the catalog capability),
+   * not a cap the deployment chose; a route that still caps an omitted request
+   * must declare it so admission reserves the tokens the provider is asked for.
+   */
+  transportMaxTokens?: number
   /** Adapter-owned selectable reasoning levels when exposed. */
   reasoning?: LlmModelReasoningInfo
   /** Declared mid-conversation system prompt handling; absent means only a leading system message is read. */
