@@ -177,4 +177,38 @@ describe('incremental coverage', () => {
     expect(() => advanceCoverage(coverage, events, SessionSeq(0), SessionSeq(7), { policyDigest: 'policy-a' }))
       .toThrow(/does not advance/)
   })
+
+  it('treats a legacy summary without incremental coverage as no coverage', () => {
+    const session = conversation(2)
+    const nodes = [...session.surface.nodes]
+    const start = nodes[0]!
+    const end = nodes.at(-1)!
+    const id = CompactionId('legacy-basic')
+    session.append('compaction/start', { compactionId: id, turn: null })
+    session.append('compaction/summary', {
+      compactionId: id,
+      summary: [{ type: 'text', text: 'legacy checkpoint' }],
+      shadowedRange: { start, end },
+      shadowedSeqs: nodes,
+      shadowedTokenCount: 1,
+      provider: 'test-provider',
+      model: 'test-model',
+      chunkCalls: [],
+    })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'legacy checkpoint' }],
+      source: compactCheckpointSource(id),
+    }), { surfaceOp: { op: 'replace', startSeq: start, endSeq: end }, sourceEventSeqs: nodes })
+    session.append('compaction/end', { compactionId: id, turn: null })
+
+    const committed = eventsOf(session)
+    expect(deriveCommittedCoverage(committed)).toBeUndefined()
+    const selected = selectUnprocessedRawEvents(committed, undefined, { maxEvents: 20 })
+    expect(selected.length).toBeGreaterThan(0)
+    expect(selected.every(event => event.type === 'user/message' || event.type === 'assistant/message')).toBe(true)
+    const coverage = advanceCoverage(undefined, committed, SessionSeq(0), SessionSeq(committed.at(-1)!.seq), {
+      policyDigest: 'policy-a',
+    })
+    expect(coverage.revision).toBe(1)
+  })
 })

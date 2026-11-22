@@ -21,7 +21,7 @@ import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { expect, it, vi } from 'vitest'
-import { advanceCoverage } from '../packages/compaction/compaction-basic/src/incremental.ts'
+import { advanceCoverage, deriveCommittedCoverage } from '../packages/compaction/compaction-basic/src/incremental.ts'
 import { MockAdapter, textResponse, toolCallResponse } from '../packages/core/agent-loop/tests/mock-adapter.ts'
 
 class WindowAdapter extends MockAdapter {
@@ -582,7 +582,11 @@ it('records disjoint incremental coverage and carries the checkpoint forward', a
     expect(checkpointText).toContain('CHECKPOINT_1')
     expect(checkpointText).toContain('CHECKPOINT_2')
 
+    const live = (await ctx.sessionQuery.readSession(sessionId)).events
     await owned.dispose()
+    const reopened = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(reopened).toEqual(live)
+    expect(deriveCommittedCoverage(reopened)?.revision).toBe(3)
   }, {
     incremental: true, auto: true, thresholdRatio: 0.95, summarizationProvider: 'synthetic-summary',
     summarizationModel: 'summary', maxTokens: 1_024,
