@@ -766,8 +766,11 @@ describe('web e2e: navigation & panes over a rich seeded session', () => {
     await expect.poll(() => rawSection.textContent()).toContain('answer:')
     const newer = await scaffold.ctx.tools.execute({
       agent, signal: new AbortController().signal,
+      // Distinct arguments keep the repeat-tool guard from replacing results it
+      // counts as a repeated call; the case only needs 1000 live results.
       calls: Array.from({ length: 1000 }, (_, index) => ({
-        type: 'tool-call' as const, id: ToolCallId(`newer-result-${index}`), name: 'live_result_probe', arguments: '{}',
+        type: 'tool-call' as const, id: ToolCallId(`newer-result-${index}`), name: 'live_result_probe',
+        arguments: JSON.stringify({ index }),
       })),
     })
     expect(newer.results).toHaveLength(1000)
