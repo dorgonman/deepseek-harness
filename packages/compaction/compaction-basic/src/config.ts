@@ -61,6 +61,12 @@ const MODEL_POLICY_KEYS: ReadonlySet<string> = new Set([
   ...POLICY_CONFIG_KEYS,
 ])
 
+/** One accepted summarization mode. */
+type SummarizationMode = NonNullable<BasicCompactionConfig['summarizationMode']>
+
+/** Summarization modes an untrusted plugin configuration may select. */
+const SUMMARIZATION_MODES = ['fixed', 'resident-preferred'] as const satisfies readonly SummarizationMode[]
+
 /** Target-specific pressure configuration failure eligible for warning suppression. */
 export class TargetPressureConfigError extends Error {
   /**
@@ -114,8 +120,7 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
   }
   if (config.factMaxClaims !== undefined) assertPositiveInteger('BasicCompactionConfig.factMaxClaims', config.factMaxClaims)
   if (config.factMaxClaimChars !== undefined) assertPositiveInteger('BasicCompactionConfig.factMaxClaimChars', config.factMaxClaimChars)
-  if (config.summarizationMode !== undefined
-    && config.summarizationMode !== 'fixed' && config.summarizationMode !== 'resident-preferred') {
+  if (config.summarizationMode !== undefined && !SUMMARIZATION_MODES.includes(config.summarizationMode)) {
     throw new Error('BasicCompactionConfig: summarizationMode must be fixed or resident-preferred')
   }
   if (config.residentMaxAgeMs !== undefined
