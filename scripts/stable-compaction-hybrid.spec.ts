@@ -1417,3 +1417,44 @@ it('trims oversized tool output at admission before shadowing history', async ()
     summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
   })
 }, 60_000)
+
+it('refuses at the frozen request when the tool delta pushes it over the window', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('First reply.'), textResponse('Second reply.')])
+    chat.windows.set('small', 4_096)
+    const summary = new WindowAdapter([textResponse('Compacted.')])
+    summary.windows.set('summary', 4_096)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-envelope-tool-delta')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: 'synthetic-chat', model: 'small', maxTokens: 512 },
+      meta: { cwd: root },
+    })
+    await send(owned.agent, 'warm the header')
+    expect(chat.requests).toHaveLength(1)
+
+    // Tools registered after the committed header produce a developer delta that
+    // the preview does not price; the frozen request does carry it.
+    for (let index = 0; index < 80; index += 1) {
+      ctx.tools.register(defineContentToolFixture({
+        name: `delta_${index}_${'x'.repeat(60)}`, description: 'd', parameters: {},
+        async execute() { return [] },
+      }))
+    }
+    await send(owned.agent, 'DELTA_PENDING_INPUT')
+
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(events.findLast(event => event.type === 'turn/end')?.data.reason).toMatchObject({
+      kind: 'error',
+      error: { code: 'CONTEXT_ADMISSION_REFUSED' },
+    })
+    // No follow-up provider dispatch, and the durable input is not re-queued.
+    expect(chat.requests).toHaveLength(1)
+    expect(events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')).toHaveLength(2)
+    expect(owned.agent.inbox.nextStep).toHaveLength(0)
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.95, maxTokens: 512,
+    summarizationProvider: 'synthetic-summary', summarizationModel: 'summary' })
+}, 60_000)
