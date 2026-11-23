@@ -52,36 +52,71 @@ const fault = [{
   type: 'finish', reason: { kind: 'error', failure: { code: 'AUTH', message: 'synthetic rejection' } },
 }] as const
 
+type CompactionOverrides = { [Key in keyof BasicCompactionConfig]?: BasicCompactionConfig[Key] | undefined }
+
+async function mountCompactionHarness(
+  ctx: Context, root: string, extraBuiltins: Record<string, unknown> = {},
+) {
+  await mountAgentLoopTestDependencies(ctx)
+  await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'zstd' })
+  await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'never' })
+  await ctx.plugin(TokenMeter)
+  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(Commands)
+  await ctx.plugin(Loader)
+  ctx.loader.builtins.include = Include
+  ctx.loader.builtins['hybrid-fixture'] = HybridCompactionEngine
+  Object.assign(ctx.loader.builtins, extraBuiltins)
+  ctx.loader.builtins['compact-fixture'] = CommandCompact
+}
+
+async function loadCompactionComposition(
+  ctx: Context, root: string, file: string, engine: 'hybrid' | 'basic', config: CompactionOverrides,
+) {
+  const composition = join(root, file)
+  await writeFile(composition, [
+    `- name: 'cordis:${engine}-fixture'`,
+    `  config: ${JSON.stringify({
+      auto: false, maxTokens: 1_024, retainTokens: 0, headroomTokens: 0,
+      summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
+      summarizationFallback: 'error', ...config,
+    })}`,
+    "- name: 'cordis:compact-fixture'",
+    '',
+  ].join('\n'))
+  await ctx.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(composition).href } })
+  await ctx.loader.await()
+}
+
+async function mountStandardPreset(ctx: Context, config: CompactionOverrides = {}) {
+  ctx.loader.builtins.group = Group
+  await ctx.plugin(AgentPresetRegistry, { default: 'standard' })
+  await ctx.plugin(AgentPreset, {
+    id: 'standard',
+    plugins: [{
+      id: 'compaction', name: 'cordis:group', group: true,
+      isolate: { compaction: true },
+      config: [{
+        id: 'compaction-basic', name: 'cordis:hybrid-fixture',
+        config: {
+          auto: true, maxTokens: 1_024, retainTokens: 0, headroomTokens: 0,
+          summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
+          summarizationFallback: 'error', ...config,
+        },
+      }],
+    }],
+  })
+}
+
 async function withContext(
   run: (ctx: Context, root: string) => Promise<void>,
-  config: { [Key in keyof BasicCompactionConfig]?: BasicCompactionConfig[Key] | undefined } = {},
+  config: CompactionOverrides = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-hybrid-compaction-'))
   const ctx = new Context()
   try {
-    await mountAgentLoopTestDependencies(ctx)
-    await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'zstd' })
-    await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'never' })
-    await ctx.plugin(TokenMeter)
-    await ctx.plugin(AgentLoop, { agents: [] })
-    await ctx.plugin(Commands)
-    await ctx.plugin(Loader)
-    ctx.loader.builtins.include = Include
-    ctx.loader.builtins['hybrid-fixture'] = HybridCompactionEngine
-    ctx.loader.builtins['compact-fixture'] = CommandCompact
-    const composition = join(root, 'cordis.yml')
-    await writeFile(composition, [
-      "- name: 'cordis:hybrid-fixture'",
-      `  config: ${JSON.stringify({
-        auto: false, maxTokens: 1_024, retainTokens: 0, headroomTokens: 0,
-        summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
-        summarizationFallback: 'error', ...config,
-      })}`,
-      "- name: 'cordis:compact-fixture'",
-      '',
-    ].join('\n'))
-    await ctx.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(composition).href } })
-    await ctx.loader.await()
+    await mountCompactionHarness(ctx, root)
+    await loadCompactionComposition(ctx, root, 'cordis.yml', 'hybrid', config)
     expect(ctx.compaction).toBeInstanceOf(HybridCompactionEngine)
     await run(ctx, root)
   } finally {
@@ -104,6 +139,42 @@ function checkpoints(events: readonly SessionEvent[]) {
 function requestText(request: GenerateOptions): string {
   return request.messages.flatMap(message => message.content)
     .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+}
+
+function citedSeqs(text: string): number[] {
+  const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
+  return cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
+}
+
+function factLedgerAdapter(key: string, claim: string) {
+  const respond = (options: GenerateOptions) => textResponse(JSON.stringify([{
+    kind: 'observation', key, claim, sourceSeqs: [citedSeqs(requestText(options))[0] ?? 1], basis: 'asserted',
+  }]))
+  return new WindowAdapter(Array.from({ length: 8 }, () => respond))
+}
+
+function expectCompletedTurn(events: readonly SessionEvent[]) {
+  expect(events.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
+}
+
+function expectAdmissionRefusal(events: readonly SessionEvent[]) {
+  expect(events.findLast(event => event.type === 'turn/end')?.data.reason).toMatchObject({
+    kind: 'error',
+    error: { code: 'CONTEXT_ADMISSION_REFUSED' },
+  })
+}
+
+function expectPendingInput(agent: Agent, marker: string) {
+  expect(agent.inbox.nextStep.some(message => message.content.some(block => block.type === 'text'
+    && block.text.includes(marker)))).toBe(true)
+}
+
+async function expectCompactedTurn(ctx: Context, sessionId: SessionId, chat: MockAdapter, providerRequests: number) {
+  const events = (await ctx.sessionQuery.readSession(sessionId)).events
+  expectCompletedTurn(events)
+  expect(checkpoints(events)).toHaveLength(1)
+  expect(chat.requests).toHaveLength(providerRequests)
+  return events
 }
 
 it.each([
@@ -661,8 +732,7 @@ it('compacts through the fact ledger and keeps sourced facts across passes', asy
     const chat = new WindowAdapter(Array.from({ length: 8 }, () => textResponse('Reply.')))
     const summary = new WindowAdapter(Array.from({ length: 8 }, (_, index) => (options: GenerateOptions) => {
       const text = requestText(options)
-      const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
-      const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
+      const seqs = citedSeqs(text)
       const key = text.includes('SECOND_SEGMENT') ? 'second' : 'first'
       return textResponse(JSON.stringify([{
         kind: 'decision', key, claim: `Claim ${index} keeps DSH-TSK-0012.`, sourceSeqs: [seqs[0] ?? 1],
@@ -720,8 +790,7 @@ it('keeps seeded facts, updates and conflicts across a >1M fact-ledger compactio
     const legacyId = digestCanonical(['decision', 'auth-mode', 'legacy'])
     const claimsFor = (options: GenerateOptions): string => {
       const text = requestText(options)
-      const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
-      const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
+      const seqs = citedSeqs(text)
       const first = seqs[0] ?? 1
       const claims: object[] = [{ kind: 'observation', key: `chunk-${String(first)}`, claim: `Chunk at ${String(first)} reviewed.`, sourceSeqs: [first] }]
       if (text.includes('EARLY_MARKER')) {
@@ -814,8 +883,7 @@ it('omits facts explicitly when the destination cannot hold the whole view', asy
     ]
     const claimsFor = (options: GenerateOptions): string => {
       const text = requestText(options)
-      const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
-      const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
+      const seqs = citedSeqs(text)
       const first = seqs[0] ?? 1
       return JSON.stringify(Array.from({ length: 12 }, (_, index) => ({
         kind: 'observation', key: `fact-${String(first)}-${String(index)}`,
@@ -870,23 +938,7 @@ it('chunks a >1M-token switch through a 262,144-token summarizer inside the dest
     )
     ctx.llm.registerAdapter([wide.provider], chat)
     ctx.llm.registerAdapter(['synthetic-summary'], summary)
-    ctx.loader.builtins.group = Group
-    await ctx.plugin(AgentPresetRegistry, { default: 'standard' })
-    await ctx.plugin(AgentPreset, {
-      id: 'standard',
-      plugins: [{
-        id: 'compaction', name: 'cordis:group', group: true,
-        isolate: { compaction: true },
-        config: [{
-          id: 'compaction-basic', name: 'cordis:hybrid-fixture',
-          config: {
-            auto: true, maxTokens: 1_024, retainTokens: 0, headroomTokens: 0, thresholdRatio: 0.95,
-            summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
-            summarizationFallback: 'error',
-          },
-        }],
-      }],
-    })
+    await mountStandardPreset(ctx, { thresholdRatio: 0.95 })
     const sessionId = SessionId('hybrid-million-token-switch')
     const owned = await ctx.agents.create({
       sessionId,
@@ -938,23 +990,7 @@ it('binds Hybrid through the product preset registry composition', async () => {
   await withContext(async (ctx, root) => {
     const chat = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Preset reply.')))
     ctx.llm.registerAdapter([wide.provider], chat)
-    ctx.loader.builtins.group = Group
-    await ctx.plugin(AgentPresetRegistry, { default: 'standard' })
-    await ctx.plugin(AgentPreset, {
-      id: 'standard',
-      plugins: [{
-        id: 'compaction', name: 'cordis:group', group: true,
-        isolate: { compaction: true },
-        config: [{
-          id: 'compaction-basic', name: 'cordis:hybrid-fixture',
-          config: {
-            auto: true, maxTokens: 1_024, retainTokens: 0, headroomTokens: 0,
-            summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
-            summarizationFallback: 'error',
-          },
-        }],
-      }],
-    })
+    await mountStandardPreset(ctx)
     const sessionId = SessionId('hybrid-preset-binding')
     const owned = await ctx.agents.create({
       sessionId,
@@ -1071,15 +1107,7 @@ it('measures the fact-extraction envelope when the resident target and fact ledg
     const chat = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Reply.')))
     chat.windows.set('wide', 4_000_000)
     ctx.llm.registerAdapter([wide.provider], chat)
-    const summary = new WindowAdapter(Array.from({ length: 8 }, () => (options: GenerateOptions) => {
-      const text = requestText(options)
-      const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
-      const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
-      return textResponse(JSON.stringify([{
-        kind: 'observation', key: 'resident-fact', claim: 'Resident target and fact ledger combine.',
-        sourceSeqs: [seqs[0] ?? 1], basis: 'asserted',
-      }]))
-    }))
+    const summary = factLedgerAdapter('resident-fact', 'Resident target and fact ledger combine.')
     summary.windows.set('fixed-model', 262_144)
     summary.windows.set('resident-fact@fixture-alpha', 262_144)
     ctx.llm.registerAdapter(['fixture-provider'], summary)
@@ -1139,15 +1167,10 @@ it('refuses a first request whose envelope exceeds the window before any provide
     })
     await send(owned.agent, 'FIRST_REQUEST_REFUSAL '.repeat(40))
     const events = (await ctx.sessionQuery.readSession(sessionId)).events
-    const turnEnd = events.findLast(event => event.type === 'turn/end')
-    expect(turnEnd?.data.reason).toMatchObject({
-      kind: 'error',
-      error: { code: 'CONTEXT_ADMISSION_REFUSED' },
-    })
+    expectAdmissionRefusal(events)
     expect(chat.requests).toHaveLength(0)
     // The refused message stays pending instead of being consumed by the refusal.
-    expect(owned.agent.inbox.nextStep.some(message => message.content.some(block => block.type === 'text'
-      && block.text.includes('FIRST_REQUEST_REFUSAL')))).toBe(true)
+    expectPendingInput(owned.agent, 'FIRST_REQUEST_REFUSAL')
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
 }, 60_000)
@@ -1167,15 +1190,10 @@ it('refuses a same-route next turn whose envelope exceeds the window', async () 
     expect(chat.requests).toHaveLength(1)
     await send(owned.agent, 'NEXT_TURN_OVERSIZE '.repeat(3_000))
     const events = (await ctx.sessionQuery.readSession(sessionId)).events
-    const turnEnd = events.findLast(event => event.type === 'turn/end')
-    expect(turnEnd?.data.reason).toMatchObject({
-      kind: 'error',
-      error: { code: 'CONTEXT_ADMISSION_REFUSED' },
-    })
+    expectAdmissionRefusal(events)
     expect(chat.requests).toHaveLength(1)
     // The refused next-turn message stays pending.
-    expect(owned.agent.inbox.nextStep.some(message => message.content.some(block => block.type === 'text'
-      && block.text.includes('NEXT_TURN_OVERSIZE')))).toBe(true)
+    expectPendingInput(owned.agent, 'NEXT_TURN_OVERSIZE')
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
 }, 60_000)
@@ -1183,32 +1201,10 @@ it('refuses a same-route next turn whose envelope exceeds the window', async () 
 it('restores a fact-ledger checkpoint in a fresh Basic context (rollback compatibility)', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-hybrid-cold-'))
   const sessionId = SessionId('hybrid-cold-ledger')
-  const mount = async (engine: 'hybrid' | 'basic', config: object) => {
+  const mount = async (engine: 'hybrid' | 'basic', config: CompactionOverrides) => {
     const ctx = new Context()
-    await mountAgentLoopTestDependencies(ctx)
-    await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'zstd' })
-    await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'never' })
-    await ctx.plugin(TokenMeter)
-    await ctx.plugin(AgentLoop, { agents: [] })
-    await ctx.plugin(Commands)
-    await ctx.plugin(Loader)
-    ctx.loader.builtins.include = Include
-    ctx.loader.builtins['hybrid-fixture'] = HybridCompactionEngine
-    ctx.loader.builtins['basic-fixture'] = BasicCompactionEngine
-    ctx.loader.builtins['compact-fixture'] = CommandCompact
-    const composition = join(root, `cordis-${engine}.yml`)
-    await writeFile(composition, [
-      `- name: 'cordis:${engine}-fixture'`,
-      `  config: ${JSON.stringify({
-        auto: false, maxTokens: 1_024, retainTokens: 0, headroomTokens: 0,
-        summarizationProvider: 'synthetic-summary', summarizationModel: 'summary',
-        summarizationFallback: 'error', ...config,
-      })}`,
-      "- name: 'cordis:compact-fixture'",
-      '',
-    ].join('\n'))
-    await ctx.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(composition).href } })
-    await ctx.loader.await()
+    await mountCompactionHarness(ctx, root, engine === 'basic' ? { 'basic-fixture': BasicCompactionEngine } : {})
+    await loadCompactionComposition(ctx, root, `cordis-${engine}.yml`, engine, config)
     return ctx
   }
   try {
@@ -1220,15 +1216,7 @@ it('restores a fact-ledger checkpoint in a fresh Basic context (rollback compati
         const chat = new WindowAdapter(Array.from({ length: 4 }, () => textResponse('Reply.')))
         chat.windows.set('wide', 4_000_000)
         ctx.llm.registerAdapter([wide.provider], chat)
-        const summary = new WindowAdapter(Array.from({ length: 8 }, () => (options: GenerateOptions) => {
-          const text = requestText(options)
-          const cited = /source events: ([\d,\s]+)\./.exec(text)?.[1]?.trim() ?? ''
-          const seqs = cited.split(',').map(value => Number(value.trim())).filter(value => Number.isSafeInteger(value))
-          return textResponse(JSON.stringify([{
-            kind: 'observation', key: 'cold-ledger', claim: 'Cold resume keeps the ledger.',
-            sourceSeqs: [seqs[0] ?? 1], basis: 'asserted',
-          }]))
-        }))
+        const summary = factLedgerAdapter('cold-ledger', 'Cold resume keeps the ledger.')
         summary.windows.set('summary', 262_144)
         ctx.llm.registerAdapter(['synthetic-summary'], summary)
         const owned = await ctx.agents.create({
@@ -1295,10 +1283,7 @@ it('compacts for an over-budget envelope that stays under the pressure threshold
     expect(chat.requests).toHaveLength(1)
     await send(owned.agent, 'PENDING '.repeat(5_000))
 
-    const events = (await ctx.sessionQuery.readSession(sessionId)).events
-    expect(events.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
-    expect(checkpoints(events)).toHaveLength(1)
-    expect(chat.requests).toHaveLength(2)
+    await expectCompactedTurn(ctx, sessionId, chat, 2)
     // The fallback compacted the durable history, and the pending input survived.
     const second = requestText(chat.requests[1]!)
     expect(second).not.toContain('HISTORY HISTORY')
@@ -1330,15 +1315,11 @@ it('prices a tool continuation whose result alone would not fit the window', asy
     })
     await send(owned.agent, 'Read the fixture.')
     const events = (await ctx.sessionQuery.readSession(sessionId)).events
-    const turnEnd = events.findLast(event => event.type === 'turn/end')
     // Either the continuation is refused before dispatch, or compaction removed
     // the unwieldy result and the turn completed; both must be explicit.
     // The unwieldy result cannot be summarized below the window, so the
     // continuation is refused before a second provider request.
-    expect(turnEnd?.data.reason).toMatchObject({
-      kind: 'error',
-      error: { code: 'CONTEXT_ADMISSION_REFUSED' },
-    })
+    expectAdmissionRefusal(events)
     expect(chat.requests).toHaveLength(1)
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024,
@@ -1369,13 +1350,10 @@ it('prices the tool declarations the request will send, not the previous header'
     }))
     await send(owned.agent, 'PENDING '.repeat(5_000))
 
-    const events = (await ctx.sessionQuery.readSession(sessionId)).events
     // The preview saw the tool declarations, compacted the history and let the
     // request through; before the fix it priced zero tools and the verify phase
     // would have refused without attempting compaction.
-    expect(events.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
-    expect(checkpoints(events)).toHaveLength(1)
-    expect(chat.requests).toHaveLength(2)
+    await expectCompactedTurn(ctx, sessionId, chat, 2)
     expect(requestText(chat.requests[1]!)).toContain('PENDING PENDING')
     await owned.dispose()
   }, {
@@ -1405,7 +1383,7 @@ it('trims oversized tool output at admission before shadowing history', async ()
     })
     await send(owned.agent, 'Read it.')
     const events = (await ctx.sessionQuery.readSession(sessionId)).events
-    expect(events.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
+    expectCompletedTurn(events)
     // A trim, not a checkpoint: the pruner keeps the recent result readable.
     expect(checkpoints(events)).toHaveLength(0)
     expect(summary.requests).toHaveLength(0)
@@ -1446,10 +1424,7 @@ it('refuses at the frozen request when the tool delta pushes it over the window'
     await send(owned.agent, 'DELTA_PENDING_INPUT')
 
     const events = (await ctx.sessionQuery.readSession(sessionId)).events
-    expect(events.findLast(event => event.type === 'turn/end')?.data.reason).toMatchObject({
-      kind: 'error',
-      error: { code: 'CONTEXT_ADMISSION_REFUSED' },
-    })
+    expectAdmissionRefusal(events)
     // No follow-up provider dispatch, and the durable input is not re-queued.
     expect(chat.requests).toHaveLength(1)
     expect(events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')).toHaveLength(2)
@@ -1496,16 +1471,38 @@ it('bounds preview rebuilds when a listener keeps replacing the Surface', async 
     await send(owned.agent, 'REBUILD_LIMIT_INPUT')
     remove()
     const events = (await ctx.sessionQuery.readSession(sessionId)).events
-    expect(events.findLast(event => event.type === 'turn/end')?.data.reason).toMatchObject({
-      kind: 'error',
-      error: { code: 'CONTEXT_ADMISSION_REFUSED' },
-    })
+    expectAdmissionRefusal(events)
     // Bounded previews: the initial admission plus MAX_ENVELOPE_REBUILDS.
     expect(replacements).toBe(3)
     // Only the warm-up turn reached the provider.
     expect(chat.requests).toHaveLength(1)
-    expect(owned.agent.inbox.nextStep.some(message => message.content.some(block => block.type === 'text'
-      && block.text.includes('REBUILD_LIMIT_INPUT')))).toBe(true)
+    expectPendingInput(owned.agent, 'REBUILD_LIMIT_INPUT')
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
+}, 60_000)
+
+/** A window-sized transport fallback cap must not refuse an ordinary request. */
+it('admits a request whose transport fallback equals the whole window', async () => {
+  class FallbackAdapter extends WindowAdapter {
+    override async resolveModel(provider: string, model: string) {
+      const info = await super.resolveModel(provider, model)
+      return { ...info, transportMaxTokens: this.windows.get(model) }
+    }
+  }
+  await withContext(async (ctx, root) => {
+    const chat = new FallbackAdapter([textResponse('Fallback reply.')])
+    chat.windows.set('roomy', 4_096)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    const sessionId = SessionId('hybrid-envelope-window-fallback')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: 'synthetic-chat', model: 'roomy' },
+      meta: { cwd: root },
+    })
+    await send(owned.agent, 'FALLBACK_INPUT')
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(events.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
+    expect(chat.requests).toHaveLength(1)
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.95 })
 }, 60_000)
