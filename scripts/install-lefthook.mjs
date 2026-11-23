@@ -696,6 +696,20 @@ async function main() {
     }
     const migration = planWorktreeConfigMigration(root, commonConfigPath)
     ownedHooksDirectory = ensureOwnedHooksDirectory(hooksPath)
+
+    const superproject = git(
+      ['rev-parse', '--show-superproject-working-tree'],
+      root,
+      { allowStatuses: [1] }
+    ).stdout.trim()
+
+    if (superproject !== '') {
+      return {
+        directBare: undefined,
+        extensionEnabled: false,
+        version,
+      }
+    }
     if (
       worktreePath !== undefined
       && worktreePath !== hooksPath
