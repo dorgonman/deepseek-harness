@@ -104,9 +104,9 @@ it('merges an explicit update into the ledger and rejects a dangling supersede',
     basis: 'asserted', supersedes: [prior!.factId],
   }])
   const merged = mergeExtractedFacts([prior!], updated, [user, assistant], events, OPTIONS)
-  expect(merged.find(fact => fact.factId === prior!.factId)).toMatchObject({
-    status: 'superseded', supersededBy: expect.any(String),
-  })
+  const superseded = merged.find(fact => fact.factId === prior!.factId)
+  expect(superseded).toMatchObject({ status: 'superseded' })
+  expect(typeof superseded?.supersededBy).toBe('string')
   expect(merged.filter(fact => fact.status === 'active')).toHaveLength(1)
 
   const dangling = JSON.stringify([{

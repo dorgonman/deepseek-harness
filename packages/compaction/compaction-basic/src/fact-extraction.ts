@@ -12,7 +12,6 @@ import {
   FACT_KINDS,
   mergeFacts,
   type FactInput,
-  type FactBasis,
   type FactRecord,
 } from './fact-ledger.ts'
 
@@ -116,7 +115,7 @@ export function parseFactExtraction(
       key: key.trim(),
       claim: claim.trim(),
       sourceEventIds: sources.map(source => source as SessionSeq),
-      basis: basis as FactBasis,
+      basis,
       ...supersedes === undefined ? {} : { supersedes: (supersedes as string[]).map(target => target.trim()) },
     }
   })

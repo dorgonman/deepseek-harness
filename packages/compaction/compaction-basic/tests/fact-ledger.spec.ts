@@ -196,8 +196,8 @@ it('refuses a tampered ledger snapshot and inconsistent lineage', () => {
   const session = conversation()
   const facts = createFacts(inputs(session), session.snapshotEvents())
   const tampered = [{ ...facts[0]!, evidenceDigest: '0'.repeat(64) }]
-  expect(() => validateLedger(tampered, session.snapshotEvents()))
+  expect(() => { validateLedger(tampered, session.snapshotEvents()) })
     .toThrow(/does not match its source digest/)
-  expect(() => validateLedger([{ ...facts[0]!, supersededBy: 'missing' }], session.snapshotEvents()))
+  expect(() => { validateLedger([{ ...facts[0]!, supersededBy: 'missing' }], session.snapshotEvents()) })
     .toThrow(FactLedgerError)
 })

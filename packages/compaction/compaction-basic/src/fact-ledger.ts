@@ -28,6 +28,12 @@ export type FactStatus = CompactionFactStatus
 /** How the claim reached the ledger. An inference is never promoted to RAW truth. */
 export type FactBasis = CompactionFactBasis
 
+/** Extraction bases accepted from an untrusted extractor. */
+const FACT_BASES = ['asserted', 'inferred'] as const satisfies readonly FactBasis[]
+
+/** Lifecycle values accepted from a durable snapshot. */
+const FACT_STATUSES = ['active', 'superseded', 'disputed'] as const satisfies readonly FactStatus[]
+
 /** Input supplied by an extractor before validation. */
 export interface FactInput {
   /** Fact class. */
@@ -69,13 +75,24 @@ function nonEmpty(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
 
+/**
+ * Runtime array guard for callers that bypass the declared input types.
+ *
+ * Declared as a plain boolean on purpose: `Array.isArray` narrows a real array
+ * type through its `any[]` predicate, which would widen every element back to
+ * `any` for the rest of the function.
+ */
+function isArray(value: unknown): boolean {
+  return Array.isArray(value)
+}
+
 function factsOf(input: FactInput, events: readonly SessionEvent[]): FactRecord {
-  if (!FACT_KINDS.includes(input.kind)) malformed(`unknown fact kind ${String(input.kind)}`)
+  if (!FACT_KINDS.includes(input.kind)) malformed(`unknown fact kind ${input.kind}`)
   if (!nonEmpty(input.key) || !nonEmpty(input.claim)) malformed('key and claim must be non-empty')
-  if (input.basis !== 'asserted' && input.basis !== 'inferred') {
+  if (!FACT_BASES.includes(input.basis)) {
     malformed('basis must be asserted or inferred')
   }
-  if (!Array.isArray(input.sourceEventIds) || input.sourceEventIds.length === 0) {
+  if (!isArray(input.sourceEventIds) || input.sourceEventIds.length === 0) {
     malformed('at least one source event is required')
   }
   const ids = [...new Set(input.sourceEventIds)]
@@ -201,9 +218,9 @@ export function validateLedger(facts: readonly FactRecord[], events: readonly Se
   const ids = new Set<string>()
   for (const fact of facts) {
     if (typeof fact.factId !== 'string' || fact.factId.length === 0) malformed('fact id is missing')
-    if (!FACT_KINDS.includes(fact.kind)) malformed(`unknown fact kind ${String(fact.kind)}`)
+    if (!FACT_KINDS.includes(fact.kind)) malformed(`unknown fact kind ${fact.kind}`)
     if (!nonEmpty(fact.key) || !nonEmpty(fact.claim)) malformed('fact key or claim is empty')
-    if (!Array.isArray(fact.sourceEventIds) || fact.sourceEventIds.length === 0) {
+    if (!isArray(fact.sourceEventIds) || fact.sourceEventIds.length === 0) {
       malformed('fact has no source event')
     }
     const sources = [...new Set(fact.sourceEventIds)]
@@ -217,14 +234,14 @@ export function validateLedger(facts: readonly FactRecord[], events: readonly Se
     if (fact.firstSeenSeq !== Math.min(...sources) || fact.lastSeenSeq !== Math.max(...sources)) {
       malformed('fact seen bounds do not match its sources')
     }
-    if (fact.status !== 'active' && fact.status !== 'superseded' && fact.status !== 'disputed') {
+    if (!FACT_STATUSES.includes(fact.status)) {
       malformed('fact status is invalid')
     }
-    if (fact.basis !== 'asserted' && fact.basis !== 'inferred') {
+    if (!FACT_BASES.includes(fact.basis)) {
       malformed('fact basis is invalid')
     }
     if (fact.branch !== undefined && !nonEmpty(fact.branch)) malformed('fact branch is empty')
-    if (fact.supersedes !== undefined && (!Array.isArray(fact.supersedes)
+    if (fact.supersedes !== undefined && (!isArray(fact.supersedes)
       || fact.supersedes.some(target => typeof target !== 'string' || target.length === 0))) {
       malformed('fact supersedes list is invalid')
     }
