@@ -1506,3 +1506,31 @@ it('admits a request whose transport fallback equals the whole window', async ()
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95 })
 }, 60_000)
+
+/** One attempt prices through one materialized preview, however many listeners read it. */
+it('shares one materialized preview across reads within an attempt', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Preview identity reply.')])
+    chat.windows.set('roomy', 4_000_000)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    const sessionId = SessionId('hybrid-envelope-preview-identity')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, maxTokens: 1_024 }, meta: { cwd: root },
+    })
+    let previewsRead = 0
+    let sharedAcrossReads = true
+    const remove = owned.agent.ctx.on('agent/request-envelope', ({ phase, view }) => {
+      if (phase !== 'preview') return
+      const first = view()
+      sharedAcrossReads &&= view() === first
+      previewsRead += 1
+    })
+    await send(owned.agent, 'PREVIEW_IDENTITY_INPUT')
+    remove()
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(events.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
+    expect(previewsRead).toBe(1)
+    expect(sharedAcrossReads).toBe(true)
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
+}, 60_000)
