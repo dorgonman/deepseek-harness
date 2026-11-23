@@ -7,8 +7,8 @@
  * @module @deepseek-ai/dsh-compaction-basic/resident-resolution
  */
 
-import { createHash } from 'node:crypto'
 import type { RequestMessage } from '@deepseek-ai/dsh-llm'
+import { digestCanonical } from './incremental.ts'
 import {
   selectResidentFromSource,
   type ResidentObservationSource,
@@ -65,27 +65,6 @@ export interface ResidentResolvedTarget {
   readonly receipt: ResidentSelectionReceipt
 }
 
-/** JSON with recursively sorted object keys, so equal content hashes equally. */
-function canonicalJson(value: unknown): string {
-  if (value === null) return 'null'
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return JSON.stringify(value)
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  if (typeof value === 'object') {
-    const record = value as Record<string, unknown>
-    const entries = Object.keys(record)
-      .filter(key => record[key] !== undefined)
-      .sort()
-      .map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-    return `{${entries.join(',')}}`
-  }
-  return 'null'
-}
-
-function digestCanonical(value: unknown): string {
-  return createHash('sha256').update(canonicalJson(value)).digest('hex')
-}
 /**
  * Stable identity of a projected summary envelope.
  * @param projection - exact messages and output reservation.
