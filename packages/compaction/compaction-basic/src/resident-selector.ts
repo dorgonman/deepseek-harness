@@ -150,6 +150,29 @@ function nodeName(value: unknown): value is string {
 function listOfTokens(value: unknown, bound: number): boolean {
   return Array.isArray(value) && value.length <= bound && Array.from(value).every(token)
 }
+/**
+ * Strict boolean gate for the untyped observation seam.
+ *
+ * Observations are re-validated here, so a truthy look-alike must never stand
+ * in for the exact boolean `true` an accepted row has to carry.
+ */
+function isTrue(value: unknown): boolean {
+  return value === true
+}
+/**
+ * Runtime array guard for callers that bypass the declared input types.
+ *
+ * Declared as a plain boolean on purpose: `Array.isArray` narrows a real array
+ * type through its `any[]` predicate, which would widen every element back to
+ * `any` for the rest of the function.
+ */
+function isArray(value: unknown): boolean {
+  return Array.isArray(value)
+}
+/** True only for the directly comparable unit; a size in any other unit cannot share a tier. */
+function comparableUnit(value: unknown): boolean {
+  return value === 'parameters'
+}
 function fresh(timestamp: unknown, input: SelectionInput): boolean {
   return count(timestamp) && timestamp <= input.nowMs && input.nowMs - timestamp <= input.maxAgeMs
 }
@@ -176,7 +199,7 @@ function freshNode(node: Candidate['node'] | undefined, input: SelectionInput): 
     token(node.bootGeneration) && fresh(node.observedAtMs, input)
 }
 function currentNode(node: Candidate['node'] | undefined, input: SelectionInput): node is Candidate['node'] {
-  return freshNode(node, input) && node.registered === true && node.authorized === true
+  return freshNode(node, input) && isTrue(node.registered) && isTrue(node.authorized)
 }
 function pinnedMapping(route: Candidate['route'] | undefined, node: Candidate['node'], input: SelectionInput): route is Candidate['route'] {
   return route?.gatewayId === input.gatewayId && route.nodeId === node.id &&
@@ -185,7 +208,7 @@ function pinnedMapping(route: Candidate['route'] | undefined, node: Candidate['n
     route.alias === `${route.logicalModel}@${node.name}`
 }
 function residentForwarding(route: Candidate['route']): boolean {
-  return route.healthy === true && route.contract === RESIDENT_ONLY_V1 && route.noRetry === true && route.noFallback === true
+  return isTrue(route.healthy) && route.contract === RESIDENT_ONLY_V1 && isTrue(route.noRetry) && isTrue(route.noFallback)
 }
 function modelMatchesIdentity(model: Candidate['model'] | undefined, id: ResidentPrecondition): boolean {
   return model?.servingVariantId === id.serving_variant_id && model.servingVariantRevision === id.serving_variant_revision &&
@@ -195,10 +218,10 @@ function usableModel(row: Candidate): boolean {
   const { host, model, route } = row
   const id = host.identity
   return host.mode === 'mservice' && (host.state === 'ready' || host.state === 'busy') &&
-    host.enabled === true && host.usable === true && host.admissionOpen === true &&
-    model?.ready === true && model.loaded === true && model.configurationValidated === true &&
-    Array.isArray(model.operations) && model.operations.length === 1 && model.operations[0] === 'chat' &&
-    model.capabilitySource === 'runtime' && Array.isArray(model.capabilities) && model.capabilities.includes('text') &&
+    isTrue(host.enabled) && isTrue(host.usable) && isTrue(host.admissionOpen) &&
+    isTrue(model.ready) && isTrue(model.loaded) && isTrue(model.configurationValidated) &&
+    isArray(model.operations) && model.operations.length === 1 && model.operations[0] === 'chat' &&
+    model.capabilitySource === 'runtime' && isArray(model.capabilities) && model.capabilities.includes('text') &&
     model.logicalModel === route.logicalModel && id.instance === route.instance &&
     id.serving_variant_id === route.servingVariantId && modelMatchesIdentity(model, id)
 }
@@ -252,7 +275,7 @@ function preferredIndex(input: SelectionInput, row: Candidate): number {
   return index < 0 ? Number.POSITIVE_INFINITY : index
 }
 function knownSize(value: Size | undefined): value is Size {
-  return value?.source === 'authoritative' && value.units === 'parameters' && token(value.group) && positive(value.value)
+  return value?.source === 'authoritative' && comparableUnit(value.units) && token(value.group) && positive(value.value)
 }
 function minTier(rows: readonly Candidate[], value: (row: Candidate) => number): Candidate[] {
   const best = Math.min(...rows.map(value))
@@ -282,18 +305,29 @@ function selected(row: Candidate, reason: SelectionReason): SelectionResult {
 }
 
 /**
+ * Reject one request that cannot describe a projectable summary envelope.
+ *
+ * The selector is also reachable from JavaScript, so the envelope is validated
+ * again even where TypeScript already proves its shape.
+ * @param input - the request to validate.
+ * @returns whether the request must be refused as invalid input.
+ */
+function invalidSelection(input: SelectionInput | undefined): boolean {
+  return !input || !count(input.nowMs) || !positive(input.maxAgeMs) || input.maxAgeMs > 60_000 ||
+    !token(input.gatewayId) || !token(input.projectionId) || !positive(input.outputTokens) || !count(input.reserveTokens) ||
+    !isArray(input.candidates) || input.candidates.length > 256 ||
+    (input.pinnedNodeId !== undefined && !token(input.pinnedNodeId)) ||
+    (input.allowedNodeIds !== undefined && !listOfTokens(input.allowedNodeIds, 32)) ||
+    (input.preferredVariantIds !== undefined && !listOfTokens(input.preferredVariantIds, 256))
+}
+
+/**
  * Select one already-loaded, usable resident Chat deployment for one compaction.
  * @param input - validated scope, projection identity, output budget and observations.
  * @returns the frozen target with its receipt reason, or a typed refusal code.
  */
 export function selectResidentSummary(input: SelectionInput): SelectionResult {
-  if (!input || !count(input.nowMs) || !positive(input.maxAgeMs) || input.maxAgeMs > 60_000 ||
-      !token(input.gatewayId) || !token(input.projectionId) || !positive(input.outputTokens) || !count(input.reserveTokens) ||
-      !Array.isArray(input.candidates) || input.candidates.length > 256 ||
-      (input.pinnedNodeId !== undefined && !token(input.pinnedNodeId)) ||
-      (input.allowedNodeIds !== undefined && !listOfTokens(input.allowedNodeIds, 32)) ||
-      (input.preferredVariantIds !== undefined && !listOfTokens(input.preferredVariantIds, 256)))
-    return { ok: false, code: 'resident_summary_invalid_input' }
+  if (invalidSelection(input)) return { ok: false, code: 'resident_summary_invalid_input' }
   const ids = input.allowedNodeIds ?? (input.pinnedNodeId === undefined ? undefined : [input.pinnedNodeId])
   if (!ids) return { ok: false, code: 'resident_summary_scope_required' }
   const allowed = new Set(ids)
@@ -312,21 +346,21 @@ export function selectResidentSummary(input: SelectionInput): SelectionResult {
   // transport proof across rows. Out-of-scope routes can still make a shared
   // gateway alias ambiguous; explicitly unauthorized rows have no authority.
   for (const row of input.candidates) {
-    if (!freshNode(row?.node, input)) continue
+    if (!freshNode(row.node, input)) continue
     const { node, host, route } = row
     const authorized = currentNode(node, input)
     noteClaim(authorityByNode, node.id, authorized ? 'authorized' : 'unverified')
     if (!authorized) continue
     noteClaim(nodeById, node.id, JSON.stringify([node.name, node.bootGeneration]))
     noteClaim(nodeByName, node.name, node.id)
-    if (host?.mode === 'mservice' && (host.usable === true || row.model?.loaded === true) && checkedIdentity(host.identity))
+    if (host.mode === 'mservice' && (isTrue(host.usable) || isTrue(row.model.loaded)) && checkedIdentity(host.identity))
       noteClaim(residentByInstance, instanceKey(node.id, host.identity.instance), identityKey(host.identity))
     if (pinnedMapping(route, node, input) && fresh(route.verifiedAtMs, input)) {
       const binding = staticBindingKey(row)
       noteClaim(bindingByAlias, route.alias, binding)
       noteClaim(bindingByRoute, route.id, JSON.stringify([route.alias, binding]))
       noteClaim(forwardingByRoute, route.id, residentForwarding(route) ? 'verified' : 'unverified')
-      if (host?.mode === 'mservice' && checkedIdentity(host.identity) && host.identity.instance === route.instance &&
+      if (host.mode === 'mservice' && checkedIdentity(host.identity) && host.identity.instance === route.instance &&
           host.identity.serving_variant_id === route.servingVariantId && modelMatchesIdentity(row.model, host.identity)) {
         const key = residentKey(row)
         noteClaim(modelByResident, key, route.logicalModel)
@@ -337,7 +371,7 @@ export function selectResidentSummary(input: SelectionInput): SelectionResult {
 
   const deduped = new Map<string, Candidate>()
   for (const row of input.candidates) {
-    if (!currentNode(row?.node, input) || !allowed.has(row.node.id) || !checkedIdentity(row.host?.identity) ||
+    if (!currentNode(row.node, input) || !allowed.has(row.node.id) || !checkedIdentity(row.host.identity) ||
         !pinnedMapping(row.route, row.node, input)) continue
     const { node, host, route } = row
     const binding = staticBindingKey(row)

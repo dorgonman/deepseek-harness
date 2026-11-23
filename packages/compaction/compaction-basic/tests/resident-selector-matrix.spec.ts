@@ -99,7 +99,7 @@ function expectRefusal(input: SelectionInput, code: RefusalCode = 'resident_summ
 
 function rejectRows(cases: readonly [description: string, change: CandidateEdit][]): void {
   for (const [description, change] of cases) {
-    it(`no eligible resident: ${description}`, () => expectRefusal(request([edit(candidate(), change)])))
+    it(`no eligible resident: ${description}`, () => { expectRefusal(request([edit(candidate(), change)])) })
   }
 }
 
@@ -301,7 +301,9 @@ for (const [label, overrides] of [
   ['fractional reserve', { reserveTokens: 1.5 }],
   ['unsafe reserve', { reserveTokens: Number.MAX_SAFE_INTEGER + 1 }],
 ] as const) {
-  it(`invalid request: ${label}`, () => expectRefusal(request([candidate()], overrides), 'resident_summary_invalid_input'))
+  it(`invalid request: ${label}`, () => {
+    expectRefusal(request([candidate()], overrides), 'resident_summary_invalid_input')
+  })
 }
 
 it('busy accepts a free bounded pending slot without requiring active telemetry', () => {
