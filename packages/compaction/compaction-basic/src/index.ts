@@ -204,7 +204,13 @@ export class BasicCompactionEngine extends CompactionEngine {
       const meter = this.ctx.tokenMeter
       const prompt = view.deriveMessages().reduce((total, message) => total + meter.estimateMessage(message), 0)
         + meter.estimateTools(header.tools)
-      const reserve = completionMaxTokens ?? 0
+      // A transport fallback is not a requested budget: the transport clamps it
+      // to the room it leaves, so admission prices the effective cap rather than
+      // the catalog capability (which can equal the whole window).
+      const declaredReserve = completionMaxTokens ?? 0
+      const reserve = completionSource === 'transport-fallback'
+        ? Math.min(declaredReserve, Math.max(0, contextWindow - prompt))
+        : declaredReserve
       const total = prompt + reserve
       if (total <= contextWindow) return
       const detail = `~${total} tokens (${prompt} request + ${reserve} reserved, ${completionSource}) `
