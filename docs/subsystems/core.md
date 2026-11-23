@@ -1064,7 +1064,7 @@ Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/s
 
 #### `agent/request-envelope` — serial
 
-Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen request that dispatch will send, so a listener may only refuse. A refusal throws, and no request reaches the provider.
+Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen request that dispatch will send, so a listener may only refuse. A refusal throws, and no request reaches the provider. The `view` accessor materializes the Session a listener prices: the preview clone is built on its first call, so a listener that never prices never pays for the clone.
 
 ```ts cordis-catalog
 /**
@@ -1073,10 +1073,12 @@ Price the request envelope before it is committed or dispatched. The `preview` p
  * may commit a checkpoint (the loop then rebuilds the preview and re-admits);
  * the `verify` phase runs on the frozen request that dispatch will send, so
  * a listener may only refuse. A refusal throws, and no request reaches the
- * provider.
+ * provider. The `view` accessor materializes the Session a listener prices:
+ * the preview clone is built on its first call, so a listener that never
+ * prices never pays for the clone.
  * @param payload.agent - the agent whose request is being admitted.
  * @param payload.header - the resolved envelope logged for this attempt.
- * @param payload.view - Session whose derived messages are priced (a preview clone, or the live Session for verification).
+ * @param payload.view - the Session whose derived messages are priced, materialized on first call.
  * @param payload.contextWindow - the destination model's window when known.
  * @param payload.completionMaxTokens - the output reservation bound to this attempt, when any.
  * @param payload.completionSource - which layer supplied that reservation.
@@ -1084,7 +1086,7 @@ Price the request envelope before it is committed or dispatched. The `preview` p
  * @param payload.signal - the current turn's cancellation signal.
  * @mode serial
  */
-'agent/request-envelope'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader view: Session contextWindow?: number completionMaxTokens?: number completionSource: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown' phase: 'preview' | 'verify' signal: AbortSignal }): Promise<void> | void
+'agent/request-envelope'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader view: () => Session contextWindow?: number completionMaxTokens?: number completionSource: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown' phase: 'preview' | 'verify' signal: AbortSignal }): Promise<void> | void
 ```
 
 Types: [EpochHeader](session.md) · [Scoped](scope.md) · [Session](session.md)

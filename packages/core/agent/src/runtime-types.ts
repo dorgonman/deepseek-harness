@@ -401,10 +401,12 @@ declare module '@deepseek-ai/cordis' {
      * may commit a checkpoint (the loop then rebuilds the preview and re-admits);
      * the `verify` phase runs on the frozen request that dispatch will send, so
      * a listener may only refuse. A refusal throws, and no request reaches the
-     * provider.
+     * provider. The `view` accessor materializes the Session a listener prices:
+     * the preview clone is built on its first call, so a listener that never
+     * prices never pays for the clone.
      * @param payload.agent - the agent whose request is being admitted.
      * @param payload.header - the resolved envelope logged for this attempt.
-     * @param payload.view - Session whose derived messages are priced (a preview clone, or the live Session for verification).
+     * @param payload.view - the Session whose derived messages are priced, materialized on first call.
      * @param payload.contextWindow - the destination model's window when known.
      * @param payload.completionMaxTokens - the output reservation bound to this attempt, when any.
      * @param payload.completionSource - which layer supplied that reservation.
@@ -415,7 +417,7 @@ declare module '@deepseek-ai/cordis' {
     'agent/request-envelope'(this: Scoped<Agent>, payload: {
       agent: Agent
       header: EpochHeader
-      view: Session
+      view: () => Session
       contextWindow?: number
       completionMaxTokens?: number
       completionSource: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown'

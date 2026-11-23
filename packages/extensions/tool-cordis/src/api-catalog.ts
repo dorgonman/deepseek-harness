@@ -5119,7 +5119,7 @@ export const EVENT_API: readonly EventApiEntry[] = [
   {
     name: 'agent/request-envelope',
     mode: 'serial',
-    signature: '\'agent/request-envelope\'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader view: Session contextWindow?: number completionMaxTokens?: number completionSource: \'explicit\' | \'adapter-default\' | \'transport-fallback\' | \'unknown\' phase: \'preview\' | \'verify\' signal: AbortSignal }): Promise<void> | void',
+    signature: '\'agent/request-envelope\'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader view: () => Session contextWindow?: number completionMaxTokens?: number completionSource: \'explicit\' | \'adapter-default\' | \'transport-fallback\' | \'unknown\' phase: \'preview\' | \'verify\' signal: AbortSignal }): Promise<void> | void',
     summary: 'Price the request envelope before it is committed or dispatched.',
     description: 'Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen request that dispatch will send, so a listener may only refuse. A refusal throws, and no request reaches the provider.',
     parameters: [{ name: 'payload', description: '.signal - the current turn\'s cancellation signal.' }],

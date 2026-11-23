@@ -31,7 +31,7 @@ import {
 import { assertNever, deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { EpochHeader, RequestContext, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { EpochHeader, RequestContext, SessionEvent, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader, headerEquals, Session, ToolCallRecovery } from '@deepseek-ai/dsh-session'
 import { renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
@@ -823,9 +823,15 @@ export class ReactLoopAgent implements Agent {
     let admission = plan(this.session)
     for (let attempt = 0; ; attempt += 1) {
       const generation = this.session.surface.contentGeneration
+      // Capture the exact pre-dispatch log once: replaying it is what prices the
+      // preview, and the replay must observe this attempt's events whatever the
+      // listener does to the live Session in between.
+      // oxlint-disable-next-line typescript/no-deprecated -- full-sequence read pending a projection (2026-09-09 note).
+      const events = this.session.snapshotEvents()
+      let view: Session | undefined
       await this.dispatch.serial('agent/request-envelope', {
         header,
-        view: this.previewView(admission, position),
+        view: () => (view ??= this.previewView(events, admission, position)),
         ...preparedCall?.context === undefined ? {} : { contextWindow: preparedCall.context.contextWindow },
         ...completionFields(preparedCall),
         phase: 'preview',
@@ -851,7 +857,7 @@ export class ReactLoopAgent implements Agent {
   ): Promise<void> {
     await this.dispatch.serial('agent/request-envelope', {
       header,
-      view: this.session,
+      view: () => this.session,
       ...preparedCall?.context === undefined ? {} : { contextWindow: preparedCall.context.contextWindow },
       ...completionFields(preparedCall),
       phase: 'verify',
@@ -865,10 +871,15 @@ export class ReactLoopAgent implements Agent {
     const input = messages.filter(message => message.source.kind !== 'runtime-context')
     if (input.length > 0) this.inbox.splice('next-step', 0, 0, [...input])
   }
-  /** Clone the Session with the pending admission committed, for pricing only. */
-  private previewView(admission: StepAdmission, position: StepPosition): Session {
-    // oxlint-disable-next-line typescript/no-deprecated -- full-sequence read pending a projection (2026-09-09 note).
-    const view = Session.fromRestore(this.session.id, this.session.snapshotEvents(), this.session.header,
+  /**
+   * Clone the Session with the pending admission committed, for pricing only.
+   * @param events - the exact pre-dispatch log observation to replay.
+   * @param admission - the pending admission to append to the clone.
+   * @param position - turn and step owning the admission.
+   * @returns the clone a listener prices.
+   */
+  private previewView(events: readonly SessionEvent[], admission: StepAdmission, position: StepPosition): Session {
+    const view = Session.fromRestore(this.session.id, events, this.session.header,
       this.session.inheritedEventCount, 'shared-frozen', this.loopCtx.sessions.messageProjections)
     this.appendStepAdmission(view, admission, position)
     return view

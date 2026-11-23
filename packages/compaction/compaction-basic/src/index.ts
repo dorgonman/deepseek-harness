@@ -202,7 +202,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     ctx.on('agent/request-envelope', async ({ agent, header, view, contextWindow, completionMaxTokens, completionSource, phase, signal }) => {
       if (signal.aborted || contextWindow === undefined) return
       const meter = this.ctx.tokenMeter
-      const prompt = view.deriveMessages().reduce((total, message) => total + meter.estimateMessage(message), 0)
+      const prompt = view().deriveMessages().reduce((total, message) => total + meter.estimateMessage(message), 0)
         + meter.estimateTools(header.tools)
       // A transport fallback is not a requested budget: the transport clamps it
       // to the room it leaves, so admission prices the effective cap rather than
