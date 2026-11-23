@@ -119,19 +119,25 @@ describe('incremental coverage', () => {
     const events = eventsOf(session)
     const coverage = advanceCoverage(undefined, events, SessionSeq(0), SessionSeq(7), { policyDigest: 'policy-a' })
 
-    expect(() => validateCoverage({
-      ...coverage,
-      covered: [
-        { start: SessionSeq(0), end: SessionSeq(3), digest: digestRange(events, SessionSeq(0), SessionSeq(3)) },
-        { start: SessionSeq(3), end: SessionSeq(7), digest: digestRange(events, SessionSeq(3), SessionSeq(7)) },
-      ],
-    }, events)).toThrow(IncrementalCoverageError)
-    expect(() => validateCoverage({
-      ...coverage, covered: [{ start: SessionSeq(0), end: SessionSeq(7), digest: '0'.repeat(64) }],
-    }, events)).toThrow(/does not match its digest/)
-    expect(() => validateCoverage({
-      ...coverage, highWatermark: SessionSeq(6),
-    }, events)).toThrow(/high watermark/)
+    expect(() => {
+      validateCoverage({
+        ...coverage,
+        covered: [
+          { start: SessionSeq(0), end: SessionSeq(3), digest: digestRange(events, SessionSeq(0), SessionSeq(3)) },
+          { start: SessionSeq(3), end: SessionSeq(7), digest: digestRange(events, SessionSeq(3), SessionSeq(7)) },
+        ],
+      }, events)
+    }).toThrow(IncrementalCoverageError)
+    expect(() => {
+      validateCoverage({
+        ...coverage, covered: [{ start: SessionSeq(0), end: SessionSeq(7), digest: '0'.repeat(64) }],
+      }, events)
+    }).toThrow(/does not match its digest/)
+    expect(() => {
+      validateCoverage({
+        ...coverage, highWatermark: SessionSeq(6),
+      }, events)
+    }).toThrow(/high watermark/)
   })
 
   it('selects only unprocessed append-origin events and never a checkpoint', () => {
@@ -172,8 +178,8 @@ describe('incremental coverage', () => {
     const session = conversation(2)
     const events = eventsOf(session)
     const coverage = advanceCoverage(undefined, events, SessionSeq(0), SessionSeq(7), { policyDigest: 'policy-a' })
-    expect(() => assertCoverageRevision(undefined, 0)).not.toThrow()
-    expect(() => assertCoverageRevision(coverage, 0)).toThrow(/revision changed/)
+    expect(() => { assertCoverageRevision(undefined, 0) }).not.toThrow()
+    expect(() => { assertCoverageRevision(coverage, 0) }).toThrow(/revision changed/)
     expect(() => advanceCoverage(coverage, events, SessionSeq(0), SessionSeq(7), { policyDigest: 'policy-a' }))
       .toThrow(/does not advance/)
   })
