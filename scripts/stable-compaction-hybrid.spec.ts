@@ -1486,7 +1486,7 @@ it('admits a request whose transport fallback equals the whole window', async ()
   class FallbackAdapter extends WindowAdapter {
     override async resolveModel(provider: string, model: string) {
       const info = await super.resolveModel(provider, model)
-      return { ...info, transportMaxTokens: this.windows.get(model) }
+      return { ...info, transportMaxTokens: this.windows.get(model)! }
     }
   }
   await withContext(async (ctx, root) => {
