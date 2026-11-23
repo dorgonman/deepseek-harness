@@ -867,6 +867,7 @@ export class ReactLoopAgent implements Agent {
   }
   /** Clone the Session with the pending admission committed, for pricing only. */
   private previewView(admission: StepAdmission, position: StepPosition): Session {
+    // oxlint-disable-next-line typescript/no-deprecated -- full-sequence read pending a projection (2026-09-09 note).
     const view = Session.fromRestore(this.session.id, this.session.snapshotEvents(), this.session.header,
       this.session.inheritedEventCount, 'shared-frozen', this.loopCtx.sessions.messageProjections)
     this.appendStepAdmission(view, admission, position)

@@ -172,6 +172,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     signal: AbortSignal,
   ): Promise<CompactionResult | null> {
     if (this.config.incremental) {
+      // oxlint-disable-next-line typescript/no-deprecated -- full-sequence read pending a projection (2026-09-09 note).
       const events = agent.session.snapshotEvents()
       const coverage = deriveCommittedCoverage(events)
       // A committed checkpoint with no RAW event above its watermark cannot
@@ -524,6 +525,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
           // already rejected Session mutation; the explicit revision check keeps
           // the durable CAS invariant stated at the commit point.
           assertCoverageRevision(
+            // oxlint-disable-next-line typescript/no-deprecated -- full-sequence read pending a projection (2026-09-09 note).
             deriveCommittedCoverage(session.snapshotEvents()),
             coverage?.revision ?? 0,
           )
