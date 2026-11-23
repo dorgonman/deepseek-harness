@@ -1458,3 +1458,54 @@ it('refuses at the frozen request when the tool delta pushes it over the window'
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 512,
     summarizationProvider: 'synthetic-summary', summarizationModel: 'summary' })
 }, 60_000)
+
+it('bounds preview rebuilds when a listener keeps replacing the Surface', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('First reply.'), textResponse('Second reply.')])
+    chat.windows.set('roomy', 4_000_000)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    const sessionId = SessionId('hybrid-envelope-rebuild-limit')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, maxTokens: 1_024 }, meta: { cwd: root },
+    })
+    // A legal Surface replacement on every preview keeps changing the Surface, so
+    // the loop must stop after its bounded previews instead of admitting forever.
+    let replacements = 0
+    await send(owned.agent, 'warm the surface')
+    const remove = owned.agent.ctx.on('agent/request-envelope', ({ agent, phase }) => {
+      if (phase !== 'preview') return
+      const nodes = [...agent.session.surface.nodes].slice(1)
+      const start = nodes.at(0)
+      const end = nodes.at(-1)
+      if (start === undefined || end === undefined) return
+      const id = CompactionId(`rebuild-${replacements}`)
+      const started = agent.session.append('compaction/start', { compactionId: id, turn: null })
+      const summary = agent.session.append('compaction/summary', {
+        compactionId: id, summary: [{ type: 'text', text: 'Rebuild checkpoint.' }],
+        shadowedRange: { start, end }, shadowedSeqs: nodes, shadowedTokenCount: 0,
+        provider: 'fixture', model: 'fixture',
+      })
+      agent.session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'Rebuild checkpoint.' }], source: compactCheckpointSource(id),
+      }), {
+        surfaceOp: { op: 'replace', startSeq: start, endSeq: end },
+        sourceEventSeqs: [started.seq, summary.seq, ...nodes],
+      })
+      replacements += 1
+    })
+    await send(owned.agent, 'REBUILD_LIMIT_INPUT')
+    remove()
+    const events = (await ctx.sessionQuery.readSession(sessionId)).events
+    expect(events.findLast(event => event.type === 'turn/end')?.data.reason).toMatchObject({
+      kind: 'error',
+      error: { code: 'CONTEXT_ADMISSION_REFUSED' },
+    })
+    // Bounded previews: the initial admission plus MAX_ENVELOPE_REBUILDS.
+    expect(replacements).toBe(3)
+    // Only the warm-up turn reached the provider.
+    expect(chat.requests).toHaveLength(1)
+    expect(owned.agent.inbox.nextStep.some(message => message.content.some(block => block.type === 'text'
+      && block.text.includes('REBUILD_LIMIT_INPUT')))).toBe(true)
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
+}, 60_000)
