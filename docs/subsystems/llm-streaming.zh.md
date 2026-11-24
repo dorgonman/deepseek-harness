@@ -633,6 +633,13 @@ interface LlmResolvedModelInfo extends LlmModelInfo {
   context?: LlmModelContext
   /** Adapter-configured per-request output cap materialized when callers omit one. */
   defaultMaxTokens?: number
+  /**
+   * Output cap the adapter's transport applies when the request omits one.
+   * This is the transport's own fallback (for pi-ai, the catalog capability),
+   * not a cap the deployment chose; a route that still caps an omitted request
+   * must declare it so admission reserves the tokens the provider is asked for.
+   */
+  transportMaxTokens?: number
   /** Adapter-owned selectable reasoning levels when exposed. */
   reasoning?: LlmModelReasoningInfo
   /** Declared mid-conversation system prompt handling; absent means only a leading system message is read. */
@@ -700,6 +707,11 @@ interface GenerateOptions<Purpose extends string = LlmRequestPurpose> {
   toolHistory?: ToolHistory
   temperature?: number
   maxTokens?: number
+  /**
+   * Immutable resident dispatch identity when the caller selected a loaded
+   * resident deployment. A transport without resident support must refuse it.
+   */
+  residentBinding?: ResidentCallBinding
   /**
    * Stop sequences: generation halts as soon as the model produces any one of
    * these strings (adapters map to the provider's stop field, e.g. OpenAI
@@ -889,10 +901,26 @@ interface LlmCallConfigAdapterDefaults {
 `LlmAdapter` 是提供方约定：创建子类、实现 `stream()`，再用 `ctx.llm.registerAdapter(providers, adapter)` 注册一个适配器实例。`GenerateOptions.provider` 选择已注册适配器；`GenerateOptions.model` 会传给该适配器，无需在生命周期启动时注册。重复提供方路由会原子失败。可选的 `providerRetryPolicy()` 会按路由捕获并填入 normal 默认值，`providerInfo()` 与异步 `listModels()` 方法则为 `LlmRuntime.listProviders()` / `listModels()` 提供分离的 selector 元数据。该目录仅供参考，不是请求白名单：适配器仍是权威，并可接受未列出的模型 id。单次异步 `resolveModel()` 查询返回确切模型身份，以及可选的对正确性敏感的上下文容量、适配器配置的 `defaultMaxTokens`、由模型持有的有序推理强度 ID 和可选的部署默认值；字段缺失表示元数据不可用或保留提供方持有的行为，而不表示目录成员关系无效。解析器会接收可选的取消信号，并且必须在信号中止后迅速完成结算。`LlmRuntime.resolveModelInfo()` 会校验聚合结果并返回分离值。在最终适配器边界，`resolveCallConfig()` 仅在 `maxTokens` 缺失时填入输出默认值，并校验和填入推理强度，因此直接调用也无法绕过任何一项已配置行为；直接分派会在等待解析前捕获一项适配器注册。agent loop 则使用 `prepareCall()`，使模型解析、请求头持久记录和分派全程使用同一项注册，保留来自同一次查询的分离上下文元数据，并报告适配器填入的配置字段。适配器查找发生在 `llm/stream` waterfall 的终端 continuation，因此 listener 可以在查找前短路调用，或路由一个可变的一次性请求。AgentLoop 在外层 waterfall 返回流句柄时观察到一次请求尝试；这个有限边界不能证明惰性终端适配器已构造完成或开始提供方 I/O。`block-start` / `block-end` 的 `index` 关联与 assembler 共同意味着适配器只需 emit 格式正确的分片——块重组不是每个适配器各自的问题。`ctx.llm.stream()` 与 `llm/stream` waterfall 在一个轮次中的位置见 [architecture.md](../architecture.zh.md#turn-flow)。
 
 ```ts type-equiv
+/**
+ * Effective output budget one prepared call will be charged for, and the
+ * precedence layer that supplied it. `unknown` means neither the caller nor the
+ * adapter declared a cap: no reservation is truthful then, and a later nonzero
+ * transport cap must not be mistaken for a zero budget.
+ */
+interface LlmCompletionReservation {
+  /** Output tokens this request reserves, when any source declared one. */
+  readonly maxTokens?: number
+  /** Which layer supplied {@link maxTokens}. */
+  readonly source: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown'
+}
+```
+```ts type-equiv
 /** One model call whose config and adapter registration were resolved together. */
 interface PreparedLlmCall {
   /** Detached, deep-frozen config with any adapter-owned default materialized. */
   readonly config: LlmCallConfig
+  /** Output budget admission must price, with the source layer that produced it. */
+  readonly completion: LlmCompletionReservation
   /** Immutable retry policy captured with the adapter registration. */
   readonly retryPolicy: ResolvedRetryPolicy
   /** Detached context metadata resolved with the registration-bound call. */

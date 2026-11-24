@@ -17,6 +17,36 @@ export type { CompactionId }
 /** The selected input representation of one auxiliary summarization call. */
 export type SummaryRequestProjection = 'conversation-prefix-v1' | 'text-transcript-v1'
 
+/** One contiguous append-origin event range represented by a checkpoint. */
+export interface CompactionCoveredRange {
+  /** First append-origin seq, inclusive. */
+  start: SessionSeq
+  /** Last append-origin seq, inclusive. */
+  end: SessionSeq
+  /** SHA-256 over the canonical content of every event in the range. */
+  digest: string
+}
+
+/**
+ * Durable incremental RAW coverage carried by a committed summary. Its
+ * presence marks a summary produced by incremental extraction; absence keeps
+ * the full-surface behavior of earlier backends and never implies coverage.
+ */
+export interface CompactionIncrementalCoverage {
+  /** Compare-and-set generation; incremented once per committed incremental summary. */
+  revision: number
+  /** Highest append-origin seq whose content this checkpoint accounts for. */
+  highWatermark: SessionSeq
+  /** Disjoint, ordered raw ranges represented by the checkpoint. */
+  covered: CompactionCoveredRange[]
+  /** Digest of the resolved compaction policy that produced the coverage. */
+  policyDigest: string
+  /** Summarizer identity that produced the new text, when one was called. */
+  summarizer?: { provider: string; model: string; maxTokens: number }
+  /** Checkpoint text carried forward from an earlier summary. */
+  carried?: { summarySeq: SessionSeq; digest: string }
+}
+
 /** Replay facts for one successful Hybrid summarizer call. */
 interface CompactionChunkCall {
   /** Original event groups in request order, with any tool-body substitution. */
@@ -31,6 +61,44 @@ interface CompactionChunkCall {
   usage?: TokenUsage
 }
 
+/** Closed set of sourced fact classes a ledger snapshot may contain. */
+export const COMPACTION_FACT_KINDS = [
+  'decision', 'constraint', 'identifier', 'open-work', 'observation', 'tool-evidence',
+] as const
+
+/** One accepted sourced fact class. */
+export type CompactionFactKind = typeof COMPACTION_FACT_KINDS[number]
+
+/** Lifecycle of a sourced fact in the derived ledger. */
+export type CompactionFactStatus = 'active' | 'superseded' | 'disputed'
+
+/** How a fact reached the ledger; an inference is never RAW truth. */
+export type CompactionFactBasis = 'asserted' | 'inferred'
+
+/** One validated, sourced fact committed with a checkpoint. */
+export interface CompactionFact {
+  /** Deterministic identity derived from kind, key and claim. */
+  readonly factId: string
+  readonly kind: CompactionFactKind
+  /** Stable subject key within the class. */
+  readonly key: string
+  /** Canonical claim or exact value. */
+  readonly claim: string
+  /** Exact source event ids the claim cites. */
+  readonly sourceEventIds: readonly SessionSeq[]
+  /** Digest binding the exact source event content. */
+  readonly evidenceDigest: string
+  readonly firstSeenSeq: SessionSeq
+  readonly lastSeenSeq: SessionSeq
+  readonly status: CompactionFactStatus
+  readonly basis: CompactionFactBasis
+  /** Session branch scope, when the fact is branch-limited. */
+  readonly branch?: string
+  /** Earlier fact ids this fact explicitly replaces. */
+  readonly supersedes?: readonly string[]
+  /** Later fact id that replaced this one. */
+  readonly supersededBy?: string
+}
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
@@ -73,6 +141,16 @@ declare module '@deepseek-ai/dsh-session/types' {
       requestProjection?: SummaryRequestProjection
       /** Provider-reported token usage for the summarization request, when emitted. */
       usage?: TokenUsage
+      /**
+       * Incremental RAW coverage committed with this checkpoint. Absent on a
+       * full-surface summary; readers must not infer coverage for that case.
+       */
+      incremental?: CompactionIncrementalCoverage
+      /**
+       * Merged sourced facts committed with this checkpoint. Chunk progress and
+       * ledger snapshots share one log event; a dangling summary is not coverage.
+       */
+      ledger?: readonly CompactionFact[]
     } & (
       | {
         /** Complete provider output before the backend's safe summary projection. */

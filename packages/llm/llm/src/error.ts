@@ -21,6 +21,7 @@ export const LLM_FAILURE_CODES = {
   ACCOUNT_TOKEN_INVALID: {},
   AUTH: {},
   CLIENT_UPGRADE_REQUIRED: {},
+  CONTEXT_ADMISSION_REFUSED: {},
   CONTEXT_WINDOW_EXCEEDED: {},
   DISCOVERY_FAILED: {},
   DISCOVERY_UNSUPPORTED: {},
@@ -55,6 +56,7 @@ export const LLM_FAILURE_CODES = {
   QUOTA: { retryChoice: true },
   RATE_LIMIT: { retryChoice: true },
   REGISTRATION_DISPOSED: {},
+  REASONING_BUDGET_UNFIT: {},
   REQUEST_EXTENSION: {},
   REQUEST_HEADERS: {},
   SERVER: { retryChoice: true },
@@ -71,6 +73,7 @@ export const LLM_FAILURE_CODES = {
   UNSUPPORTED_CONTENT: {},
   UNSUPPORTED_OPTION: {},
   UNSUPPORTED_REASONING_EFFORT: {},
+  UNSUPPORTED_RESIDENT_TRANSPORT: {},
   UNSUPPORTED_TOOLS: {},
 } as const satisfies Readonly<Record<string, { readonly retryChoice?: true }>>
 

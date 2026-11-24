@@ -183,6 +183,7 @@ export const SERVICE_PAGE: Record<string, string> = {
  * to a model as `cordis_runtime_inspect what:"client"`).
  */
 export const SERVICE_WALK_EXEMPTIONS: Record<string, string> = {
+  residentSummarySource: 'optional out-of-tree product seam: the KINF resident gateway provides already-normalized observations; the observe() contract is packages/compaction/compaction-basic/src/resident-observation.ts and the README owns the Hybrid summarizer configuration',
   contextMenus: 'client-side interface-typed menu registry — packages/client/ui-context-menu/README.md owns the API',
   fileActions: 'client-side interface-typed file actions — packages/client/ui-file-actions/README.md owns the API',
   invocation: 'not a service: per-call accessor (RemoteInvocation | undefined) the Gateway derives for each Remote call — packages/api/gateway/README.md owns the contract',
@@ -476,6 +477,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   LlmModelContext: 'llm-streaming.md',
   LlmModelReasoningInfo: 'llm-streaming.md',
   LlmResolvedModelInfo: 'llm-streaming.md',
+  LlmCompletionReservation: 'llm-streaming.md',
   LlmFailure: 'llm-streaming.md',
   LlmImageRequestPricing: 'llm-streaming.md',
   LlmModelInfo: 'llm-streaming.md',

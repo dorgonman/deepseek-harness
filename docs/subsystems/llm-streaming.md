@@ -627,6 +627,13 @@ interface LlmResolvedModelInfo extends LlmModelInfo {
   context?: LlmModelContext
   /** Adapter-configured per-request output cap materialized when callers omit one. */
   defaultMaxTokens?: number
+  /**
+   * Output cap the adapter's transport applies when the request omits one.
+   * This is the transport's own fallback (for pi-ai, the catalog capability),
+   * not a cap the deployment chose; a route that still caps an omitted request
+   * must declare it so admission reserves the tokens the provider is asked for.
+   */
+  transportMaxTokens?: number
   /** Adapter-owned selectable reasoning levels when exposed. */
   reasoning?: LlmModelReasoningInfo
   /** Declared mid-conversation system prompt handling; absent means only a leading system message is read. */
@@ -694,6 +701,11 @@ interface GenerateOptions<Purpose extends string = LlmRequestPurpose> {
   toolHistory?: ToolHistory
   temperature?: number
   maxTokens?: number
+  /**
+   * Immutable resident dispatch identity when the caller selected a loaded
+   * resident deployment. A transport without resident support must refuse it.
+   */
+  residentBinding?: ResidentCallBinding
   /**
    * Stop sequences: generation halts as soon as the model produces any one of
    * these strings (adapters map to the provider's stop field, e.g. OpenAI
@@ -883,10 +895,26 @@ The [wire reference](../deepseek-llm-api-wire-extensions.md) defines the exact r
 `LlmAdapter` is the provider contract: subclass, implement `stream()`, and register one adapter instance with `ctx.llm.registerAdapter(providers, adapter)`. `GenerateOptions.provider` selects the registered adapter; `GenerateOptions.model` is passed to that adapter and need not be registered at lifecycle start. Duplicate provider routes fail atomically. Optional `providerRetryPolicy()` is captured per route with normal defaults, while `providerInfo()` and asynchronous `listModels()` feed `LlmRuntime.listProviders()` / `listModels()` with detached selector metadata. That catalog is advisory rather than a request whitelist: the adapter remains authoritative and may accept unlisted model ids. One asynchronous `resolveModel()` query returns exact model identity plus optional correctness-sensitive context capacity, an adapter-configured `defaultMaxTokens`, and ordered model-owned reasoning ids with an optional deployment default; absent fields mean unavailable metadata or provider-owned behavior, not invalid catalog membership. The resolver receives optional cancellation and must settle promptly after abort. `LlmRuntime.resolveModelInfo()` validates and detaches the aggregate. At the final adapter boundary, `resolveCallConfig()` materializes the output default only when `maxTokens` is absent and validates and materializes reasoning, so direct calls cannot bypass either configured behavior; direct dispatch captures one registration before awaiting that resolution. The agent loop instead uses `prepareCall()` to keep the same registration across model resolution, durable header logging, and dispatch, retain detached context metadata from that exact lookup, and report which config fields the adapter defaulted. Adapter lookup happens at the terminal continuation of the `llm/stream` waterfall, so a listener may short-circuit the call or route a mutable one-shot request before lookup. AgentLoop observes a request attempt once the outer waterfall returns a stream handle; that limited boundary does not prove a lazy terminal adapter was constructed or began provider I/O. The `block-start` / `block-end` `index` correlation and the assembler together mean an adapter only has to emit well-formed chunks — block reassembly is not each adapter's problem. [architecture.md](../architecture.md#turn-flow) shows where `ctx.llm.stream()` and the `llm/stream` waterfall sit in one turn.
 
 ```ts type-equiv
+/**
+ * Effective output budget one prepared call will be charged for, and the
+ * precedence layer that supplied it. `unknown` means neither the caller nor the
+ * adapter declared a cap: no reservation is truthful then, and a later nonzero
+ * transport cap must not be mistaken for a zero budget.
+ */
+interface LlmCompletionReservation {
+  /** Output tokens this request reserves, when any source declared one. */
+  readonly maxTokens?: number
+  /** Which layer supplied {@link maxTokens}. */
+  readonly source: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown'
+}
+```
+```ts type-equiv
 /** One model call whose config and adapter registration were resolved together. */
 interface PreparedLlmCall {
   /** Detached, deep-frozen config with any adapter-owned default materialized. */
   readonly config: LlmCallConfig
+  /** Output budget admission must price, with the source layer that produced it. */
+  readonly completion: LlmCompletionReservation
   /** Immutable retry policy captured with the adapter registration. */
   readonly retryPolicy: ResolvedRetryPolicy
   /** Detached context metadata resolved with the registration-bound call. */

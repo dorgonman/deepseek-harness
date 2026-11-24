@@ -88,10 +88,23 @@ Hybrid 按来源顺序合并分块结果。切换模型时，它按照解析后�
 | `maxOverflowRetries` | `1` | 已确认上下文窗口溢出后的最大重试次数；`0` 只禁用恢复。 |
 | `modelPolicies` | `[]` | 针对个别模型路由的精确 `{ provider, model, ...partialPolicy }` 覆盖。 |
 | `auto` | `true` | 启用自动压缩与溢出恢复；设为 `false` 则仅手动执行。 |
+| `incremental` | `false` | 仅 Hybrid：在每次摘要中记录追加原始事件的覆盖范围，后续只引用水位线以上的 RAW 事件。被结转的检查点在本地组装，绝不发送给摘要模型。 |
+| `factLedger` | `false` | 与 `incremental` 配合：逐块提取带来源的类型化事实，提交合并账本，并用有界事实视图组装检查点。需要 `incremental: true`。 |
+| `factMaxClaims` | `64` | 单次分块响应接受的最大事实数。 |
+| `factMaxClaimChars` | `2000` | 单条提取事实的最大字符数。 |
+| `summarizationMode` | `fixed` | `resident-preferred` 通过已挂载的观察源为每次压缩解析一个已加载的常驻部署，并把它绑进该次分派；传输层必须强制该绑定，不支持的传输会以 `UNSUPPORTED_RESIDENT_TRANSPORT` 拒绝而不是回退。`fixed` 保持配置或路由目标。 |
+| `residentGatewayId` | — | 已授权网关标识；resident-preferred 必填。 |
+| `residentPinnedNodeId` | — | 未提供允许列表时使用的会话固定节点。 |
+| `residentAllowedNodeIds` | — | 显式压缩节点允许列表；替代固定节点。 |
+| `residentPreferredVariantIds` | — | 配置的质量偏好，越靠前越优先。 |
+| `residentProvider` | — | 网关前面的 DSH LLM 提供方路由。 |
+| `residentMaxAgeMs` | `60000` | 接受的最大观察年龄，1–60000 毫秒。 |
 
 配置错误会快速失败：未知设置、重复的按模型覆盖、无效 token 数、两种保留形式同时出现，或保留比例不小于阈值比例，都会在加载时拒绝插件。模型首次使用时，`W − O − B` 必须为正，且解析出的保留预算必须低于触发阈值。余量为零时，必须在全局或对应模型策略中显式设置正数 `maxTokens`。显式余量必须符合窗口容量。摘要沿用已声明窗口的对话路由时，省略的摘要上限跟随调整后的余量，至少为一个 token。显式摘要目标保留其配置或继承的上限。降低 `thresholdRatio` 可以提早压缩。
 
-显式摘要目标在调用提供方前校验：无法验证的路由以 `SUMMARY_TARGET_UNVERIFIED` 失败；非对话协议以 `SUMMARY_TARGET_NOT_CHAT` 失败；完整摘要请求加输出上限超过摘要器窗口时，以 `SUMMARY_CAPACITY_EXCEEDED` 失败。计价包含转录框架与最终指令。检查使用摘要器元数据与 token 计量，不会回退到其他提供方。
+使用 `summarizationFallback: error` 的基础后端和混合后端会在发送历史记录前校验实际调用。缺少上下文容量或容量无效时，以 `SUMMARY_TARGET_UNVERIFIED` 失败。摘要路由使用非对话协议或声明的输入模态排除文本时，以 `SUMMARY_TARGET_NOT_CHAT` 失败。未声明模态时仍允许调用。使用 `latest-route` 的基础后端仍允许适配器省略上下文容量。
+
+已知容量时，完整摘要输入与输出上限之和必须在上下文窗口内。超出窗口时，压缩以 `SUMMARY_CAPACITY_EXCEEDED` 失败。估算包含转录框架与最终指令。
 
 <a id="persist-preset-summary-policy"></a>
 ### 持久保存 preset 摘要策略
@@ -287,6 +300,7 @@ Rules:
 - **部分不可分单元与仅 envelope 溢出仍不在表层压缩范围内**——恢复无法缩减系统／工具／前缀、拆分不可分的非工具节点，或修复不可剪枝剩余部分仍超出窗口的工具单元。可选 pruner 可以缩减原本不可分工具对内的文本型工具结果主体。
 - **`compactRegion` 要求存在未结束的轮次**——在完全关闭的会话上手动调用会抛出异常（「no open turn」），而不是执行压缩。
 - **摘要失败会保留最新持久表层**——步前压力检查会记录警告并继续；模型切换压力检查会拒绝目标请求。两种失败都会保留已完成的剪枝与之前的检查点。因达到 `maxTokens` 而发生的摘要截断（隐藏推理 token 可能会耗尽该额度）遵循同一规则。
+- **增量结转会使检查点增长**——启用 `incremental: true` 时，后续检查点在本地结转上一检查点文本，而不重新摘要。在有界视图工作落地前，重复压缩可能更早触及目标预算；切换仍会拒绝，而不是丢弃历史。
 - **跨模型图片定价可能拒绝有效摘要**——切换时按目标定价选择范围，但按已提交路由验证缩减。不同的图片价格可能使摘要未通过缩减验证，即使它能降低目标压力。
 - **Preset 保存保留当前插件列表** — 新建的 profile 覆盖会记录继承插件；后续 bundle 新增项需要显式协调。现有 Agent 在释放前保留旧 preset revision。
 

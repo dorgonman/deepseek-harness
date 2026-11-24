@@ -794,6 +794,40 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   modelPolicies?: ModelCompactPolicyConfig[]
   /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
   auto?: boolean
+  /**
+   * Record append-origin coverage on each summary and, on later compactions,
+   * quote only RAW events above the committed watermark. Defaults to `false`;
+   * the default keeps full-surface behavior so this setting is opt-in.
+   */
+  incremental?: boolean
+  /**
+   * With `incremental`, extract typed sourced facts per chunk, commit the merged
+   * ledger, and compose the checkpoint from the bounded fact view instead of
+   * carrying prior summary text. Defaults to `false`.
+   */
+  factLedger?: boolean
+  /** Maximum facts accepted from one chunk response. Defaults to `64`. */
+  factMaxClaims?: number
+  /** Maximum characters in one extracted claim. Defaults to `2000`. */
+  factMaxClaimChars?: number
+  /**
+   * Summarizer target policy. `fixed` keeps the configured or routed target;
+   * `resident-preferred` resolves one already-loaded resident deployment per
+   * compaction through a trusted observation source. Defaults to `fixed`.
+   */
+  summarizationMode?: 'fixed' | 'resident-preferred'
+  /** Authorized gateway identity for resident-preferred mode. */
+  residentGatewayId?: string
+  /** Conversation-pinned node used when no allowlist is supplied. */
+  residentPinnedNodeId?: string
+  /** Explicit compaction node allowlist; replaces the pin. */
+  residentAllowedNodeIds?: string[]
+  /** Configured quality preference for resident variants, most preferred first. */
+  residentPreferredVariantIds?: string[]
+  /** DSH LLM provider route that fronts the resident gateway. */
+  residentProvider?: string
+  /** Maximum accepted observation age in milliseconds; at most 60000. Defaults to 60000. */
+  residentMaxAgeMs?: number
 }
 
 /** Policy fields shared by the default policy and exact model overrides. */
@@ -2101,7 +2135,7 @@ export interface Config extends ProtocolConfig, ModelListingConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:263`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:244`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */

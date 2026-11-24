@@ -35,8 +35,10 @@ import type {
   ModelThinkingLevel,
   MutableModels,
   SimpleStreamOptions,
+  ThinkingBudgets,
   ThinkingLevel,
 } from '@earendil-works/pi-ai'
+import { MIN_ANSWER_TOKENS, thinkingBudgetForLevel } from '@earendil-works/pi-ai/api/simple-options'
 import {
   attributionHeaders,
   contentHasImage,
@@ -148,6 +150,30 @@ export interface PiAiAuthInjection {
 }
 
 /** Copy profile stream knobs into pi-ai's common option vocabulary. */
+/**
+ * Base output cap for a manual (budget-based) Anthropic thinking request.
+ * pi-ai adds the thinking budget to the base cap before sending `max_tokens`,
+ * so a prepared cap must be treated as the total ceiling: the base handed to
+ * the provider is the ceiling minus the budget, and a cap that cannot hold the
+ * budget plus the minimum answer room is refused instead of silently expanded.
+ */
+function thinkingCeilingBase(
+  ceiling: number,
+  level: ThinkingLevel,
+  budgets: ThinkingBudgets | undefined,
+  modelId: string,
+): number {
+  const budget = thinkingBudgetForLevel(level, budgets)
+  const base = ceiling - budget
+  if (base < MIN_ANSWER_TOKENS) {
+    throw new LlmError(
+      `pi-ai model "${modelId}" reasoning effort "${level}" reserves ${budget} thinking tokens, `
+      + `which does not fit inside a ${ceiling}-token completion cap; lower the effort or raise maxTokens`,
+      'REASONING_BUDGET_UNFIT',
+    )
+  }
+  return base
+}
 function profileOptions(
   profile: ResolvedPiAiProviderProfile,
   reasoning: ModelThinkingLevel | undefined,
@@ -383,7 +409,9 @@ export class PiAiAdapter extends LlmAdapter {
     const resolvedModel = this.modelOf(snapshot, provider, model)
     const defaultLevel = describableReasoningLevel(resolvedModel, profile.reasoning)
     // Only a cap the deployment configured is a request default; the
-    // catalog's `maxTokens` sizes the model and stops there.
+    // catalog's `maxTokens` sizes the model and stops there. The transport still
+    // asks for that capability when a request omits a cap, so it is reported
+    // separately as the fallback admission must reserve.
     const configuredMaxTokens = profile.configuredMaxTokens.get(model)
     const requestProtocol = profile.requestProtocols.get(model)
     const nativeTools = requestProtocol === 'kinf-decision-v1' ? false : profile.nativeTools.get(model)
@@ -394,6 +422,7 @@ export class PiAiAdapter extends LlmAdapter {
       inputModalities: [...resolvedModel.input],
       context: { contextWindow: resolvedModel.contextWindow },
       ...configuredMaxTokens === undefined ? {} : { defaultMaxTokens: configuredMaxTokens },
+      transportMaxTokens: resolvedModel.maxTokens,
       ...nativeTools === undefined ? {} : { nativeTools },
       ...requestProtocol === 'kinf-decision-v1' ? {
         requestProtocol,
@@ -420,6 +449,14 @@ export class PiAiAdapter extends LlmAdapter {
     options: GenerateOptions,
     snapshot: PiAiSnapshot,
   ): AsyncIterable<StreamChunk> {
+    if (options.residentBinding !== undefined) {
+      // A resident selection must be enforced by the transport that owns the
+      // deployment; this adapter cannot carry the identity, so it refuses.
+      throw new LlmError(
+        'llm-pi-ai: resident dispatch binding is unsupported by this transport',
+        'UNSUPPORTED_RESIDENT_TRANSPORT',
+      )
+    }
     if (options.stop !== undefined) {
       throw new LlmError('llm-pi-ai does not support GenerateOptions.stop', 'UNSUPPORTED_OPTION')
     }
@@ -515,6 +552,14 @@ export class PiAiAdapter extends LlmAdapter {
         }, onReplayDegrade, updates.systemPromptUpdate === 'in-history', prefixDigests)
       const manualThinking = model.reasoning && reasoning !== undefined && reasoning !== 'off'
         && (model as Model<'anthropic-messages'>).compat?.forceAdaptiveThinking !== true
+      // A prepared cap is the total completion ceiling. On the manual Anthropic
+      // thinking path pi-ai adds the budget to the cap it is given, so hand it the
+      // remainder; refuse when the budget cannot fit instead of expanding the wire.
+      const wireMaxTokens = model.api === 'anthropic-messages' && options.maxTokens !== undefined
+        && reasoning !== undefined && reasoning !== 'off'
+        && (model as Model<'anthropic-messages'>).compat?.forceAdaptiveThinking !== true
+        ? thinkingCeilingBase(options.maxTokens, reasoning, profile.thinkingBudgets, model.id)
+        : options.maxTokens
       const { context, digest } = bindThinkingToPrefix(converted, model.api, prefixDigests, manualThinking, (count) => {
         this.config.onThinkingOmitted?.({ provider: options.provider, model: options.model, count })
       })
@@ -530,7 +575,7 @@ export class PiAiAdapter extends LlmAdapter {
       const events = snapshot.models.streamSimple(wireModel, wireContext, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
-        ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
+        ...wireMaxTokens === undefined ? {} : { maxTokens: wireMaxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
         signal: watchdog.signal,
         headers: requestHeaders(

@@ -13,7 +13,11 @@ import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import type { CompactionResult } from './types.ts'
 import type { CompactionCheckpointSource } from './checkpoint.ts'
 
-export type { CompactionResult, SummaryRequestProjection } from './types.ts'
+export type {
+  CompactionResult, SummaryRequestProjection, CompactionCoveredRange, CompactionIncrementalCoverage,
+  CompactionFact, CompactionFactKind, CompactionFactStatus, CompactionFactBasis,
+} from './types.ts'
+export { COMPACTION_FACT_KINDS } from './types.ts'
 export { CompactionId } from './brand.ts'
 export { toolPairingBalancedAfter, toolPairingBalancedBefore } from './tool-pairing.ts'
 // The checkpoint source constructor and predicate are declared on the cordis-free

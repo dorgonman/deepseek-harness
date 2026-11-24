@@ -63,11 +63,12 @@ function routedTarget(
 /**
  * Output tokens the routed request reserves, which the provider charges to the
  * same window as the prompt. The effective envelope's own cap wins; otherwise
- * the adapter's per-request default, which the adapter materializes when that
- * envelope omits one. No declared cap means no reservation.
+ * the adapter's request default or the transport's own fallback, which the
+ * adapter materializes when that envelope omits one. No declared cap means no
+ * reservation.
  */
-function reservedCompletionTokens(header: EpochHeader, defaultMaxTokens: number | undefined): number {
-  return header.config.maxTokens ?? defaultMaxTokens ?? 0
+function reservedCompletionTokens(header: EpochHeader, fallbackMaxTokens: number | undefined): number {
+  return header.config.maxTokens ?? fallbackMaxTokens ?? 0
 }
 
 /** Resolve the conversation target used to select an optional policy override. */
@@ -194,6 +195,64 @@ export class BasicCompactionEngine extends CompactionEngine {
       return next()
     })
 
+    // Last gate: price the exact envelope — pending input, system/runtime
+    // context, tools, retained history and the bound completion reservation.
+    // `preview` may commit a checkpoint (the loop rebuilds and re-admits);
+    // `verify` sees the frozen request and may only refuse.
+    ctx.on('agent/request-envelope', async ({ agent, header, view, contextWindow, completionMaxTokens, completionSource, phase, signal }) => {
+      if (signal.aborted || contextWindow === undefined) return
+      const meter = this.ctx.tokenMeter
+      const prompt = view().deriveMessages().reduce((total, message) => total + meter.estimateMessage(message), 0)
+        + meter.estimateTools(header.tools)
+      // A transport fallback is not a requested budget: the transport clamps it
+      // to the room it leaves, so admission prices the effective cap rather than
+      // the catalog capability (which can equal the whole window).
+      const declaredReserve = completionMaxTokens ?? 0
+      const reserve = completionSource === 'transport-fallback'
+        ? Math.min(declaredReserve, Math.max(0, contextWindow - prompt))
+        : declaredReserve
+      const total = prompt + reserve
+      if (total <= contextWindow) return
+      const detail = `~${total} tokens (${prompt} request + ${reserve} reserved, ${completionSource}) `
+        + `exceed the ${contextWindow}-token window`
+      if (phase === 'verify') {
+        throw new LlmError(
+          `compaction: request refused before dispatch; ${detail}`,
+          'CONTEXT_ADMISSION_REFUSED',
+        )
+      }
+      // Prefer trimming oversized tool output over shadowing history: a trim
+      // changes the Surface, and the loop rebuilds and prices it again.
+      const pruner = this.ctx.get('toolResultPruner')
+      if (pruner !== undefined) {
+        const generation = agent.session.surface.contentGeneration
+        pruner.pruneSession(agent.session)
+        if (agent.session.surface.contentGeneration !== generation) return
+      }
+      let compacted: CompactionResult | null
+      try {
+        compacted = await this.compactIfNeeded(agent, 'pressure', signal)
+        // The pressure threshold can sit above the exact envelope: the durable
+        // surface is still "cheap enough" while pending input pushes this
+        // request over. Fall back to a range selected for the envelope itself.
+        if (compacted === null) compacted = await this.compactEnvelopeOverflow(agent, header, signal)
+      } catch (error: unknown) {
+        signal.throwIfAborted()
+        const reason = error instanceof Error ? error.message : String(error)
+        throw new LlmError(
+          `compaction: request refused before dispatch; ${detail} and compaction failed: ${reason}`,
+          'CONTEXT_ADMISSION_REFUSED',
+        )
+      }
+      if (compacted === null) {
+        throw new LlmError(
+          `compaction: request refused before dispatch; ${detail} and no safe range remains`,
+          'CONTEXT_ADMISSION_REFUSED',
+        )
+      }
+      logResult(compacted, 'request envelope')
+    })
+
     ctx.on('agent/status', ({ agent, status }) => {
       if (status === 'idle') this.overflowRetries.delete(agent)
     })
@@ -253,7 +312,8 @@ export class BasicCompactionEngine extends CompactionEngine {
       { agent, failure, signal },
       next,
     ) => {
-      if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE || signal.aborted) return next()
+      const isCancelled = (): boolean => signal.aborted
+      if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE || isCancelled()) return next()
       this.overflowAgents.set(agent.session, agent)
       const target = routedTarget(agent.session)
       if (target === undefined) return next()
@@ -274,7 +334,7 @@ export class BasicCompactionEngine extends CompactionEngine {
         // A model-free prune can land before later summary work fails. That
         // durable reduction is sufficient retry proof; do not discard it just
         // because the optional second phase threw. Cancellation still wins.
-        if (!signal.aborted && agent.session.surface.replaceGeneration > generation) {
+        if (!isCancelled() && agent.session.surface.replaceGeneration > generation) {
           ctx.logger.warn(
             `context-overflow compaction failed after durable surface progress: ${message}; `
             + 'retrying from the replacement surface',
@@ -283,13 +343,13 @@ export class BasicCompactionEngine extends CompactionEngine {
           return { kind: 'retry' }
         }
         ctx.logger.warn(
-          `context-overflow compaction failed: ${message}; ${signal.aborted
+          `context-overflow compaction failed: ${message}; ${isCancelled()
             ? 'cancellation prevents retry'
             : 'preserving the original request error'}`,
         )
         return next()
       }
-      if (signal.aborted
+      if (isCancelled()
         || agent.session.surface.replaceGeneration <= generation) return next()
       if (result !== null) logResult(result, 'context overflow recovery')
       this.overflowRetries.set(agent, retries + 1)
@@ -298,8 +358,8 @@ export class BasicCompactionEngine extends CompactionEngine {
   }
 
   /**
-   * Summarize the selected region through a direct one-shot `ctx.llm.stream()`
-   * call. Ordinary Chat targets with nativeTools:false receive quoted text
+   * Summarize the selected region through one auxiliary LLM call.
+   * Ordinary Chat targets with nativeTools:false receive quoted text
    * history; other routes retain the conversation prefix.
    * Override this sole hook for a template or remote summarizer.
    * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.
@@ -312,6 +372,9 @@ export class BasicCompactionEngine extends CompactionEngine {
     agent: Agent,
     signal?: AbortSignal,
   ): Promise<SummaryResult> {
+    if (this.config.summarizationMode === 'resident-preferred') {
+      throw new Error('compaction: resident-preferred summarization requires the Hybrid backend')
+    }
     const target = conversationTarget(agent)
     if (target === undefined) return summarizeWithLlm(this.ctx, this.config, input, agent, signal)
     const policy = resolveTargetPolicy(this.config, target)
@@ -324,7 +387,8 @@ export class BasicCompactionEngine extends CompactionEngine {
       return undefined
     })
     if (info?.context === undefined) return summarizeWithLlm(this.ctx, policy, input, agent, signal)
-    const reserve = agent.session.requestHeader()?.config.maxTokens ?? info.defaultMaxTokens ?? 0
+    const reserve = agent.session.requestHeader()?.config.maxTokens
+      ?? info.defaultMaxTokens ?? info.transportMaxTokens ?? 0
     const maxTokens = resolveSummaryMaxTokens(policy, info.context.contextWindow - reserve)
     return summarizeWithLlm(this.ctx, { ...policy, maxTokens }, input, agent, signal)
   }
@@ -348,6 +412,27 @@ export class BasicCompactionEngine extends CompactionEngine {
     return this.compactRegion(start, end, agent, signal)
   }
 
+  /**
+   * Compact one range selected for an exact-envelope overflow rather than for
+   * the pressure threshold. Retains nothing: the loop rebuilds the envelope and
+   * prices it again, so an unnecessary second reduction is bounded by the
+   * caller's rebuild budget.
+   * @param agent - agent whose Surface is reduced.
+   * @param header - proposed envelope the reduction is priced against.
+   * @param signal - current turn cancellation.
+   * @returns the committed result, or null when no safe range remains.
+   */
+  private async compactEnvelopeOverflow(
+    agent: Agent,
+    header: EpochHeader,
+    signal: AbortSignal,
+  ): Promise<CompactionResult | null> {
+    signal.throwIfAborted()
+    const measurement = this.ctx.tokenMeter.measure(agent.session, header)
+    const range = selectCompactableRange(agent.session, measurement, 0)
+    if (range === null) return null
+    return this.compactPressureRegion(range.start, range.end, agent, header, signal)
+  }
   /** Supply a durability checkpoint for automatic and explicit transactions. */
   protected regionFlush(_agent: Agent): (() => Promise<void>) | undefined {
     return undefined
@@ -430,7 +515,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     const spec = resolveCompactSpec(
       policy,
       info.context.contextWindow,
-      reservedCompletionTokens(header, info.defaultMaxTokens),
+      reservedCompletionTokens(header, info.defaultMaxTokens ?? info.transportMaxTokens),
     )
     if (measurement.totalTokens < spec.thresholdTokens) return null
 

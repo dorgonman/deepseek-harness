@@ -1,0 +1,8 @@
+version: 1
+scenario: compaction-summary-missing-context
+profile: headless
+composition: compaction-text-only-summary
+recording: authored
+platform: posix
+header:
+  class: compaction-text-only-summary

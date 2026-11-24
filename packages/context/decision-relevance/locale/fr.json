@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Pertinence des résultats d’outils",
+    "description": "Utilise un modèle Decision configuré pour remplacer le contenu des résultats d’outils non pertinents par un marqueur court dans les requêtes au modèle. Le journal de session conserve les résultats complets."
+  }
+}

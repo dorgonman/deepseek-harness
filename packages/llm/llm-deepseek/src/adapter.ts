@@ -63,6 +63,15 @@ export class DeepSeekAdapter<C extends Connection = Connection> extends LlmAdapt
   }
 
   private async * generate(options: GenerateOptions<string>, connection: C): AsyncGenerator<StreamChunk> {
+    // This transport cannot enforce a resident dispatch identity: refuse the
+    // binding before any credential, file or HTTP work rather than dispatch a
+    // request under a bare alias.
+    if (options.residentBinding !== undefined) {
+      throw new LlmError(
+        'llm-deepseek: resident dispatch binding is unsupported by this transport',
+        'UNSUPPORTED_RESIDENT_TRANSPORT',
+      )
+    }
     const consumer = new AbortController()
     const signal = options.signal === undefined ? consumer.signal : AbortSignal.any([consumer.signal, options.signal])
     using watchdog = idleWatchdog(signal, connection.streamIdleTimeoutMs, 'MESSAGES_IDLE')

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Tool result relevance",
+    "description": "Uses a configured Decision model to replace irrelevant tool result content with a short marker in model requests while keeping the full results in the session log."
+  }
+}

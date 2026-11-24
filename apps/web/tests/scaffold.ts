@@ -26,7 +26,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, posix, resolve, win32 } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Page } from 'playwright'
 import { expect } from 'vitest'
@@ -1187,6 +1187,81 @@ export function normalizeWebSessionVolatiles(log: string, workspaceCwd?: string)
   }).join('\n')
 }
 
+const attachmentFixtureRoot = '{{harnessHome}}/attachments/'
+
+function mapAttachmentFields(log: string, mapPath: (path: string) => string): string {
+  const reads = new Set<string>()
+  const mapArguments = (args: string) =>
+    args.replace(/("file_path"\s*:\s*)("(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4}))*")/gu,
+      (original, field: string, encoded: string) => {
+        const path = JSON.parse(encoded) as string
+        const mapped = mapPath(path)
+        return mapped === path ? original : field + JSON.stringify(mapped)
+      })
+  const mapReadBlock = (block: SessionEvent<'assistant/message'>['data']['message']['content'][number]) =>
+    block.type === 'tool-call' && block.name === 'read' ? { ...block, arguments: mapArguments(block.arguments) } : block
+
+  return log.split(/\r?\n/u).map((line) => {
+    if (line.trim() === '') return line
+    const event = JSON.parse(line) as SessionEvent
+    if (event.type === 'assistant/message') {
+      const { message, stream } = event.data
+      const content = message.content.map(mapReadBlock)
+      const mappedStream = stream.map(record => record.type === 'chunk' && record.chunk.type === 'block-end'
+        && record.chunk.block.type === 'tool-call' && record.chunk.block.name === 'read'
+        ? { ...record, chunk: { ...record.chunk, block: mapReadBlock(record.chunk.block) } }
+        : record)
+      return JSON.stringify({ ...event, data: { ...event.data, message: { ...message, content }, stream: mappedStream } })
+    }
+    if (event.type === 'tool/call' && event.data.name === 'read') {
+      reads.add(event.data.callId)
+      return JSON.stringify({ ...event, data: { ...event.data, arguments: mapArguments(event.data.arguments) } })
+    }
+    if (event.type === 'tool/result' && reads.delete(event.data.message.toolCallId)) {
+      const { message, meta } = event.data
+      const content = message.content.map((block, index) => index === 0 && block.type === 'text'
+        ? { ...block, text: block.text.replace(/^<path>([^<\r\n]+)<\/path>/u, (_original, path: string) => '<path>' + mapPath(path) + '</path>') }
+        : block)
+      const mappedMeta = meta !== null && typeof meta === 'object' && !Array.isArray(meta) && typeof meta.path === 'string'
+        ? { ...meta, path: mapPath(meta.path) }
+        : meta
+      return JSON.stringify({ ...event, data: { ...event.data, message: { ...message, content }, meta: mappedMeta } })
+    }
+    return line
+  }).join('\n')
+}
+
+/**
+ * Bind only the owned attachment paths in the expected fixture to this Web run.
+ * Nested read arguments retain their recorded JSON framing.
+ * @param log - Expected Session fixture with a harness-home binding.
+ * @param harnessHome - Absolute home of the isolated Web scaffold.
+ * @returns The expected Session with native attachment paths.
+ */
+export function bindWebFixtureAttachmentHome(log: string, harnessHome: string): string {
+  if (!log.includes(attachmentFixtureRoot)) return log
+  const path = /^(?:[A-Za-z]:[\\/]|\\\\)/u.test(harnessHome) ? win32 : posix
+  return mapAttachmentFields(log, value => value.startsWith(attachmentFixtureRoot)
+    ? path.join(harnessHome, 'attachments', value.slice(attachmentFixtureRoot.length))
+    : value)
+}
+
+/**
+ * Capture only attachment paths rooted in this isolated Web run's home.
+ * @param log - Actual Session captured for an owned fixture.
+ * @param harnessHome - Absolute home of the isolated Web scaffold.
+ * @returns The fixture with stable attachment home references.
+ */
+export function captureWebFixtureAttachmentHome(log: string, harnessHome: string): string {
+  const root = harnessHome.replaceAll('\\', '/') + '/attachments/'
+  return mapAttachmentFields(log, (value) => {
+    const forward = value.replaceAll('\\', '/')
+    return forward.startsWith(root)
+      ? attachmentFixtureRoot + forward.slice(root.length)
+      : value
+  })
+}
+
 function stableSessionFixture(
   session: Session,
   existing: string,
@@ -1194,7 +1269,7 @@ function stableSessionFixture(
   harnessHome: string,
 ): string {
   const prepared = prepareSessionSnapshotFixtureForComparison(
-    normalizeWebSessionVolatiles(rawSessionLog(session), workspaceCwd),
+    normalizeWebSessionVolatiles(captureWebFixtureAttachmentHome(rawSessionLog(session), harnessHome), workspaceCwd),
   )
   const stabilized = existing === ''
     ? prepared
@@ -1253,7 +1328,9 @@ async function assertReplaySession(
   }
   const actualSnapshot = normalizeSessionSnapshots([normalizeWebSessionVolatiles(actual)], actualContext)[0]
     ?.split(harnessHome).join('{{harnessHome}}')
-  const expectedSnapshot = normalizeSessionSnapshots([normalizeWebSessionVolatiles(expected)], expectedContext)[0]
+  const expectedSnapshot = normalizeSessionSnapshots(
+    [normalizeWebSessionVolatiles(bindWebFixtureAttachmentHome(expected, harnessHome))], expectedContext,
+  )[0]
     ?.split(harnessHome).join('{{harnessHome}}')
   expect(actualSnapshot, `${fixturePath}: persisted replay`).toBe(expectedSnapshot)
 

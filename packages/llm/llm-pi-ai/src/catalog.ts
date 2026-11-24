@@ -863,11 +863,14 @@ export interface RouteCatalog {
   requestProtocols: ReadonlyMap<string, 'kinf-decision-v1'>
   /** Explicit native tool support keyed by selector id; absent entries retain normal admission. */
   nativeTools: ReadonlyMap<string, boolean>
-  /** Explicit request-header overrides keyed by selector id. */
+  /** Explicit model request headers keyed by selector id and layered above provider headers. */
   modelHeaders: ReadonlyMap<string, Readonly<Record<string, string>>>
   /** Explicit stream-read idle intervals keyed by selector id; absent entries inherit the provider interval. */
   modelStreamIdleTimeouts: ReadonlyMap<string, number>
-  /** Endpoint overrides whose origin differs from the provider endpoint, including an absent provider endpoint. */
+  /**
+   * Models whose endpoint override has a different origin or no provider origin to compare.
+   * These models cannot inherit provider credentials.
+   */
   crossOriginModels: ReadonlySet<string>
 }
 

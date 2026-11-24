@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
+import type { ModuleLoaderV2 } from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import { SessionStore } from '@deepseek-ai/dsh-session'
@@ -36,15 +37,21 @@ async function load(yaml: string[], label: string): Promise<Context> {
   ctx.baseUrl = pathToFileURL(root).href + '/'
   await ctx.plugin(Loader)
   ctx.loader.builtins.include = Include
-  ctx.loader.internal = {
+  const internal: ModuleLoaderV2 = {
     version: 'v2',
+    loadCache: new Map(),
     async import(specifier: string) {
       if (specifier === '@deepseek-ai/dsh-llm') return LlmRuntime
       if (specifier === '@deepseek-ai/dsh-session') return SessionStore
       if (specifier === '@deepseek-ai/dsh-context-decision-relevance') return DecisionRelevanceFilter
       throw new Error(`unexpected Loader import: ${specifier}`)
     },
-  } as unknown as NonNullable<typeof ctx.loader.internal>
+    register(): never { throw new Error('unexpected module hook registration') },
+    getOrCreateModuleJob(): never { throw new Error('unexpected module job creation') },
+    resolveSync(): never { throw new Error('unexpected synchronous module resolution') },
+    load(): never { throw new Error('unexpected module load') },
+  }
+  ctx.loader.internal = internal
   await ctx.loader.create({
     name: 'cordis:include',
     config: { path: pathToFileURL(configPath).href },

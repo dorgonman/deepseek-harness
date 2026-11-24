@@ -2,6 +2,8 @@
  * Executable lint checks use private copies of repository sources and configuration.
  * Process-spawning cases set Vitest's case timeout to 90 seconds, including
  * plain local runs without a CI override. Configuration-only cases keep the default.
+ * The private-copy lifecycle hooks use a larger ceiling: the copy materializes
+ * roughly 11,400 repository files, which exceeds 90 seconds on a hosted Windows runner.
  */
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -14,6 +16,8 @@ import { flattenDiagnosticMessageText, parseConfigFileTextToJson } from 'typescr
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 const sourceRepositoryRoot = fileURLToPath(new URL('..', import.meta.url))
+/** Private-copy ceiling for the hooks below; the copy is far larger than one lint case. */
+const COPY_HOOK_TIMEOUT_MS = 180_000
 let repositoryRoot = ''
 
 // Probes belong to a private copy: repository compiler scans run in other workers and processes.
@@ -36,11 +40,11 @@ beforeAll(async () => {
   }
   await symlink(join(sourceRepositoryRoot, 'node_modules'), join(repositoryRoot, 'node_modules'),
     process.platform === 'win32' ? 'junction' : 'dir')
-}, 90_000)
+}, COPY_HOOK_TIMEOUT_MS)
 
 afterAll(async () => {
   if (repositoryRoot !== '') await rm(repositoryRoot, { recursive: true, force: true })
-}, 90_000)
+}, COPY_HOOK_TIMEOUT_MS)
 const oxlintCli = fileURLToPath(new URL('../node_modules/oxlint/bin/oxlint', import.meta.url))
 const tsxCli = fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs', import.meta.url))
 

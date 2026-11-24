@@ -6,7 +6,7 @@ import {
   isEffective,
   resolveConfig,
   truncateCodePoints,
-} from '@deepseek-ai/dsh-context-decision-relevance'
+} from '../src/config.ts'
 
 describe('decision relevance configuration', () => {
   it('resolves detached immutable defaults and partial overrides', () => {

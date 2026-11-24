@@ -31,7 +31,7 @@ import {
 import { assertNever, deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { EpochHeader, RequestContext, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { EpochHeader, RequestContext, SessionEvent, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader, headerEquals, Session, ToolCallRecovery } from '@deepseek-ai/dsh-session'
 import { renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
@@ -64,6 +64,21 @@ type Phase =
   | { kind: 'running'; abort: AbortController; turn: number; step: number; wakeRequested: boolean }
 
 type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }>
+
+/** Flatten the bound reservation into the envelope-admission payload. */
+function completionFields(prepared: PreparedLlmCall | undefined): {
+  completionMaxTokens?: number
+  completionSource: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown'
+} {
+  const completion = prepared?.completion
+  return {
+    ...completion?.maxTokens === undefined ? {} : { completionMaxTokens: completion.maxTokens },
+    completionSource: completion?.source ?? 'unknown',
+  }
+}
+
+/** Bounded preview rebuilds after a committed compaction inside one admission. */
+const MAX_ENVELOPE_REBUILDS = 2
 
 type PreparedStep =
   | { kind: 'reject' }
@@ -471,14 +486,35 @@ export class ReactLoopAgent implements Agent {
         view, decision, renderedPrompt, preparedCall, firstAttempt, startsRequestSeries, signal, shadowed,
       )
       const baseline = this.session.requestHeader()
-      const admission = baseline !== undefined
+      const switching = baseline !== undefined
         && (baseline.config.provider !== config.provider || baseline.config.model !== config.model)
-        ? await this.admitSwitch(baseline, header, preparedCall, plan, position, signal)
-        : undefined
-      signal.throwIfAborted()
-      this.appendStepAdmission(this.session, admission ?? plan(this.session), position)
+      let admitted: StepAdmission
+      try {
+        const admission = switching
+          ? await this.admitSwitch(baseline, header, preparedCall, plan, position, signal)
+          : undefined
+        signal.throwIfAborted()
+        // A switch commits its own priced replacement; every other path prices
+        // the pending envelope here, before the step commits it, so compaction
+        // cannot strand the runtime-context or system-prompt projection behind a
+        // shadow.
+        admitted = switching
+          ? admission ?? plan(this.session)
+          : await this.admitEnvelope(header, preparedCall, plan, position, signal)
+      } catch (error: unknown) {
+        // A refused admission must not consume the input it refused to price.
+        // Only the first attempt owns that claim: a retry already committed it.
+        try {
+          if (firstAttempt) this.restoreClaimedInput(decision.messages)
+        } catch {
+          // A failed restore must not mask why the request was refused.
+        }
+        throw error
+      }
+      this.appendStepAdmission(this.session, admitted, position)
       firstAttempt = false
       const request = this.buildRequest(header, preparedCall, position, startsRequestSeries, signal)
+      await this.verifyEnvelope(header, preparedCall, signal)
       const live = new AssistantStreamAttempt(
         this.session.id,
         ++this.assistantAttemptCounter,
@@ -762,6 +798,91 @@ export class ReactLoopAgent implements Agent {
     }
     signal.throwIfAborted()
     return { config, ...preparedCall === undefined ? {} : { preparedCall } }
+  }
+
+  /**
+   * Price the pending envelope before the step commits its admission. A listener
+   * may compact the Surface, in which case the admission is recomputed against
+   * the post-compaction Surface and priced again, bounded by
+   * {@link MAX_ENVELOPE_REBUILDS}. A listener that cannot get the preview under
+   * budget throws, so the refused request is never committed or dispatched.
+   * @param header - the resolved envelope for this attempt.
+   * @param preparedCall - registration-bound call supplying window and reservation.
+   * @param plan - recomputes the step admission against the current Surface.
+   * @param position - turn and step owning the admission.
+   * @param signal - the current turn's cancellation signal.
+   * @returns the admission to commit for this attempt.
+   */
+  private async admitEnvelope(
+    header: EpochHeader,
+    preparedCall: PreparedLlmCall | undefined,
+    plan: (view: Session, shadowed?: readonly SessionSeq[]) => StepAdmission,
+    position: StepPosition,
+    signal: AbortSignal,
+  ): Promise<StepAdmission> {
+    let admission = plan(this.session)
+    for (let attempt = 0; ; attempt += 1) {
+      const generation = this.session.surface.contentGeneration
+      // Capture the exact pre-dispatch log once: replaying it is what prices the
+      // preview, and the replay must observe this attempt's events whatever the
+      // listener does to the live Session in between.
+      // oxlint-disable-next-line typescript/no-deprecated -- full-sequence read pending a projection (2026-09-09 note).
+      const events = this.session.snapshotEvents()
+      let view: Session | undefined
+      await this.dispatch.serial('agent/request-envelope', {
+        header,
+        view: () => (view ??= this.previewView(events, admission, position)),
+        ...preparedCall?.context === undefined ? {} : { contextWindow: preparedCall.context.contextWindow },
+        ...completionFields(preparedCall),
+        phase: 'preview',
+        signal,
+      })
+      signal.throwIfAborted()
+      if (this.session.surface.contentGeneration === generation) return admission
+      if (attempt >= MAX_ENVELOPE_REBUILDS) {
+        throw new LlmError(
+          'agent: request admission still exceeds the destination budget after bounded compaction',
+          'CONTEXT_ADMISSION_REFUSED',
+        )
+      }
+      admission = plan(this.session)
+    }
+  }
+
+  /** Price the frozen request dispatch is about to send; refusal only. */
+  private async verifyEnvelope(
+    header: EpochHeader,
+    preparedCall: PreparedLlmCall | undefined,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await this.dispatch.serial('agent/request-envelope', {
+      header,
+      view: () => this.session,
+      ...preparedCall?.context === undefined ? {} : { contextWindow: preparedCall.context.contextWindow },
+      ...completionFields(preparedCall),
+      phase: 'verify',
+      signal,
+    })
+    signal.throwIfAborted()
+  }
+
+  /** Return a step's claimed user input to the pending Inbox after an admission failure. */
+  private restoreClaimedInput(messages: readonly UserMessage[]): void {
+    const input = messages.filter(message => message.source.kind !== 'runtime-context')
+    if (input.length > 0) this.inbox.splice('next-step', 0, 0, [...input])
+  }
+  /**
+   * Clone the Session with the pending admission committed, for pricing only.
+   * @param events - the exact pre-dispatch log observation to replay.
+   * @param admission - the pending admission to append to the clone.
+   * @param position - turn and step owning the admission.
+   * @returns the clone a listener prices.
+   */
+  private previewView(events: readonly SessionEvent[], admission: StepAdmission, position: StepPosition): Session {
+    const view = Session.fromRestore(this.session.id, events, this.session.header,
+      this.session.inheritedEventCount, 'shared-frozen', this.loopCtx.sessions.messageProjections)
+    this.appendStepAdmission(view, admission, position)
+    return view
   }
 
   /** Log the resolved envelope and derive a frozen request from the admitted surface. */

@@ -5117,6 +5117,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'payload', description: '.signal - the current turn\'s cancellation signal.' }],
   },
   {
+    name: 'agent/request-envelope',
+    mode: 'serial',
+    signature: '\'agent/request-envelope\'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader view: () => Session contextWindow?: number completionMaxTokens?: number completionSource: \'explicit\' | \'adapter-default\' | \'transport-fallback\' | \'unknown\' phase: \'preview\' | \'verify\' signal: AbortSignal }): Promise<void> | void',
+    summary: 'Price the request envelope before it is committed or dispatched.',
+    description: 'Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen request that dispatch will send, so a listener may only refuse. A refusal throws, and no request reaches the provider. The `view` accessor materializes the Session a listener prices: the preview clone is built on its first call, so a listener that never prices never pays for the clone.',
+    parameters: [{ name: 'payload', description: '.signal - the current turn\'s cancellation signal.' }],
+  },
+  {
     name: 'agent/request-error',
     mode: 'waterfall',
     signature: '\'agent/request-error\'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; provider: string; failure: LlmFailure; retryPolicy: ResolvedRetryPolicy | undefined; signal: AbortSignal }, next: () => Promise<RequestErrorAction>): Promise<RequestErrorAction>',
@@ -7122,7 +7130,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'GenerateOptions',
-    declaration: 'export interface GenerateOptions<Purpose extends string = LlmRequestPurpose> {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    tools?: ToolSchema[];\n    toolHistory?: ToolHistory;\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: Purpose;\n}',
+    declaration: 'export interface GenerateOptions<Purpose extends string = LlmRequestPurpose> {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    tools?: ToolSchema[];\n    toolHistory?: ToolHistory;\n    temperature?: number;\n    maxTokens?: number;\n    residentBinding?: ResidentCallBinding;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: Purpose;\n}',
   },
   {
     name: 'GenericCallView',
@@ -7469,6 +7477,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LlmCallControls {\n    reasoningEffort?: ReasoningEffortId;\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n}',
   },
   {
+    name: 'LlmCompletionReservation',
+    declaration: 'export interface LlmCompletionReservation {\n    readonly maxTokens?: number;\n    readonly source: \'explicit\' | \'adapter-default\' | \'transport-fallback\' | \'unknown\';\n}',
+  },
+  {
     name: 'LlmConfigurableProvider',
     declaration: 'export interface LlmConfigurableProvider {\n    provider: string;\n    displayName: string;\n    settingsNs: string;\n    settingsPath: readonly string[];\n    declared?: boolean;\n    defaultBaseURL?: string;\n    baseURLEnv?: readonly string[];\n    nativeAuth?: LlmNativeAuth;\n    error?: string;\n}',
   },
@@ -7534,7 +7546,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmResolvedModelInfo',
-    declaration: 'export interface LlmResolvedModelInfo extends LlmModelInfo {\n    nativeTools?: boolean;\n    inputProjectionPolicy?: \'reject\';\n    requestProtocol?: \'kinf-decision-v1\';\n    context?: LlmModelContext;\n    defaultMaxTokens?: number;\n    reasoning?: LlmModelReasoningInfo;\n    systemPromptUpdate?: SystemPromptUpdate;\n    toolUpdate?: ToolUpdate;\n}',
+    declaration: 'export interface LlmResolvedModelInfo extends LlmModelInfo {\n    nativeTools?: boolean;\n    inputProjectionPolicy?: \'reject\';\n    requestProtocol?: \'kinf-decision-v1\';\n    context?: LlmModelContext;\n    defaultMaxTokens?: number;\n    transportMaxTokens?: number;\n    reasoning?: LlmModelReasoningInfo;\n    systemPromptUpdate?: SystemPromptUpdate;\n    toolUpdate?: ToolUpdate;\n}',
   },
   {
     name: 'LlmRuntime',
@@ -8218,7 +8230,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PreparedLlmCall',
-    declaration: 'export interface PreparedLlmCall {\n    readonly config: LlmCallConfig;\n    readonly retryPolicy: ResolvedRetryPolicy;\n    readonly context?: LlmModelContext;\n    readonly inputModalities?: readonly ModelModality[];\n    readonly systemPromptUpdate?: SystemPromptUpdate;\n    readonly toolUpdate?: ToolUpdate;\n    readonly adapterDefaults: LlmCallConfigAdapterDefaults;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+    declaration: 'export interface PreparedLlmCall {\n    readonly config: LlmCallConfig;\n    readonly completion: LlmCompletionReservation;\n    readonly retryPolicy: ResolvedRetryPolicy;\n    readonly context?: LlmModelContext;\n    readonly inputModalities?: readonly ModelModality[];\n    readonly systemPromptUpdate?: SystemPromptUpdate;\n    readonly toolUpdate?: ToolUpdate;\n    readonly adapterDefaults: LlmCallConfigAdapterDefaults;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
   },
   {
     name: 'PreparedReferencedMessage',
@@ -8607,6 +8619,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RequestUserInput',
     declaration: 'export interface RequestUserInput {\n    readonly role: \'user\';\n    readonly content: UserMessage[\'content\'];\n    readonly id?: never;\n    readonly source?: never;\n}',
+  },
+  {
+    name: 'ResidentCallBinding',
+    declaration: 'export interface ResidentCallBinding {\n    readonly schema: string;\n    readonly instance: string;\n    readonly hostGeneration: string;\n    readonly servingVariantId: string;\n    readonly servingVariantRevision: string;\n    readonly modelArtifact: string;\n    readonly artifactRevision: string;\n    readonly targetConfigRevision: string;\n    readonly residentGeneration: string;\n    readonly projectionId: string;\n}',
   },
   {
     name: 'ResolvedAlwaysRetryPolicy',

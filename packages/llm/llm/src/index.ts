@@ -205,10 +205,25 @@ export function assertUsableApiKey(raw: string, pkg: string, ref: string): strin
   )
 }
 
+/**
+ * Effective output budget one prepared call will be charged for, and the
+ * precedence layer that supplied it. `unknown` means neither the caller nor the
+ * adapter declared a cap: no reservation is truthful then, and a later nonzero
+ * transport cap must not be mistaken for a zero budget.
+ */
+export interface LlmCompletionReservation {
+  /** Output tokens this request reserves, when any source declared one. */
+  readonly maxTokens?: number
+  /** Which layer supplied {@link maxTokens}. */
+  readonly source: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown'
+}
+
 /** One model call whose config and adapter registration were resolved together. */
 export interface PreparedLlmCall {
   /** Detached, deep-frozen config with any adapter-owned default materialized. */
   readonly config: LlmCallConfig
+  /** Output budget admission must price, with the source layer that produced it. */
+  readonly completion: LlmCompletionReservation
   /** Immutable retry policy captured with the adapter registration. */
   readonly retryPolicy: ResolvedRetryPolicy
   /** Detached context metadata resolved with the registration-bound call. */
@@ -869,6 +884,14 @@ export class LlmRuntime extends TypertRemoteService {
         'INVALID_MODEL_MAX_TOKENS',
       )
     }
+    const transportMaxTokens = resolved.transportMaxTokens
+    if (transportMaxTokens !== undefined
+      && (!Number.isSafeInteger(transportMaxTokens) || transportMaxTokens <= 0)) {
+      throw new LlmError(
+        `adapter returned invalid transport maxTokens for provider "${provider}" model "${model}"`,
+        'INVALID_MODEL_MAX_TOKENS',
+      )
+    }
     // Widened: the protocol is adapter-owned catalog data, checked here as text.
     const requestProtocol: string | undefined = resolved.requestProtocol
     if (requestProtocol !== undefined && requestProtocol !== 'kinf-decision-v1') {
@@ -885,7 +908,8 @@ export class LlmRuntime extends TypertRemoteService {
       ...inputModalities === undefined ? {} : { inputModalities },
       ...context === undefined ? {} : { context: { contextWindow: context.contextWindow } },
       ...defaultMaxTokens === undefined ? {} : { defaultMaxTokens },
-      ...requestProtocol === undefined ? {} : { requestProtocol: requestProtocol as 'kinf-decision-v1' },
+      ...transportMaxTokens === undefined ? {} : { transportMaxTokens },
+      ...requestProtocol === undefined ? {} : { requestProtocol },
       ...resolved.nativeTools === undefined ? {} : { nativeTools: resolved.nativeTools },
       ...resolved.inputProjectionPolicy === undefined ? {} : { inputProjectionPolicy: resolved.inputProjectionPolicy },
       ...resolved.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: resolved.systemPromptUpdate },
@@ -954,7 +978,12 @@ export class LlmRuntime extends TypertRemoteService {
     registration: AdapterRegistration,
     config: LlmCallConfig,
     signal?: AbortSignal,
-  ): Promise<{ config: LlmCallConfig; context?: LlmModelContext; modelInfo: LlmResolvedModelInfo }> {
+  ): Promise<{
+    config: LlmCallConfig
+    completion: LlmCompletionReservation
+    context?: LlmModelContext
+    modelInfo: LlmResolvedModelInfo
+  }> {
     const info = await this.resolveModelInfoFor(registration, config.model, signal)
     return this.resolveCallWithInfo(config, info)
   }
@@ -963,10 +992,24 @@ export class LlmRuntime extends TypertRemoteService {
   private resolveCallWithInfo(
     config: LlmCallConfig,
     info: LlmResolvedModelInfo,
-  ): { config: LlmCallConfig; context?: LlmModelContext; modelInfo: LlmResolvedModelInfo } {
-    const defaulted = config.maxTokens === undefined && info.defaultMaxTokens !== undefined
-      ? { ...config, maxTokens: info.defaultMaxTokens }
-      : config
+  ): {
+    config: LlmCallConfig
+    completion: LlmCompletionReservation
+    context?: LlmModelContext
+    modelInfo: LlmResolvedModelInfo
+  } {
+    // Precedence: caller explicit, deployment default, then the transport's own
+    // fallback. The last layer is not a chosen default — it only names the cap
+    // the provider would receive anyway, so admission prices what it will send.
+    const completionSource: LlmCompletionReservation['source'] =
+      config.maxTokens !== undefined ? 'explicit'
+        : info.defaultMaxTokens !== undefined ? 'adapter-default'
+          : info.transportMaxTokens !== undefined ? 'transport-fallback'
+            : 'unknown'
+    const completionMaxTokens = config.maxTokens ?? info.defaultMaxTokens ?? info.transportMaxTokens
+    const defaulted = completionMaxTokens === undefined || config.maxTokens !== undefined
+      ? config
+      : { ...config, maxTokens: completionMaxTokens }
     const reasoning = info.reasoning
     const requested = defaulted.reasoningEffort
     let resolvedConfig = defaulted
@@ -991,6 +1034,10 @@ export class LlmRuntime extends TypertRemoteService {
     }
     return {
       config: resolvedConfig,
+      completion: {
+        ...completionMaxTokens === undefined ? {} : { maxTokens: completionMaxTokens },
+        source: completionSource,
+      },
       ...info.context === undefined ? {} : { context: info.context },
       modelInfo: info,
     }
@@ -1039,6 +1086,7 @@ export class LlmRuntime extends TypertRemoteService {
     let dispatched = false
     return Object.freeze({
       config: resolvedConfig,
+      completion: resolved.completion,
       retryPolicy: registration.retryPolicy,
       adapterDefaults,
       ...context === undefined ? {} : { context },

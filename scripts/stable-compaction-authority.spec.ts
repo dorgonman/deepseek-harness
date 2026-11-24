@@ -457,7 +457,8 @@ it.each([
       parameters: {},
       async execute() { return [{ type: 'text', text: resultText }] },
     }))
-    const { agent, dispose } = await author.agents.create({ sessionId, agentOptions: route, meta: { cwd: root } })
+    const owned = await author.agents.create({ sessionId, agentOptions: route, meta: { cwd: root } })
+    const { agent } = owned
     await sendRecoveryPrompt(agent, 'Read the original tool result before compaction.')
     const rawSurface = [...agent.session.surface.nodes]
     const original = await author.sessionQuery.readSession(sessionId)
@@ -480,7 +481,7 @@ it.each([
     }
     expect(end.data.compactionId).toBe(first.compactionId)
     const replayedSurface = replacementStored ? [...agent.session.surface.nodes] : rawSurface
-    await dispose()
+    await owned.dispose()
 
     const cut = replacementStored ? end : replacement
     const prefix = compacted.events.filter(event => event.seq < cut.seq)
