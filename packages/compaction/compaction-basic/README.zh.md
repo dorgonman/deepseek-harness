@@ -80,7 +80,9 @@ kind: "package-reference"
 
 配置错误会快速失败：未知设置、重复的按模型覆盖、无效 token 数、两种保留形式同时出现，或保留比例不小于阈值比例，都会在加载时拒绝插件。模型首次使用时，`W − O − B` 必须为正，且解析出的保留预算必须低于触发阈值。余量为零时，必须在全局或对应模型策略中显式设置正数 `maxTokens`。显式余量必须符合窗口容量。摘要沿用已声明窗口的对话路由时，省略的摘要上限跟随调整后的余量，至少为一个 token。显式摘要目标保留其配置或继承的上限。降低 `thresholdRatio` 可以提早压缩。
 
-显式摘要目标在调用提供方前校验：无法验证的路由以 `SUMMARY_TARGET_UNVERIFIED` 失败；非对话协议以 `SUMMARY_TARGET_NOT_CHAT` 失败；完整摘要请求加输出上限超过摘要器窗口时，以 `SUMMARY_CAPACITY_EXCEEDED` 失败。计价包含转录框架与最终指令。检查使用摘要器元数据与 token 计量，不会回退到其他提供方。
+每次摘要操作都会在调用提供方前检查所选路由。使用 `summarizationFallback: error` 时，精确路由元数据或上下文容量不可用会以 `SUMMARY_TARGET_UNVERIFIED` 失败。默认 `latest-route` 策略在元数据或容量未知时保留尽力执行行为。非对话协议，或显式排除文本的输入模态，在两种策略下都会以 `SUMMARY_TARGET_NOT_CHAT` 失败；缺少模态元数据仍按普通 Chat 处理。
+
+已知上下文容量时，完整摘要请求加输出上限必须符合容量，否则调用以 `SUMMARY_CAPACITY_EXCEEDED` 失败。计价包含转录框架与最终指令。检查使用摘要器当前的元数据与 token 计量，绝不改用其他提供方。
 
 <a id="persist-preset-summary-policy"></a>
 ### 持久保存 preset 摘要策略
