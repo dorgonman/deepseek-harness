@@ -2262,6 +2262,14 @@ export interface PiAiModelProfile {
   requestProtocol?: 'kinf-decision-v1'
   /** Native tool support for this model; omission preserves normal admission, while false disables declarations and execution. */
   nativeTools?: boolean
+  /**
+   * Declares that this model's endpoint serves KINF's resident-only connected
+   * contract on the dedicated resident path; a call carrying a resident
+   * dispatch binding is then sent there and validated against the binding.
+   * Omission keeps the transport's refusal: a resident binding is rejected
+   * before any HTTP request.
+   */
+  residentTransport?: boolean
   /** HTTP(S) endpoint for this model, overriding the provider route's endpoint. */
   baseURL?: string
   /** Request headers overriding provider headers by case-insensitive name; Harness attribution still wins. */

@@ -328,6 +328,7 @@ const modelFields = {
   requestModel: z.string(),
   requestProtocol: z.const('kinf-decision-v1'),
   nativeTools: z.boolean(),
+  residentTransport: z.boolean(),
   // A bare dict materializes {}, which would change existing stored model rows.
   headers: z.union([z.dict(z.string())]),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS),
@@ -545,6 +546,7 @@ export function resolveProfiles(
       requestModels: catalog?.requestModels ?? new Map(),
       requestProtocols: catalog?.requestProtocols ?? new Map(),
       nativeTools: catalog?.nativeTools ?? new Map(),
+      residentTransports: catalog?.residentTransports ?? new Map(),
       modelHeaders: catalog?.modelHeaders ?? new Map(),
       modelStreamIdleTimeouts: catalog?.modelStreamIdleTimeouts ?? new Map(),
       crossOriginModels: catalog?.crossOriginModels ?? new Set(),
