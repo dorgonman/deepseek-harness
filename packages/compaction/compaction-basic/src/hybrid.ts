@@ -56,10 +56,20 @@ interface RawExpansion {
   readonly carried?: { readonly compactionId: CompactionId; readonly content: readonly ContentBlock[] }
 }
 
+/** State of the descending log scan. Groups and their messages are collected newest first. */
+interface RawExpansionState {
+  readonly pending: Set<SessionSeq>
+  readonly groups: OriginalMessage[][]
+  group: OriginalMessage[] | undefined
+  rawRange?: { start: SessionSeq; end: SessionSeq }
+  carried?: RawExpansion['carried']
+}
+
 /**
  * Expand the selected Surface through the canonical fold's replacement forest.
- * The fold removes each shadowed node from the current Surface and introduces
- * every leaf with an append. Expansion still checks each resolved event index.
+ * The fold validates the same immutable log cut and its contiguous sequences.
+ * Every replacement points to earlier events, so a descending scan visits
+ * each selected replacement before its shadowed originals.
  */
 function rawGroups(
   events: readonly SessionEvent[],
@@ -74,60 +84,51 @@ function rawGroups(
     throw new Error('compaction: cannot replace the protected system head')
   }
   const edges = new Map(folded.replacements.map(edge => [edge.seq, edge.shadowedSeqs]))
-  const leaves = new Set<SessionSeq>()
-  const pending = [...selection.shadowedSeqs]
-  let carried: RawExpansion['carried']
-  for (;;) {
-    const seq = pending.pop()
-    if (seq === undefined) break
-    const event = events[seq]
-    if (event?.seq !== seq) throw new Error('compaction: invalid source coverage')
+  const initial: RawExpansionState = { pending: new Set(selection.shadowedSeqs), groups: [], group: undefined }
+  const { groups, rawRange, carried } = events.reduceRight((state, event) => {
+    if (event.type === 'turn/start' || event.type === 'turn/end') state.group = undefined
+    const seq = event.seq
+    if (!state.pending.delete(seq)) return state
     const shadowed = edges.get(seq)
     if (event.type === 'user/message' && isCompactCheckpointSource(event.data.source)) {
       if (shadowed === undefined) throw new Error('compaction: unsupported Surface replacement event')
       // Incremental mode carries the previous checkpoint locally: its originals
       // are already covered and must not be quoted to a later summarizer.
       if (coverage === undefined) {
-        for (const original of shadowed) pending.push(original)
-        continue
+        for (const original of shadowed) state.pending.add(original)
+        return state
       }
-      if (carried !== undefined) throw new Error('compaction: selected span has more than one checkpoint')
-      carried = { compactionId: event.data.source.compactionId, content: event.data.content }
-      continue
+      if (state.carried !== undefined) throw new Error('compaction: selected span has more than one checkpoint')
+      state.carried = { compactionId: event.data.source.compactionId, content: event.data.content }
+      return state
     }
     if (shadowed !== undefined) {
       if (event.type !== 'tool/result') throw new Error('compaction: unsupported Surface replacement event')
-      for (const original of shadowed) pending.push(original)
-      continue
+      for (const original of shadowed) state.pending.add(original)
+      return state
     }
-    if (coverage !== undefined && event.seq <= coverage.highWatermark) {
+    if (coverage !== undefined && seq <= coverage.highWatermark) {
       // A watermark orders revisions. Only a committed range proves that
       // skipping a still-selected original will not lose it from the view.
-      if (!coverage.covered.some(({ start, end }) => event.seq >= start && event.seq <= end)) {
-        throw new Error(`compaction: selected RAW event ${event.seq} is outside committed coverage at watermark ${coverage.highWatermark}`)
+      if (!coverage.covered.some(({ start, end }) => seq >= start && seq <= end)) {
+        throw new Error(`compaction: selected RAW event ${seq} is outside committed coverage at watermark ${coverage.highWatermark}`)
       }
-      continue
+      return state
     }
-    leaves.add(seq)
-  }
-  const groups: OriginalMessage[][] = []
-  let group: OriginalMessage[] = []
-  let rawRange: { start: SessionSeq; end: SessionSeq } | undefined
-  for (const event of events) {
-    if ((event.type === 'turn/start' || event.type === 'turn/end') && group.length > 0) {
-      groups.push(group)
-      group = []
-    }
-    if (!leaves.has(event.seq)) continue
     const message = deriveEventMessage(event)
     if (message === null) throw new Error('compaction: an original event has no recoverable message')
-    group.push({ event, message })
-    if (rawRange === undefined) rawRange = { start: event.seq, end: event.seq }
-    else rawRange.end = event.seq
-  }
-  if (group.length > 0) groups.push(group)
+    if (state.group === undefined) {
+      state.group = []
+      state.groups.push(state.group)
+    }
+    state.group.push({ event, message })
+    if (state.rawRange === undefined) state.rawRange = { start: seq, end: seq }
+    else state.rawRange.start = seq
+    return state
+  }, initial)
   if (rawRange === undefined) throw new Error('compaction: no unprocessed RAW events remain for compaction')
-  return { groups, rawRange, ...carried === undefined ? {} : { carried } }
+  for (const group of groups) group.reverse()
+  return { groups: groups.reverse(), rawRange, ...carried === undefined ? {} : { carried } }
 }
 
 /** Require full assistant-call/result coverage before dispatching a chunk. */
