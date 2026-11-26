@@ -33,7 +33,7 @@ const TRAJECTORY_EXPECTED = join(SNAPSHOT_DIR, 'trajectory.expected.md')
 const RETAINED_TRAJECTORY_EXPECTED = fileURLToPath(new URL('./expected/retained-steering/trajectory.expected.md', import.meta.url))
 const MODE = webSnapshotMode()
 // The question composer replaces the textarea, so fill → Queue row → Steer
-// starts only after request/context and must finish before the first replay
+// starts after request/admission and must finish before the first replay
 // chunk. The compact canonical call plus 500 ms pacing gives loaded CI enough
 // time without stretching a long provider-authored chunk sequence.
 const REPLAY_PACE_MS = 500
@@ -125,7 +125,7 @@ describe('web e2e: mid-turn steering lands durably and visibly', () => {
     await input.fill(PROMPT)
     await input.press('Enter')
     await expect.poll(
-      () => sessionEvents.some(event => event.type === 'request/context'),
+      () => sessionEvents.some(event => event.type === 'request/admission' && event.data.turn === 1 && event.data.step === 1),
       { timeout: 10_000 },
     ).toBe(true)
 
