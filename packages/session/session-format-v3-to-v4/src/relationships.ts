@@ -247,13 +247,17 @@ class Relationships {
   }
 
   chunkReceipts(event: SessionFormatEvent, data: SessionFormatJsonObject): void {
-    if (data['chunkCalls'] === undefined) return
+    if (data['chunkCalls'] === undefined) {
+      if (data['residentSelection'] !== undefined) throw new SessionFormatError('compaction resident selection requires chunk calls')
+      return
+    }
     if (data['llmStreamCall'] !== undefined || data['rawOutput'] !== undefined || data['requestProjection'] !== undefined) {
       throw new SessionFormatError('compaction chunk receipts conflict with a single-call record')
     }
     const maxTokens = sessionFormatCount(data['maxTokens'], 'compaction chunk output cap')
     const calls = array(data['chunkCalls'], 'compaction chunk calls')
     if (calls.length === 0 || maxTokens === 0) throw new SessionFormatError('compaction chunk calls and output cap must be nonempty')
+    if (data['residentSelection'] !== undefined) this.residentSelection(data, calls.length)
     let previousSeq = -1
     for (const item of calls) {
       const call = record(item, 'compaction chunk call')
@@ -304,6 +308,29 @@ class Relationships {
           throw new SessionFormatError('compaction chunk omits tool bodies without a tool result')
         }
       }
+    }
+  }
+
+  residentSelection(data: SessionFormatJsonObject, chunkCount: number): void {
+    const receipt = record(data['residentSelection'], 'compaction resident selection')
+    for (const field of [
+      'gatewayId', 'routeId', 'nodeId', 'instance', 'servingVariantId', 'servingVariantRevision',
+      'modelArtifact', 'artifactRevision', 'targetConfigRevision', 'hostGeneration', 'residentGeneration',
+    ]) text(receipt[field], `compaction resident selection ${field}`)
+    const alias = text(receipt['alias'], 'compaction resident selection alias')
+    const nodeName = text(receipt['nodeName'], 'compaction resident selection node name')
+    const [model, suffix, ...extra] = alias.split('@')
+    if (alias !== data['model'] || model === '' || suffix !== nodeName || extra.length > 0
+      || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(nodeName) || nodeName.toLowerCase() === 'auto') {
+      throw new SessionFormatError('compaction resident selection alias must match the summary model and registered node')
+    }
+    const reason = text(receipt['reason'], 'compaction resident selection reason')
+    if (!['only-eligible', 'configured-preference', 'comparable-size', 'queue-pressure', 'stable-identity'].includes(reason)) {
+      throw new SessionFormatError('compaction resident selection reason is unknown')
+    }
+    const digests = array(receipt['projectionIds'], 'compaction resident selection projection ids')
+    if (digests.length !== chunkCount || digests.some(digest => typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest))) {
+      throw new SessionFormatError('compaction resident selection requires one SHA-256 projection digest per chunk')
     }
   }
 

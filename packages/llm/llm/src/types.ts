@@ -604,6 +604,8 @@ export interface ResidentCallBinding {
   readonly residentGeneration: string
   /** Opaque identity of the projected summary envelope this binding priced. */
   readonly projectionId: string
+  /** Exact origin of the observation when using a directly bound listener. */
+  readonly observedOrigin?: string
 }
 /**
  * A single model request, fully assembled.

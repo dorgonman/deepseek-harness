@@ -137,6 +137,60 @@ describe('mandatory V4 compaction restoration', () => {
     }
   })
 
+  it('retains the accepted deployment and exact chunk projections across a V4 reopen', () => {
+    const residentSelection = {
+      alias: 'qwen27@local',
+      gatewayId: 'local-kinf',
+      routeId: 'local-27b',
+      nodeId: 'node-a',
+      nodeName: 'local',
+      instance: 'managed',
+      servingVariantId: 'qwen27-mtp',
+      servingVariantRevision: 'chat-v1',
+      modelArtifact: 'qwen27-weights',
+      artifactRevision: 'weights-v1',
+      targetConfigRevision: 'config-1',
+      hostGeneration: 'host-1',
+      residentGeneration: 'resident-1',
+      reason: 'configured-preference',
+      projectionIds: ['a'.repeat(64)],
+    }
+    const chunkCalls = [{
+      groups: [{ eventSeqs: [1], toolBodiesOmitted: false }],
+      estimatedInputTokens: 100,
+      contextWindow: 256,
+      rawOutput: [{ type: 'text', text: 'summary' }],
+    }]
+    const summary = { model: residentSelection.alias, maxTokens: 32, chunkCalls, residentSelection }
+    const restored = reopen(change(compact(), 3, summary))
+    expect(restored.artifact.events[3]?.data).toMatchObject(summary)
+    expect(restored.messages).toEqual(reopen(change(compact(), 3, { ...summary, residentSelection: undefined })).messages)
+    expect(() => reopen(change(compact(), 3, { ...summary, chunkCalls: undefined }))).toThrow(/compaction resident selection/)
+    expect(() => reopen(change(compact(), 3, { ...summary, model: 'another@local' }))).toThrow(/compaction resident selection/)
+    expect(() => reopen(change(compact(), 3, { ...summary, residentSelection: null }))).toThrow(/compaction resident selection/)
+    for (const [alias, nodeName] of [
+      ['@local', 'local'], ['qwen27@local@unexpected', 'local'],
+      ['qwen27@bad.name', 'bad.name'], ['qwen27@auto', 'auto'],
+    ]) {
+      expect(() => reopen(change(compact(), 3, {
+        ...summary, model: alias, residentSelection: { ...residentSelection, alias, nodeName },
+      }))).toThrow(/compaction resident selection alias/)
+    }
+    for (const fields of [
+      { nodeName: 'another' },
+      { residentGeneration: undefined },
+      { reason: 'unverified' },
+      { projectionIds: [] },
+      { projectionIds: [1] },
+      { projectionIds: ['not-a-digest'] },
+      { projectionIds: ['a'.repeat(64), 'b'.repeat(64)] },
+    ]) {
+      expect(() => reopen(change(compact(), 3, {
+        ...summary, residentSelection: { ...residentSelection, ...fields },
+      }))).toThrow(/compaction resident selection/)
+    }
+  })
+
   it.each([
     ['checkpoint identity', change(compact(), 4, { source: { kind: 'compact-checkpoint', compactionId: 'WRONG', sourceCommandId: 'cmd' } })],
     ['checkpoint command', change(compact(), 4, { source: { kind: 'compact-checkpoint', compactionId: 'c', sourceCommandId: 'WRONG' } })],

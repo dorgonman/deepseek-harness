@@ -20,6 +20,7 @@ import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, type GenerateOptions, type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { deriveReplayScript } from '@deepseek-ai/dsh-llm-replay'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -27,14 +28,16 @@ import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
-import { expect, it, vi } from 'vitest'
+import { expect, it, onTestFinished, vi } from 'vitest'
 import { advanceCoverage, deriveCommittedCoverage, digestCanonical } from '../packages/compaction/compaction-basic/src/incremental.ts'
 import { validateLedger } from '../packages/compaction/compaction-basic/src/fact-ledger.ts'
+import { createKinfResidentObservationSource } from '../packages/compaction/compaction-basic/src/kinf-resident-observation.ts'
 import type { ResidentObservationRequest, ResidentObservationSource } from '../packages/compaction/compaction-basic/src/resident-observation.ts'
 import {
   RESIDENT_ONLY_V1, type Candidate, type ResidentPrecondition,
 } from '../packages/compaction/compaction-basic/src/resident-selector.ts'
 import { MockAdapter, textResponse, toolCallResponse } from '../packages/core/agent-loop/tests/mock-adapter.ts'
+import { closeMockServers, mockServer } from '../packages/llm/llm-pi-ai/tests/mock-server.ts'
 
 class WindowAdapter extends MockAdapter {
   readonly windows = new Map([
@@ -1041,7 +1044,7 @@ function residentRow(logicalModel: string): Candidate {
     queue: { pending: 0, active: 0, maxPending: 8 },
     measurement: {
       projectionId: '', hostGeneration: 'host-1', residentGeneration: 'resident-1',
-      targetConfigRevision: 'config-1', renderedPromptTokens: 100,
+      targetConfigRevision: 'config-1', promptTokens: 100,
     },
   }
 }
@@ -1153,6 +1156,399 @@ it('measures the fact-extraction envelope when the resident target and fact ledg
     residentPinnedNodeId: 'fixture-local', residentProvider: 'fixture-provider', residentMaxAgeMs: 500,
   })
 }, 60_000)
+
+const observationPath = '/v1/observations'
+const residentPath = '/kinf/resident/v1/chat/completions'
+const residentFact = 'The deployment approval code is cobalt-73.'
+const residentSummary = 'The original deployment approval code was cobalt-73.'
+const residentHistory = `${residentFact}\n${'Prior context. '.repeat(150)}`
+const residentProvider = 'fixture-kinf'
+
+const local27b = {
+  id: '27b-node',
+  name: 'qwen',
+  logicalModel: 'chat-qwen-27b-uncensored-exl3-6bpw',
+  variant: 'qwen27-uncensored-native-mtp',
+}
+const localFlash = {
+  id: 'flash-node',
+  name: 'flash',
+  logicalModel: 'chat-qwen-flash-next',
+  variant: 'flash-native-mtp',
+}
+
+type NativeResidentReply = 'observe' | 'unloaded' | 'summary' | 'stale' | 'ambiguous'
+
+function residentIdentity(node: typeof local27b, generation: number): ResidentPrecondition {
+  return {
+    schema: RESIDENT_ONLY_V1,
+    instance: 'default',
+    host_generation: `host-${node.name}`,
+    resident_generation: `resident-${node.name}-${generation}`,
+    serving_variant_id: node.variant,
+    serving_variant_revision: 'chat-v1',
+    model_artifact: `artifact-${node.name}`,
+    artifact_revision: 'artifact-v1',
+    target_config_revision: `config-${node.name}`,
+  }
+}
+
+function observationResponse(node: typeof local27b, identity: ResidentPrecondition, loaded: boolean) {
+  return {
+    schema: 'kinf.host-observation.v1',
+    observed_at_unix_ms: Date.now(),
+    complete: true,
+    host: {
+      ...identity,
+      node_id: node.id,
+      boot_generation: `boot-${node.name}`,
+      route: null,
+      mode: 'mservice',
+      logical_model: node.logicalModel,
+      state: loaded ? 'ready' : 'unloaded',
+      enabled: true,
+      admission_open: loaded,
+      engine_usable: loaded,
+      engine_generation: identity.resident_generation,
+      resident_only_contract: RESIDENT_ONLY_V1,
+      resident_only_admission_open: loaded,
+      active_requests: 0,
+      pending_requests: 0,
+    },
+    models: [{
+      ...identity,
+      logical_model: node.logicalModel,
+      loaded,
+      ready: loaded,
+      configuration_validated: true,
+      capability_source: 'runtime',
+      capabilities: ['text'],
+      operations: ['chat'],
+      resident_only_budget: { context_tokens: 16_380, max_output_tokens: 2_048, max_input_tokens_at_max_output: 14_332 },
+    }],
+    queue: { active_requests: 0, pending_requests: 0, configured: { max_pending_requests: 4 } },
+  }
+}
+
+async function mockResidentNode(node: typeof local27b, replies: readonly NativeResidentReply[]) {
+  let generation = 0
+  const server = await mockServer(replies.map((reply) => {
+    if (reply === 'observe' || reply === 'unloaded') {
+      generation++
+      return { body: JSON.stringify(observationResponse(node, residentIdentity(node, generation), reply === 'observe')) }
+    }
+    if (reply === 'stale' || reply === 'ambiguous') {
+      return {
+        status: 409,
+        body: JSON.stringify({
+          request_contract: RESIDENT_ONLY_V1, accepted: reply === 'ambiguous', started: false,
+          error: { code: 'resident_identity_mismatch' },
+        }),
+      }
+    }
+    const served = residentIdentity(node, generation)
+    const replyIdentity = {
+      request_contract: RESIDENT_ONLY_V1,
+      accepted: true,
+      started: true,
+      served_identity: {
+        instance: served.instance,
+        host_generation: served.host_generation,
+        resident_generation: served.resident_generation,
+        serving_variant_id: served.serving_variant_id,
+        serving_variant_revision: served.serving_variant_revision,
+        model_artifact: served.model_artifact,
+        artifact_revision: served.artifact_revision,
+        target_config_revision: served.target_config_revision,
+      },
+    }
+    return { events: [
+      JSON.stringify({ ...replyIdentity, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] }),
+      JSON.stringify({ choices: [{ index: 0, delta: { content: residentSummary }, finish_reason: null }] }),
+      JSON.stringify({ ...replyIdentity, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+      '[DONE]',
+    ] }
+  }))
+  const baseUrl = `${server.url}/v1`
+  const alias = `${node.logicalModel}@${node.name}`
+  return {
+    server,
+    alias,
+    model: {
+      id: alias, requestModel: node.logicalModel, baseURL: baseUrl, residentTransport: true,
+      contextWindow: 16_380, maxTokens: 2_048, input: ['text'],
+      headers: { 'X-KINF-Allow-Cold-Load': 'true', 'X-KINF-Allow-Eviction': 'true' },
+    } satisfies LlmPiAi.PiAiModelProfile,
+    route: {
+      id: `${node.name}-summary`, nodeId: node.id, nodeName: node.name, instance: 'default',
+      logicalModel: node.logicalModel, baseUrl,
+    },
+  }
+}
+
+async function withResidentComposition(
+  replies27b: readonly NativeResidentReply[],
+  repliesFlash: readonly NativeResidentReply[],
+  run: (
+    ctx: Context, root: string, qwen: Awaited<ReturnType<typeof mockResidentNode>>,
+    flash: Awaited<ReturnType<typeof mockResidentNode>>,
+  ) => Promise<void>,
+) {
+  onTestFinished(closeMockServers)
+  const flash = await mockResidentNode(localFlash, repliesFlash)
+  const qwen = await mockResidentNode(local27b, replies27b)
+  await withContext(async (ctx, root) => {
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        [residentProvider]: { api: 'openai-completions', baseURL: qwen.route.baseUrl, models: [flash.model, qwen.model] },
+      },
+    })
+    await run(ctx, root, qwen, flash)
+  }, {
+    auto: true,
+    thresholdRatio: 0.5,
+    maxTokens: 1_024,
+    summarizationProvider: undefined,
+    summarizationModel: undefined,
+    summarizationMode: 'resident-preferred',
+    residentGatewayId: 'fixture-local-kinf',
+    residentProvider,
+    residentMaxAgeMs: 60_000,
+    residentAllowedNodeIds: [flash.route.nodeId, qwen.route.nodeId],
+    residentPreferredVariantIds: [local27b.variant, localFlash.variant],
+    residentObservationRoutes: [flash.route, qwen.route],
+  })
+}
+
+function expectResidentRequests(
+  host: Awaited<ReturnType<typeof mockResidentNode>>,
+  node: typeof local27b,
+  generations: readonly number[],
+) {
+  const indices = host.server.paths.flatMap((path, index) => path === residentPath ? [index] : [])
+  expect(indices).toHaveLength(generations.length)
+  for (const [i, index] of indices.entries()) {
+    const body = host.server.requests[index]
+    expect(body).toMatchObject({
+      model: node.logicalModel, stream: true, max_tokens: 1_024,
+      kinf_resident_only: residentIdentity(node, generations[i]!),
+    })
+    expect(body).not.toHaveProperty('tools')
+    expect(host.server.headers[index]).not.toHaveProperty('x-kinf-allow-cold-load')
+    expect(host.server.headers[index]).not.toHaveProperty('x-kinf-allow-eviction')
+  }
+}
+
+it.each(['automatic', 'manual', 'overflow', 'model switch'] as const)('dispatches %s compaction to the preferred eligible 27B', async (entry) => {
+  const flashObservation = entry === 'manual' ? 'unloaded' : 'observe'
+  await withResidentComposition(['observe', 'summary'], [flashObservation], async (ctx, root, qwen, flash) => {
+    const chat = new WindowAdapter([
+      textResponse('Seeded context.'),
+      entry === 'overflow' ? [{ type: 'finish', reason: {
+        kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE, message: 'synthetic context overflow' },
+      } }] : textResponse('Continued.'),
+      textResponse('Recovered.'),
+    ])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const sessionId = SessionId('hybrid-kinf-entry')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, model: entry === 'automatic' ? 'small' : 'wide' }, meta: { cwd: root },
+    })
+    const history = entry === 'manual' || entry === 'overflow' ? residentHistory
+      : `${residentFact}\n${'Original pressure input. '.repeat(850)}`
+    await send(owned.agent, history)
+    const before = (await ctx.sessionQuery.readSession(sessionId)).events
+    if (entry === 'manual') {
+      const result = await ctx.commands.execute(owned.agent, '/compact', [], signal)
+      expect(result?.result.kind).toBe('success')
+    } else {
+      if (entry === 'model switch') owned.agent.model.select({ provider: wide.provider, model: 'small' })
+      await send(owned.agent, 'Continue after preserving the original approval code.')
+      expect(requestText(chat.requests.at(-1)!)).toContain(residentSummary)
+    }
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    expect(events.slice(0, before.length)).toEqual(before)
+    expect(checkpoints(events)).toHaveLength(1)
+    expect(events.findLast(event => event.type === 'compaction/summary')).toMatchObject({
+      data: {
+        provider: residentProvider,
+        model: qwen.alias,
+        residentSelection: {
+          alias: qwen.alias,
+          gatewayId: 'fixture-local-kinf',
+          routeId: qwen.route.id,
+          nodeId: local27b.id,
+          nodeName: local27b.name,
+          instance: 'default',
+          servingVariantId: local27b.variant,
+          servingVariantRevision: 'chat-v1',
+          modelArtifact: 'artifact-qwen',
+          artifactRevision: 'artifact-v1',
+          targetConfigRevision: 'config-qwen',
+          hostGeneration: 'host-qwen',
+          residentGeneration: 'resident-qwen-1',
+          reason: entry === 'manual' ? 'only-eligible' : 'configured-preference',
+          projectionIds: [expect.stringMatching(/^[a-f0-9]{64}$/u)],
+        },
+      },
+    })
+    expect(JSON.stringify(qwen.server.requests[1])).toContain(residentFact)
+    expect(qwen.server.paths).toEqual([observationPath, residentPath])
+    expect(flash.server.paths).toEqual([observationPath])
+    expectResidentRequests(qwen, local27b, [1])
+    expect(owned.agent.session.requestHeader()?.config).toMatchObject({
+      provider: wide.provider, model: entry === 'automatic' || entry === 'model switch' ? 'small' : 'wide',
+    })
+    await owned.dispose()
+    expect((await ctx.sessionQuery.readSession(sessionId)).events).toEqual(events)
+  })
+})
+
+it('refreshes once after a definite stale refusal and selects another already-loaded resident', async () => {
+  await withResidentComposition(['observe', 'stale', 'unloaded'], ['observe', 'observe', 'summary'], async (ctx, root, qwen, flash) => {
+    const chat = new WindowAdapter([textResponse('Seeded context.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const sessionId = SessionId('hybrid-kinf-reselect')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    await send(owned.agent, residentHistory)
+    expect(await ctx.compaction.compactNow(owned.agent, signal)).not.toBeNull()
+    expect(qwen.server.paths).toEqual([observationPath, residentPath, observationPath])
+    expect(flash.server.paths).toEqual([observationPath, observationPath, residentPath])
+    expectResidentRequests(qwen, local27b, [1])
+    expectResidentRequests(flash, localFlash, [2])
+    expect(chat.requests).toHaveLength(1)
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    expect(checkpoints(events)).toHaveLength(1)
+    expect(events.findLast(event => event.type === 'compaction/summary')).toMatchObject({
+      data: {
+        provider: residentProvider, model: flash.alias,
+        residentSelection: { alias: flash.alias, nodeId: localFlash.id, residentGeneration: 'resident-flash-2' },
+      },
+    })
+    await owned.dispose()
+  })
+})
+
+it.each([
+  { name: 'no eligible resident', qwenReplies: ['unloaded'], flashReplies: ['unloaded'], generations: [], code: 'no-eligible' },
+  { name: 'a second stale refusal', qwenReplies: ['observe', 'stale', 'observe', 'stale'], flashReplies: ['unloaded', 'unloaded'], generations: [1, 2], code: 'RESIDENT_PRECONDITION_STALE' },
+  { name: 'ambiguous acceptance', qwenReplies: ['observe', 'ambiguous'], flashReplies: ['observe'], generations: [1], code: 'RESIDENT_ACCEPTANCE_AMBIGUOUS' },
+] as const)('preserves history without another dispatch after $name', async ({ qwenReplies, flashReplies, generations, code }) => {
+  await withResidentComposition(qwenReplies, flashReplies, async (ctx, root, qwen, flash) => {
+    const chat = new WindowAdapter([textResponse('Seeded context.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const sessionId = SessionId('hybrid-kinf-refusal')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    await send(owned.agent, residentHistory)
+    const before = (await ctx.sessionQuery.readSession(sessionId)).events
+    const surface = [...owned.agent.session.surface.nodes]
+    const header = owned.agent.session.requestHeader()
+    await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toMatchObject({ code: 'summary', cause: { code } })
+    expect(qwen.server.paths).toHaveLength(qwenReplies.length)
+    expect(flash.server.paths).toEqual(flashReplies.map(() => observationPath))
+    expectResidentRequests(qwen, local27b, generations)
+    expect(chat.requests).toHaveLength(1)
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    expect(events.slice(0, before.length)).toEqual(before)
+    expect(checkpoints(events)).toHaveLength(0)
+    expect(owned.agent.session.surface.nodes).toEqual(surface)
+    expect(owned.agent.session.requestHeader()).toEqual(header)
+    await owned.dispose()
+  })
+})
+
+it.skipIf(process.env['DSH_KINF_RESIDENT_LIVE'] !== 'already-loaded-27b')(
+  'compacts synthetic history through the already-loaded local 27B',
+  async () => {
+    const baseUrl = 'http://127.0.0.1:49362/v1'
+    const gatewayId = 'local-kinf'
+    const route = {
+      id: 'local-27b', nodeId: 'kano-local', nodeName: 'local', instance: 'default',
+      logicalModel: local27b.logicalModel, baseUrl,
+    }
+    const alias = `${route.logicalModel}@${route.nodeName}`
+    const liveSignal = AbortSignal.timeout(45_000)
+    const liveFetch = globalThis.fetch
+    const requests: string[] = []
+    const fetchGuard = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input)
+      const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+      const request = `${method} ${url.pathname}`
+      if (url.origin !== 'http://127.0.0.1:49362' || url.search !== ''
+        || ![`GET ${observationPath}`, `POST ${residentPath}`].includes(request)) {
+        throw new Error('Live compaction attempted an undeclared HTTP route')
+      }
+      requests.push(request)
+      return liveFetch(input, { ...init, redirect: 'error' })
+    })
+    onTestFinished(() => { fetchGuard.mockRestore() })
+
+    await withContext(async (ctx, root) => {
+      const observation = createKinfResidentObservationSource(gatewayId, [route], {
+        measure: messages => messages.reduce((total, message) => total + ctx.tokenMeter.estimateMessage(message), 0),
+      })
+      const observe = () => observation.observe({
+        gatewayId, nodeIds: [route.nodeId], signal: liveSignal,
+        projection: {
+          id: 'live-resident-preflight',
+          messages: [{ role: 'user', content: [{ type: 'text', text: residentHistory }] }],
+          outputTokens: 1_024,
+        },
+      })
+      const [before] = await observe()
+      if (before === undefined || before.host.identity.serving_variant_id !== local27b.variant) {
+        throw new Error('Live compaction requires the 27B deployment to be resident and eligible before the test')
+      }
+
+      await ctx.plugin(LlmPiAi, {
+        providers: {
+          [residentProvider]: {
+            api: 'openai-completions', baseURL: baseUrl,
+            models: [{
+              id: alias, requestModel: route.logicalModel, contextWindow: 16_380,
+              maxTokens: 2_048, input: ['text'], residentTransport: true,
+            }],
+          },
+        },
+      })
+      const chat = new WindowAdapter([textResponse('Seeded synthetic context.')])
+      ctx.llm.registerAdapter([wide.provider], chat)
+      const sessionId = SessionId('hybrid-kinf-live')
+      const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+      await send(owned.agent, residentHistory)
+      expect(await ctx.compaction.compactNow(owned.agent, liveSignal)).not.toBeNull()
+      expect(chat.requests).toHaveLength(1)
+      await owned.dispose()
+
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      const summary = events.findLast(event => event.type === 'compaction/summary')
+      const identity = before.host.identity
+      expect(summary?.data).toMatchObject({
+        provider: residentProvider, model: alias,
+        residentSelection: {
+          alias, gatewayId, routeId: route.id, nodeId: route.nodeId, nodeName: route.nodeName,
+          instance: identity.instance, servingVariantId: identity.serving_variant_id,
+          servingVariantRevision: identity.serving_variant_revision, modelArtifact: identity.model_artifact,
+          artifactRevision: identity.artifact_revision, targetConfigRevision: identity.target_config_revision,
+          hostGeneration: identity.host_generation, residentGeneration: identity.resident_generation,
+          reason: 'only-eligible', projectionIds: [expect.stringMatching(/^[a-f0-9]{64}$/u)],
+        },
+      })
+      expect(JSON.stringify(summary?.data.summary)).toContain('cobalt-73')
+      expect(checkpoints(events)).toHaveLength(1)
+      const [after] = await observe()
+      expect(after?.host.identity).toEqual(identity)
+      expect(requests).toEqual([
+        `GET ${observationPath}`, `GET ${observationPath}`, `POST ${residentPath}`, `GET ${observationPath}`,
+      ])
+    }, {
+      summarizationProvider: undefined, summarizationModel: undefined, summarizationMode: 'resident-preferred',
+      residentGatewayId: gatewayId, residentProvider, residentPinnedNodeId: route.nodeId,
+      residentPreferredVariantIds: [local27b.variant], residentObservationRoutes: [route],
+    })
+  },
+  60_000,
+)
 
 it('refuses a first request whose envelope exceeds the window before any provider call', async () => {
   await withContext(async (ctx, root) => {

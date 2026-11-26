@@ -34,7 +34,9 @@ const RESIDENT_PATH = '/kinf/resident/v1/chat/completions'
 const RESIDENT_SCHEMA = 'kinf.resident-only.v1'
 
 /** Request-lifetime, cold-load, and eviction headers the host rejects on this path. */
-const FORBIDDEN_HEADERS = ['x-kinf-request-lifetime', 'allow-cold-load', 'allow-eviction'] as const
+const FORBIDDEN_HEADERS = [
+  'x-kinf-request-lifetime', 'x-kinf-allow-cold-load', 'x-kinf-allow-eviction', 'allow-cold-load', 'allow-eviction',
+] as const
 
 /** Token grammar every `kinf_resident_only` value must match. */
 const TOKEN = /^[A-Za-z0-9_.:+/-]{1,128}$/
@@ -210,7 +212,9 @@ async function failure(response: Response): Promise<LlmError> {
   const accepted = body?.['accepted']
   const hostCode = record(body?.['error'])?.['code']
   const detail = typeof hostCode === 'string' && TOKEN.test(hostCode) ? `; host error "${hostCode}"` : ''
-  if (accepted === false) {
+  if (accepted === false && body?.['started'] === false && body['request_contract'] === RESIDENT_SCHEMA
+    && response.status === 409
+    && (hostCode === 'resident_identity_mismatch' || hostCode === 'resident_target_changed' || hostCode === 'resident_not_loaded')) {
     return new LlmError(
       `KINF resident request was refused before admission (HTTP ${response.status}${detail})`,
       'RESIDENT_PRECONDITION_STALE',
@@ -264,7 +268,7 @@ function firstChoice(frame: Record<string, unknown>): Record<string, unknown> | 
  * @throws LlmError when the frame violates the resident-only contract.
  */
 function validateFrame(frame: Record<string, unknown>, binding: ResidentCallBinding): void {
-  if (frame['request_contract'] !== RESIDENT_SCHEMA || frame['accepted'] !== true || frame['started'] === false) {
+  if (frame['request_contract'] !== RESIDENT_SCHEMA || frame['accepted'] !== true || frame['started'] !== true) {
     throw malformed()
   }
   const served = object(frame['served_identity'])
@@ -272,7 +276,9 @@ function validateFrame(frame: Record<string, unknown>, binding: ResidentCallBind
     || served['host_generation'] !== binding.hostGeneration
     || served['resident_generation'] !== binding.residentGeneration
     || served['target_config_revision'] !== binding.targetConfigRevision
+    || served['model_artifact'] !== binding.modelArtifact
     || served['artifact_revision'] !== binding.artifactRevision
+    || served['serving_variant_id'] !== binding.servingVariantId
     || served['serving_variant_revision'] !== binding.servingVariantRevision) {
     throw malformed()
   }

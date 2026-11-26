@@ -783,7 +783,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-compaction-basic`
 
 - `inject`: `llm` · `tokenMeter` · `sessions`
-- `source`: [`packages/compaction/compaction-basic/src/types.ts:57`](../packages/compaction/compaction-basic/src/types.ts)
+- `source`: [`packages/compaction/compaction-basic/src/types.ts:58`](../packages/compaction/compaction-basic/src/types.ts)
 
 ```ts config-catalog
 /** Basic compaction configuration with an optional exact-target policy table. */
@@ -826,6 +826,8 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   residentProvider?: string
   /** Maximum accepted observation age in milliseconds; at most 60000. Defaults to 60000. */
   residentMaxAgeMs?: number
+  /** Explicit KINF routes observed by the Hybrid backend in resident-preferred mode. */
+  residentObservationRoutes?: KinfResidentObservationRoute[]
 }
 
 /** Policy fields shared by the default policy and exact model overrides. */
@@ -867,6 +869,22 @@ export interface ModelCompactPolicyConfig extends CompactionPolicyConfig {
   provider: string
   /** Exact routed model id to match within `provider`. */
   model: string
+}
+
+/** Explicit local managed listener and its DSH model route. */
+export interface KinfResidentObservationRoute {
+  /** Unique route identifier recorded in the resident selection receipt. */
+  readonly id: string
+  /** Configured node identity used by the preset's pinned node or allowlist. */
+  readonly nodeId: string
+  /** Node name appended to the logical model to form the DSH alias. */
+  readonly nodeName: string
+  /** Exact KINF managed instance served by this loopback endpoint. */
+  readonly instance: string
+  /** KINF logical model sent as the native service binding and chat model. */
+  readonly logicalModel: string
+  /** Loopback provider URL shared by passive observation and resident dispatch. */
+  readonly baseUrl: string
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-compaction-basic -->

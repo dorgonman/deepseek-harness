@@ -515,6 +515,10 @@ export class PiAiAdapter extends LlmAdapter {
     const profile = this.profileOf(snapshot, options.provider)
     const model = this.modelOf(snapshot, options.provider, options.model)
     const isResident = options.residentBinding !== undefined
+    const observedOrigin = options.residentBinding?.observedOrigin
+    if (observedOrigin !== undefined && new URL(model.baseUrl).origin !== observedOrigin) {
+      throw new LlmError('KINF model endpoint differs from the resident observation', 'INVALID_CONFIG')
+    }
     const updates = conversationUpdates(model)
     // pi-ai collapses Anthropic tool updates without an initially active declaration.
     const tools = options.tools ?? []
@@ -552,11 +556,13 @@ export class PiAiAdapter extends LlmAdapter {
         if (options.temperature !== undefined && options.temperature !== 0) {
           throw new LlmError('KINF resident requests only accept temperature 0', 'UNSUPPORTED_OPTION')
         }
+        const headers = new Headers(requestHeaders(
+          profile.headers, profile.modelHeaders.get(options.model), options, model.baseUrl, this.config.prepareHeaders,
+        ))
+        if (apiKey !== undefined && !headers.has('authorization')) headers.set('authorization', 'Bearer ' + apiKey)
         const iterator = streamKinfResident({
           baseURL: model.baseUrl,
-          headers: requestHeaders(
-            profile.headers, profile.modelHeaders.get(options.model), options, model.baseUrl, this.config.prepareHeaders,
-          ),
+          headers: Object.fromEntries(headers),
           requestModel: profile.requestModels.get(options.model) ?? model.id,
           messages: residentMessages(options),
           ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },

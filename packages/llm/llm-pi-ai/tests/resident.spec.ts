@@ -4,8 +4,8 @@
  * pre-admission/post-admission refusal distinction.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createDeveloperMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { ResidentCallBinding, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createDeveloperMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, ResidentCallBinding, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { PiAiModelProfile } from '../src/config.ts'
 import { PiAiAdapter } from '../src/adapter.ts'
 import { Config, resolveProfiles } from '../src/config.ts'
@@ -48,7 +48,9 @@ function identity(): Record<string, unknown> {
     host_generation: BINDING.hostGeneration,
     resident_generation: BINDING.residentGeneration,
     target_config_revision: BINDING.targetConfigRevision,
+    model_artifact: BINDING.modelArtifact,
     artifact_revision: BINDING.artifactRevision,
+    serving_variant_id: BINDING.servingVariantId,
     serving_variant_revision: BINDING.servingVariantRevision,
   }
 }
@@ -142,6 +144,8 @@ describe('KINF resident-only transport', () => {
       headers: {
         Authorization: `Bearer ${KEY}`,
         'X-KINF-Request-Lifetime': '30s',
+        'X-KINF-Allow-Cold-Load': '1',
+        'X-KINF-Allow-Eviction': '1',
         'Allow-Cold-Load': '1',
         'Allow-Eviction': '1',
       },
@@ -181,6 +185,8 @@ describe('KINF resident-only transport', () => {
     expect(headers['content-type']).toBe('application/json')
     expect(headers['x-request-id']).toMatch(/^[A-Za-z0-9_-]{1,100}$/)
     expect(headers['x-kinf-request-lifetime']).toBeUndefined()
+    expect(headers['x-kinf-allow-cold-load']).toBeUndefined()
+    expect(headers['x-kinf-allow-eviction']).toBeUndefined()
     expect(headers['allow-cold-load']).toBeUndefined()
     expect(headers['allow-eviction']).toBeUndefined()
     // projectionId is DSH-internal and never leaves the process.
@@ -232,10 +238,16 @@ describe('KINF resident-only transport', () => {
   it.each([
     { name: 'native tools', override: { tools: [{ name: 'echo', description: 'Echo.', parameters: {} }] }, code: 'UNSUPPORTED_TOOLS' },
     { name: 'a non-chat role', override: { messages: [createDeveloperMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'x' }] })] }, code: 'UNSUPPORTED_CONTENT' },
-    { name: 'non-text content', override: { messages: [{ role: 'user', content: [{ type: 'reasoning', text: 'hidden' }] }] }, code: 'UNSUPPORTED_CONTENT' },
+    {
+      name: 'non-text content',
+      override: { messages: [createAssistantMessage({
+        source: { provider: 'fixture', model: MODEL }, content: [{ type: 'reasoning', text: 'hidden' }],
+      })] },
+      code: 'UNSUPPORTED_CONTENT',
+    },
     { name: 'an empty history', override: { messages: [] }, code: 'INVALID_REQUEST' },
     { name: 'a nonzero temperature', override: { temperature: 0.5 }, code: 'UNSUPPORTED_OPTION' },
-  ])('refuses $name before dispatch', async ({ override, code }) => {
+  ] satisfies { name: string; override: Partial<GenerateOptions>; code: string }[])('refuses $name before dispatch', async ({ override, code }) => {
     const server = await mockServer([{ events: sse([firstFrame(), textFrame('hi'), finishFrame()]) }])
     const result = await drain(adapter(server.url, [RESIDENT_MODEL]).stream({
       provider: 'fixture', model: MODEL, messages: [userMessage('hi')], residentBinding: BINDING,
@@ -315,11 +327,37 @@ describe('KINF resident-only transport', () => {
   it('maps an accepted:false refusal to RESIDENT_PRECONDITION_STALE without retrying', async () => {
     const server = await mockServer([{
       status: 409,
-      body: JSON.stringify({ error: { code: 'resident_precondition_stale' }, accepted: false, started: false }),
+      body: JSON.stringify({
+        error: { code: 'resident_identity_mismatch' },
+        request_contract: 'kinf.resident-only.v1', accepted: false, started: false,
+      }),
     }])
     const result = await drain(streamKinfResident(request({ baseURL: server.url })))
     expect(result.error).toMatchObject({ code: 'RESIDENT_PRECONDITION_STALE', failure: { status: 409 } })
     expect(server.requests).toHaveLength(1)
+  })
+
+  it('does not infer stale identity from an arbitrary pre-admission refusal', async () => {
+    const server = await mockServer([{
+      status: 409,
+      body: JSON.stringify({
+        error: { code: 'invalid_request' },
+        request_contract: 'kinf.resident-only.v1', accepted: false, started: false,
+      }),
+    }])
+    const result = await drain(streamKinfResident(request({ baseURL: server.url })))
+    expect(result.error).toMatchObject({ code: 'INVALID_REQUEST', failure: { status: 409 } })
+    expect(server.requests).toHaveLength(1)
+  })
+
+  it('refuses a model endpoint other than the observed origin before sending', async () => {
+    const server = await mockServer([])
+    const result = await drain(adapter(server.url, [RESIDENT_MODEL]).stream({
+      provider: 'fixture', model: MODEL, messages: [userMessage('hi')],
+      residentBinding: { ...BINDING, observedOrigin: 'http://127.0.0.1:1' },
+    }))
+    expect(result.error).toMatchObject({ code: 'INVALID_CONFIG' })
+    expect(server.requests).toHaveLength(0)
   })
 
   it('maps an accepted:true failure to RESIDENT_ACCEPTANCE_AMBIGUOUS without retrying', async () => {
@@ -359,6 +397,8 @@ describe('KINF resident-only transport', () => {
     ['host generation', (frame: Record<string, unknown>) => { identityOf(frame)['host_generation'] = '9ab-8bc-7cd' }],
     ['resident generation', (frame: Record<string, unknown>) => { identityOf(frame)['resident_generation'] = '9ab-8bc-7cd' }],
     ['target config revision', (frame: Record<string, unknown>) => { identityOf(frame)['target_config_revision'] = 'b'.repeat(64) }],
+    ['model artifact', (frame: Record<string, unknown>) => { identityOf(frame)['model_artifact'] = 'wrong-artifact' }],
+    ['serving variant', (frame: Record<string, unknown>) => { identityOf(frame)['serving_variant_id'] = 'wrong-variant' }],
     ['artifact revision', (frame: Record<string, unknown>) => { identityOf(frame)['artifact_revision'] = 'artifact-rev-2' }],
     ['serving variant revision', (frame: Record<string, unknown>) => { identityOf(frame)['serving_variant_revision'] = 'variant-rev-2' }],
   ])('rejects a first frame with a mismatched %s and emits no text', async (_name, mutate) => {
@@ -383,7 +423,8 @@ describe('KINF resident-only transport', () => {
   it('streams buffered deltas and maps a native length finish without usage', async () => {
     const terminal = finishFrame({ choices: [{ index: 0, delta: {}, finish_reason: 'length' }] })
     const server = await mockServer([{ events: sse([firstFrame(), textFrame('par'), textFrame('tial'), terminal]) }])
-    const result = await drain(streamKinfResident(request({ baseURL: server.url, maxTokens: undefined })))
+    const { maxTokens: _cap, ...withoutCap } = request({ baseURL: server.url })
+    const result = await drain(streamKinfResident(withoutCap))
     expect(result.error).toBeUndefined()
     expect(result.chunks).toEqual([
       { type: 'block-start', index: 0, blockType: 'text' },
@@ -472,7 +513,7 @@ describe('KINF resident-only transport', () => {
       api: 'openai-completions', baseURL: 'https://fixture.invalid/v1',
       models: [{ id: MODEL, residentTransport: true }],
     } } })
-    expect(resolveProfiles(configured.providers.get()).get('fixture')?.residentTransports.get(MODEL)).toBe(true)
+    expect(configured.providers.get()['fixture']?.models[0]?.residentTransport).toBe(true)
   })
 
   it('rejects a non-boolean residentTransport declaration', () => {

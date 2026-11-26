@@ -650,12 +650,13 @@ export class BasicCompactionEngine extends CompactionEngine {
       summarize: (input, owner, selection, abort) => this.summarizeSelection(
         input, owner, selection, destination ?? owner.session.requestHeader(), abort, admission,
       ),
-      recover: (error, agent, sourceEventSeqs, signal) => this.ctx.waterfall('compaction/summary-error', {
-        session: agent.session,
-        sourceEventSeqs,
-        error,
-        ...signal === undefined ? {} : { signal },
-      }, () => false),
+      recover: (error, agent, sourceEventSeqs, signal) => this.config.summarizationMode !== 'resident-preferred'
+        && this.ctx.waterfall('compaction/summary-error', {
+          session: agent.session,
+          sourceEventSeqs,
+          error,
+          ...signal === undefined ? {} : { signal },
+        }, () => false),
     }
   }
 }

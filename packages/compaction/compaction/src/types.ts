@@ -61,6 +61,28 @@ interface CompactionChunkCall {
   usage?: TokenUsage
 }
 
+/** Deployment identity and projection digests verified for a committed resident summary. */
+export interface CompactionResidentSelection {
+  /** Strict public model alias, including its registered node suffix. */
+  readonly alias: string
+  readonly gatewayId: string
+  readonly routeId: string
+  readonly nodeId: string
+  readonly nodeName: string
+  readonly instance: string
+  readonly servingVariantId: string
+  readonly servingVariantRevision: string
+  readonly modelArtifact: string
+  readonly artifactRevision: string
+  readonly targetConfigRevision: string
+  readonly hostGeneration: string
+  readonly residentGeneration: string
+  /** First criterion that distinguished the accepted deployment. */
+  readonly reason: 'only-eligible' | 'configured-preference' | 'comparable-size' | 'queue-pressure' | 'stable-identity'
+  /** SHA-256 of each dispatched text projection in chunk order. */
+  readonly projectionIds: readonly string[]
+}
+
 /** Closed set of sourced fact classes a ledger snapshot may contain. */
 export const COMPACTION_FACT_KINDS = [
   'decision', 'constraint', 'identifier', 'open-work', 'observation', 'tool-evidence',
@@ -158,6 +180,7 @@ declare module '@deepseek-ai/dsh-session/types' {
         /** Identifies exactly one call through this context's `ctx.llm.stream()`. */
         llmStreamCall: true
         chunkCalls?: never
+        residentSelection?: never
       }
       | {
         /** Optional complete output from an unmarked template, remote, or other summarizer. */
@@ -165,10 +188,13 @@ declare module '@deepseek-ai/dsh-session/types' {
         /** An unmarked summary does not identify a call through this context's LLM seam. */
         llmStreamCall?: never
         chunkCalls?: never
+        residentSelection?: never
       }
       | {
         /** Successful Hybrid requests in dispatch order. */
         chunkCalls: CompactionChunkCall[]
+        /** Accepted resident deployment when the checkpoint used resident-only inference. */
+        residentSelection?: CompactionResidentSelection
         rawOutput?: never
         llmStreamCall?: never
       }
