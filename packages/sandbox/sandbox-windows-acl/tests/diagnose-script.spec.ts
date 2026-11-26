@@ -100,7 +100,15 @@ function runScript(args: readonly string[], env?: NodeJS.ProcessEnv): ScriptRun 
 }
 
 function icacls(path: string, ...args: readonly string[]): string {
-  return execFileSync('icacls', [path, ...args], { encoding: 'utf8', timeout, windowsHide: true })
+  try {
+    return execFileSync('icacls', [path, ...args], { encoding: 'utf8', timeout, windowsHide: true })
+  } catch (error) {
+    if (error instanceof Error && 'status' in error && error.status === 5
+      && args.some(arg => arg === '/grant' || arg === '/grant:r')) {
+      throw new Error(`icacls denied the fixture ACE on ${path} (exit 5). Check WRITE_DAC for the test account on that directory.`, { cause: error })
+    }
+    throw error
+  }
 }
 
 function quote(value: string): string {

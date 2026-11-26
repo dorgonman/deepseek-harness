@@ -561,7 +561,8 @@ TryOpen 'DIRECTORY' '${child}'
       expect(result.status, `stderr: ${result.stderr}`).toBe(0)
       expect(result.stdout).toContain('FILE: OK')
       expect(result.stdout).toContain('NESTED-FILE: OK')
-      expect(result.stdout).toContain('DIRECTORY: DENIED')
+      expect(result.stdout, 'The workspace grant must propagate the FILE_DELETE_CHILD deny to the scratch child directory.')
+        .toContain('DIRECTORY: DENIED')
     } finally {
       grant.dispose()
       rmSync(granted, { recursive: true, force: true })

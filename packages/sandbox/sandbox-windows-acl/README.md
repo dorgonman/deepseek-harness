@@ -172,6 +172,8 @@ One extra catalog entry on Windows: the skill's description enters context with 
 
 ## Known Limitations and Deferred Work
 
+- **Windows ACL test lane** — The test account needs `WRITE_DAC` to apply restricted-SID ACEs and `WRITE_OWNER` to apply the native grant and its integrity label in scratch directories. Use an owner-local Windows lane to qualify both specs. Hosted coverage fails if it cannot apply a fixture ACE or if the native directory deny is absent.
+
 - **Diagnosis preserves integrity labels** — it cannot fix Low-labeled executables affecting programs launched outside DSH. It also cannot repair a caller's missing `WRITE_DAC`; extracted and recovery scripts are user-writable and are not supported elevated entrypoints. Resource directories can remain after an unclean shutdown.
 
 <a id="known-limitations-and-deferred-work"></a>
