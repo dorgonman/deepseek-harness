@@ -95,7 +95,8 @@ export interface Candidate {
     hostGeneration: string
     residentGeneration: string
     targetConfigRevision: string
-    renderedPromptTokens: number
+    /** Projected input token count, which may be a provider-supplied estimate. */
+    promptTokens: number
   }>
 }
 
@@ -231,12 +232,12 @@ function fits(row: Candidate, input: SelectionInput): boolean {
       !positive(budget.maxInputTokensAtMaxOutput) ||
       budget.contextTokens - budget.maxOutputTokens !== budget.maxInputTokensAtMaxOutput ||
       input.outputTokens > budget.maxOutputTokens) return false
-  if (measurement?.projectionId !== input.projectionId || !positive(measurement.renderedPromptTokens) ||
+  if (measurement?.projectionId !== input.projectionId || !positive(measurement.promptTokens) ||
       measurement.hostGeneration !== identity.host_generation || measurement.residentGeneration !== identity.resident_generation ||
       measurement.targetConfigRevision !== identity.target_config_revision) return false
   // Subtraction avoids overflowing a JS safe integer with hostile counts.
   const inputAllowance = budget.contextTokens - input.outputTokens
-  return input.reserveTokens <= inputAllowance && measurement.renderedPromptTokens <= inputAllowance - input.reserveTokens
+  return input.reserveTokens <= inputAllowance && measurement.promptTokens <= inputAllowance - input.reserveTokens
 }
 function queueAllows(row: Candidate): boolean {
   const { pending, maxPending } = row.queue ?? {}

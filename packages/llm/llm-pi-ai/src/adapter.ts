@@ -65,6 +65,7 @@ import { decisionChunks } from './decision.ts'
 import { catalogProvider } from './catalog.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
+import { streamKinfResident } from './resident.ts'
 import { toStreamChunks } from './stream.ts'
 import { bindThinkingToPrefix } from './prefix-binding.ts'
 import type { PrefixDigests } from './prefix-binding.ts'
@@ -306,6 +307,48 @@ function requestHeaders(
 }
 
 /**
+ * Project one request into the resident contract's plain-text message shape.
+ * The contract carries no tool declarations and no projected content, so a
+ * request that needs either is refused rather than silently narrowed.
+ * @param options - the assembled request.
+ * @returns plain-text system, user, and assistant messages.
+ * @throws LlmError when the request carries tools, a non-chat role, or non-text content.
+ */
+function residentMessages(options: GenerateOptions): { role: 'system' | 'user' | 'assistant'; content: string }[] {
+  if ((options.tools?.length ?? 0) > 0) {
+    throw new LlmError('KINF resident requests do not support native tools.', 'UNSUPPORTED_TOOLS')
+  }
+  const result: { role: 'system' | 'user' | 'assistant'; content: string }[] = []
+  if (options.system !== undefined) result.push({ role: 'system', content: options.system })
+  for (const message of options.messages) {
+    if (message.role !== 'system' && message.role !== 'user' && message.role !== 'assistant') {
+      throw new LlmError('KINF resident requests require plain text system, user, or assistant history.', 'UNSUPPORTED_CONTENT')
+    }
+    const text: string[] = []
+    for (const block of message.content) {
+      if (block.type !== 'text') {
+        throw new LlmError('KINF resident requests require plain text history.', 'UNSUPPORTED_CONTENT')
+      }
+      text.push(block.text)
+    }
+    result.push({ role: message.role, content: text.join('') })
+  }
+  if (result.length === 0) throw new LlmError('KINF resident requests require a message.', 'INVALID_REQUEST')
+  return result
+}
+
+/**
+ * Release one native request generator after its consumer stopped. `return()`
+ * resumes a suspended generator at its yield, and neither native generator
+ * throws from that path (their cleanup failures are already absorbed), so the
+ * promise is detached rather than chained to a handler that could never run.
+ * @param iterator - the native request generator to release.
+ */
+function releaseNative(iterator: AsyncGenerator<StreamChunk>): void {
+  void iterator.return(undefined)
+}
+
+/**
  * pi-ai-backed multi-provider adapter. Each operation reads the current
  * profiles, so a configuration change reaches the next request without a
  * restart; model descriptors come from the collection those profiles built.
@@ -451,11 +494,15 @@ export class PiAiAdapter extends LlmAdapter {
   ): AsyncIterable<StreamChunk> {
     if (options.residentBinding !== undefined) {
       // A resident selection must be enforced by the transport that owns the
-      // deployment; this adapter cannot carry the identity, so it refuses.
-      throw new LlmError(
-        'llm-pi-ai: resident dispatch binding is unsupported by this transport',
-        'UNSUPPORTED_RESIDENT_TRANSPORT',
-      )
+      // deployment; a row that has not declared the connected contract keeps
+      // refusing it, and a declared row dispatches through the contract below.
+      const residentProfile = this.profileOf(snapshot, options.provider)
+      if (residentProfile.residentTransports.get(options.model) !== true) {
+        throw new LlmError(
+          'llm-pi-ai: resident dispatch binding is unsupported by this transport',
+          'UNSUPPORTED_RESIDENT_TRANSPORT',
+        )
+      }
     }
     if (options.stop !== undefined) {
       throw new LlmError('llm-pi-ai does not support GenerateOptions.stop', 'UNSUPPORTED_OPTION')
@@ -467,6 +514,11 @@ export class PiAiAdapter extends LlmAdapter {
     // the one it started with and the next call picks up the new one.
     const profile = this.profileOf(snapshot, options.provider)
     const model = this.modelOf(snapshot, options.provider, options.model)
+    const isResident = options.residentBinding !== undefined
+    const observedOrigin = options.residentBinding?.observedOrigin
+    if (observedOrigin !== undefined && new URL(model.baseUrl).origin !== observedOrigin) {
+      throw new LlmError('KINF model endpoint differs from the resident observation', 'INVALID_CONFIG')
+    }
     const updates = conversationUpdates(model)
     // pi-ai collapses Anthropic tool updates without an initially active declaration.
     const tools = options.tools ?? []
@@ -480,7 +532,7 @@ export class PiAiAdapter extends LlmAdapter {
     const isDecision = profile.requestProtocols.get(options.model) === 'kinf-decision-v1'
     const reasoning = resolveReasoningLevel(
       model,
-      options.reasoningEffort ?? (isDecision ? undefined : profile.reasoning),
+      options.reasoningEffort ?? (isDecision || isResident ? undefined : profile.reasoning),
     )
     const apiKey = await this.config.resolveApiKey(options.provider, profile)
     if (profile.crossOriginModels.has(options.model)
@@ -500,6 +552,35 @@ export class PiAiAdapter extends LlmAdapter {
     using watchdog = idleWatchdog(upstream, streamIdleTimeoutMs, 'LLM_STREAM_IDLE_TIMEOUT')
 
     try {
+      if (options.residentBinding !== undefined) {
+        if (options.temperature !== undefined && options.temperature !== 0) {
+          throw new LlmError('KINF resident requests only accept temperature 0', 'UNSUPPORTED_OPTION')
+        }
+        const headers = new Headers(requestHeaders(
+          profile.headers, profile.modelHeaders.get(options.model), options, model.baseUrl, this.config.prepareHeaders,
+        ))
+        if (apiKey !== undefined && !headers.has('authorization')) headers.set('authorization', 'Bearer ' + apiKey)
+        const iterator = streamKinfResident({
+          baseURL: model.baseUrl,
+          headers: Object.fromEntries(headers),
+          requestModel: profile.requestModels.get(options.model) ?? model.id,
+          messages: residentMessages(options),
+          ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
+          ...options.temperature === undefined ? {} : { temperature: 0 },
+          binding: options.residentBinding,
+          signal: watchdog.signal,
+        })
+        try {
+          for (;;) {
+            const result = await watchdog.next(iterator)
+            if (result.done) return
+            yield result.value
+          }
+        } finally {
+          consumer.abort('KINF resident consumer stopped')
+          releaseNative(iterator)
+        }
+      }
       if (isDecision) {
         const iterator = decisionChunks({
           options,
@@ -520,9 +601,7 @@ export class PiAiAdapter extends LlmAdapter {
           }
         } finally {
           consumer.abort('KINF Decision consumer stopped')
-          void iterator.return(undefined).catch((_closed: unknown) => {
-            // Aborting the request owns termination if a pending read outlives the consumer.
-          })
+          releaseNative(iterator)
         }
       }
       const containsImage = options.messages.some(message => contentHasImage(message.content))

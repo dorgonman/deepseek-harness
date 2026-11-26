@@ -27,6 +27,8 @@ These variants are merged inside a `declare module '@deepseek-ai/dsh-session/typ
 
 Hybrid records ordered `chunkCalls` on a successful `compaction/summary`. Each entry names its original append-origin event groups, any tool body replaced by a source reference, the context window and estimated input tokens, and the provider's text or reasoning output and optional usage. Replay restores one successful auxiliary stream per entry. The Session format continues to accept the older one-call and unmarked summary shapes.
 
+A resident summary also records `residentSelection` with the strict alias, node, instance, accepted deployment revisions and generations, selection reason, and one SHA-256 projection digest per chunk. The receipt records the deployment that produced the committed checkpoint. Replay reads the stored chunk output.
+
 `requestProjection` records how the auxiliary request represented its selected history. The default `compaction-basic` LLM summarizer records one concrete tag on every new summary.
 
 | Tag | Request representation |

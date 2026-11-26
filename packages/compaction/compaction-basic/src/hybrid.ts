@@ -16,7 +16,9 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import { resolveCompactSpec, resolveSummaryMaxTokens, resolveTargetPolicy } from './config.ts'
 import { parseFactExtraction } from './fact-extraction.ts'
 import { composeCompactView, createFacts, deriveCommittedLedger, mergeFacts } from './fact-ledger.ts'
-import { resolveResidentSummary } from './resident-resolution.ts'
+import { createKinfResidentObservationSource } from './kinf-resident-observation.ts'
+import type { ResidentObservationSource } from './resident-observation.ts'
+import { ResidentResolutionError, residentProjectionId, resolveResidentSummary } from './resident-resolution.ts'
 import {
   advanceCoverage, assertCoverageRevision, deriveCommittedCoverage, digestPolicy, digestRange,
   hasUnprocessedRawEvents, type IncrementalAdvanceMeta,
@@ -137,12 +139,24 @@ function verifyPairs(group: readonly OriginalMessage[]) {
   if (pending.size > 0) throw new Error('compaction: selected history has unmatched tool calls')
 }
 
+/** Internal signal for the one repeatable failure before the first dispatch is admitted. */
+class ReselectResident extends Error {}
+
 /** Explicit opt-in backend; use it in place of Basic at the same Cordis scope. */
 export default class HybridCompactionEngine extends BasicCompactionEngine {
   static override inject = [...BasicCompactionEngine.inject, 'sessionQuery']
 
+  private readonly residentSource?: ResidentObservationSource
+
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
     super(ctx, config)
+    const { residentGatewayId, residentObservationRoutes } = this.config
+    if (this.config.summarizationMode === 'resident-preferred'
+      && residentGatewayId !== undefined && residentObservationRoutes !== undefined) {
+      this.residentSource = createKinfResidentObservationSource(residentGatewayId, residentObservationRoutes, {
+        measure: messages => messages.reduce((total, message) => total + ctx.tokenMeter.estimateMessage(message), 0),
+      })
+    }
     if (this.config.auto) {
       this.ctx.on('agent/request-admission', ({ agent, request, signal }) => this.compactPendingSwitch(agent, request, signal))
     }
@@ -235,6 +249,23 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     signal?: AbortSignal,
     admission?: PendingAgentRequest,
   ): Promise<RegionSummary> {
+    try {
+      return await this.summarizeAttempt(agent, selection, destination, signal, admission, true)
+    } catch (error: unknown) {
+      if (!(error instanceof ReselectResident)) throw error
+      signal?.throwIfAborted()
+      return this.summarizeAttempt(agent, selection, destination, signal, admission, false)
+    }
+  }
+
+  private async summarizeAttempt(
+    agent: Agent,
+    selection: SurfaceSelection,
+    destination: EpochHeader | undefined,
+    signal: AbortSignal | undefined,
+    admission: PendingAgentRequest | undefined,
+    canReselect: boolean,
+  ): Promise<RegionSummary> {
     const { ctx } = this
     const { session } = agent
     const liveHeader = session.requestHeader()
@@ -288,88 +319,13 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     }
 
     const policy = resolveTargetPolicy(this.config, sourceRoute)
-    if (policy.summarizationProvider === '' && policy.summarizationFallback === 'error') {
+    const resident = this.config.summarizationMode === 'resident-preferred'
+    if (!resident && policy.summarizationProvider === '' && policy.summarizationFallback === 'error') {
       throw new LlmError('compaction: Hybrid requires a configured summarizer', 'SUMMARY_TARGET_UNCONFIGURED')
     }
-    let target = policy.summarizationProvider === ''
-      ? { provider: sourceRoute.provider, model: sourceRoute.model }
-      : { provider: policy.summarizationProvider, model: policy.summarizationModel }
-    const resolveMaxTokens = policy.adaptiveHeadroom === 'pressure-and-summary'
-      ? (window: number, defaultMaxTokens: number | undefined) => {
-        const reserve = sourceRoute.maxTokens ?? defaultMaxTokens
-        if (reserve === undefined) throw new Error('compaction: source completion reserve is unavailable')
-        return resolveSummaryMaxTokens(policy, window - reserve)
-      }
-      : undefined
-    // One instruction shape feeds both the resident sample projection and every
-    // dispatched chunk. The sample remains the first RAW group rather than the
-    // packed envelope, so this guarantees instruction agreement, not identity.
     const instruction = factLedger ? factInstruction : summaryInstruction
-    const prepare = () => prepareSummaryCall(ctx, { ...target, maxTokens: policy.maxTokens }, signal, resolveMaxTokens)
-    let residentBinding: ResidentCallBinding | undefined
-    let first = await prepare()
-    if (this.config.summarizationMode === 'resident-preferred') {
-      const resolved = await resolveResidentSummary(
-        ctx.get('residentSummarySource'),
-        {
-          mode: 'resident-preferred',
-          ...this.config.residentGatewayId === undefined ? {} : { gatewayId: this.config.residentGatewayId },
-          ...this.config.residentPinnedNodeId === undefined ? {} : { pinnedNodeId: this.config.residentPinnedNodeId },
-          ...this.config.residentAllowedNodeIds === undefined ? {} : { allowedNodeIds: this.config.residentAllowedNodeIds },
-          ...this.config.residentPreferredVariantIds === undefined
-            ? {}
-            : { preferredVariantIds: this.config.residentPreferredVariantIds },
-          ...this.config.residentProvider === undefined ? {} : { provider: this.config.residentProvider },
-          maxAgeMs: this.config.residentMaxAgeMs,
-        },
-        (() => {
-          const sample = groups[0]
-          if (sample === undefined) throw new Error('compaction: no RAW group selected')
-          const projection: RequestMessage = {
-            role: 'user',
-            content: [
-              { type: 'text', text: `Session ${session.id} source events: ${sample.map(({ event }) => event.seq).join(', ')}.` },
-              ...projectSummaryTranscript(sample.map(({ message }) => message), ref => ctx.llm.fileRequestText(ref))
-                .flatMap(message => message.content),
-            ],
-          }
-          return { messages: [instruction, projection], maxTokens: first.maxTokens, reserveTokens: 0 }
-        })(),
-        { ...signal === undefined ? {} : { signal } },
-      )
-      target = { provider: resolved.provider, model: resolved.model }
-      const precondition = resolved.receipt.precondition
-      residentBinding = {
-        schema: precondition.schema,
-        instance: precondition.instance,
-        hostGeneration: precondition.host_generation,
-        servingVariantId: precondition.serving_variant_id,
-        servingVariantRevision: precondition.serving_variant_revision,
-        modelArtifact: precondition.model_artifact,
-        artifactRevision: precondition.artifact_revision,
-        targetConfigRevision: precondition.target_config_revision,
-        residentGeneration: precondition.resident_generation,
-        projectionId: resolved.receipt.projectionId,
-      }
-      first = await prepare()
-      ctx.logger.info(`compaction: resident summarizer ${JSON.stringify(resolved.receipt)}`)
-    }
-    const { window, maxTokens } = first
-    const destinationCall = admission === undefined ? await ctx.llm.prepareCall(destination.config, signal) : undefined
-    const destinationWindow = admission?.contextWindow ?? destinationCall?.context?.contextWindow
-    const destinationHeader = destinationCall === undefined ? destination : { ...destination, config: destinationCall.config }
-    const reserve = admission?.completionSource === 'transport-fallback' ? 0 : destinationHeader.config.maxTokens
-    if (destinationWindow === undefined || reserve === undefined) {
-      throw new Error('compaction: destination context and completion reserve must be known')
-    }
-    const switching = sourceRoute.provider !== destination.config.provider || sourceRoute.model !== destination.config.model
-    const destinationPolicy = resolveTargetPolicy(this.config, destination.config)
-    const destinationBudget = switching
-      ? Math.min(destinationWindow - reserve, resolveCompactSpec(destinationPolicy, destinationWindow, reserve).thresholdTokens - 1)
-      : destinationWindow - reserve
     const meter = ctx.tokenMeter
     const fixed = meter.estimateMessage(instruction)
-
     const project = (group: readonly OriginalMessage[], omitToolContent: boolean): RequestMessage => {
       const messages = group.map(({ event, message }): Message => {
         if (!omitToolContent || message.role !== 'tool') return message
@@ -388,6 +344,39 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       }
     }
 
+    const resolved = resident ? await this.selectResident(
+      sourceRoute.model, groups, project, instruction, policy.maxTokens, signal,
+    ) : undefined
+    const target = resolved === undefined
+      ? policy.summarizationProvider === ''
+        ? { provider: sourceRoute.provider, model: sourceRoute.model }
+        : { provider: policy.summarizationProvider, model: policy.summarizationModel }
+      : { provider: resolved.provider, model: resolved.model }
+    const resolveMaxTokens = !resident && policy.adaptiveHeadroom === 'pressure-and-summary'
+      ? (window: number, defaultMaxTokens: number | undefined) => {
+        const reserve = sourceRoute.maxTokens ?? defaultMaxTokens
+        if (reserve === undefined) throw new Error('compaction: source completion reserve is unavailable')
+        return resolveSummaryMaxTokens(policy, window - reserve)
+      }
+      : undefined
+    const prepare = () => prepareSummaryCall(ctx, { ...target, maxTokens: policy.maxTokens }, signal, resolveMaxTokens)
+    const first = await prepare()
+    const { maxTokens } = first
+    const window = Math.min(first.window, resolved?.contextTokens ?? first.window)
+    const observedRoute = this.config.residentObservationRoutes?.find(route => route.id === resolved?.receipt.routeId)
+
+    const destinationCall = admission === undefined ? await ctx.llm.prepareCall(destination.config, signal) : undefined
+    const destinationWindow = admission?.contextWindow ?? destinationCall?.context?.contextWindow
+    const destinationHeader = destinationCall === undefined ? destination : { ...destination, config: destinationCall.config }
+    const reserve = admission?.completionSource === 'transport-fallback' ? 0 : destinationHeader.config.maxTokens
+    if (destinationWindow === undefined || reserve === undefined) {
+      throw new Error('compaction: destination context and completion reserve must be known')
+    }
+    const switching = sourceRoute.provider !== destination.config.provider || sourceRoute.model !== destination.config.model
+    const destinationPolicy = resolveTargetPolicy(this.config, destination.config)
+    const destinationBudget = switching
+      ? Math.min(destinationWindow - reserve, resolveCompactSpec(destinationPolicy, destinationWindow, reserve).thresholdTokens - 1)
+      : destinationWindow - reserve
     const chunks: Array<{ messages: RequestMessage[]; tokens: number; groups: CompactionChunkCall['groups'] }> = []
     for (const group of groups) {
       let message = project(group, false)
@@ -414,24 +403,52 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
 
     const summary: ContentBlock[] = factLedger ? [] : [...carriedContent]
     const chunkCalls: CompactionChunkCall[] = []
+    const projectionIds: string[] = []
     let ledger: readonly CompactionFact[] | undefined = priorLedger
     for (const [index, chunk] of chunks.entries()) {
-      const prepared = index === 0 ? first : await prepare()
+      const prepared = index === 0 || resident ? first : await prepare()
       const { call } = prepared
       assertCurrent()
-      if (prepared.window !== window || call.config.maxTokens !== maxTokens
+      if (prepared.window !== first.window || call.config.maxTokens !== maxTokens
         || chunk.tokens + maxTokens > window) {
         throw new LlmError('compaction: summarizer capacity changed', 'SUMMARY_TARGET_UNVERIFIED')
       }
+      const residentBinding: ResidentCallBinding | undefined = resolved === undefined ? undefined : {
+        schema: resolved.receipt.precondition.schema,
+        instance: resolved.receipt.instance,
+        hostGeneration: resolved.receipt.precondition.host_generation,
+        servingVariantId: resolved.receipt.servingVariantId,
+        servingVariantRevision: resolved.receipt.servingVariantRevision,
+        modelArtifact: resolved.receipt.modelArtifact,
+        artifactRevision: resolved.receipt.artifactRevision,
+        targetConfigRevision: resolved.receipt.targetConfigRevision,
+        residentGeneration: resolved.receipt.residentGeneration,
+        projectionId: residentProjectionId({ messages: chunk.messages, maxTokens, reserveTokens: 0 }),
+        ...observedRoute === undefined ? {} : { observedOrigin: new URL(observedRoute.baseUrl).origin },
+      }
       const assembler = new BlockAssembler()
-      for await (const item of call.stream({
-        ...call.config, messages: chunk.messages, purpose: 'compaction', sessionId: session.id,
-        ...residentBinding === undefined ? {} : { residentBinding },
-        ...signal === undefined ? {} : { signal },
-      })) assembler.push(item)
+      let receivedOutput = false
+      try {
+        for await (const item of call.stream({
+          ...call.config, messages: chunk.messages, purpose: 'compaction', sessionId: session.id,
+          ...residentBinding === undefined ? {} : { residentBinding },
+          ...signal === undefined ? {} : { signal },
+        })) {
+          if (item.type !== 'finish') receivedOutput = true
+          assembler.push(item)
+        }
+        const finish = assembler.finish
+        if (finish.kind === 'error' || finish.kind === 'aborted') throw LlmError.fromFailure(finish.failure)
+      } catch (error: unknown) {
+        assertCurrent()
+        if (resident && canReselect && index === 0 && !receivedOutput
+          && error instanceof LlmError && error.code === 'RESIDENT_PRECONDITION_STALE') {
+          throw new ReselectResident('compaction: resident changed before admission', { cause: error })
+        }
+        throw error
+      }
       assertCurrent()
       const finish = assembler.finish
-      if (finish.kind === 'error' || finish.kind === 'aborted') throw LlmError.fromFailure(finish.failure)
       const blocks = assembler.blocks()
       const rawOutput = blocks.filter(block => block.type === 'text' || block.type === 'reasoning')
       if (finish.kind !== 'stop' || rawOutput.length !== blocks.length
@@ -440,6 +457,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       }
       const text = rawOutput.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
       if (text.length === 0) throw new Error('compaction: summarizer returned no text')
+      if (residentBinding !== undefined) projectionIds.push(residentBinding.projectionId)
       chunkCalls.push({
         groups: chunk.groups, contextWindow: window, estimatedInputTokens: chunk.tokens, rawOutput,
         ...call.config.reasoningEffort === undefined ? {} : { reasoningEffort: call.config.reasoningEffort },
@@ -510,6 +528,26 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
         })
       }
     }
+    const residentSelection = resolved === undefined ? undefined : {
+      alias: resolved.receipt.alias,
+      gatewayId: resolved.receipt.gatewayId,
+      routeId: resolved.receipt.routeId,
+      nodeId: resolved.receipt.nodeId,
+      nodeName: resolved.receipt.nodeName,
+      instance: resolved.receipt.instance,
+      servingVariantId: resolved.receipt.servingVariantId,
+      servingVariantRevision: resolved.receipt.servingVariantRevision,
+      modelArtifact: resolved.receipt.modelArtifact,
+      artifactRevision: resolved.receipt.artifactRevision,
+      targetConfigRevision: resolved.receipt.targetConfigRevision,
+      hostGeneration: resolved.receipt.precondition.host_generation,
+      residentGeneration: resolved.receipt.residentGeneration,
+      reason: resolved.receipt.reason,
+      projectionIds,
+    }
+    if (residentSelection !== undefined) {
+      ctx.logger.info('compaction: resident summarizer ' + JSON.stringify(residentSelection))
+    }
     let nextCoverage: CompactionIncrementalCoverage | undefined
     if (incremental) {
       const first = groups[0]?.[0]?.event.seq
@@ -528,6 +566,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       ...nextCoverage === undefined ? {} : { incremental: nextCoverage },
       ...factLedger && ledger !== undefined ? { ledger } : {},
       chunkCalls,
+      ...residentSelection === undefined ? {} : { residentSelection },
       validateCommit: (checkpoint) => {
         assertCurrent()
         if (incremental) {
@@ -561,5 +600,56 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
         }
       },
     }
+  }
+
+  /** Select against the largest indivisible group after permissible omission. */
+  private async selectResident(
+    sourceModel: string,
+    groups: readonly OriginalMessage[][],
+    project: (group: readonly OriginalMessage[], omitToolContent: boolean) => RequestMessage,
+    instruction: RequestMessage,
+    maxTokens: number,
+    signal?: AbortSignal,
+  ) {
+    const config = this.config
+    const routes = config.residentObservationRoutes
+    const suffixIndex = sourceModel.lastIndexOf('@')
+    let pinnedNodeId = config.residentPinnedNodeId
+    if (routes !== undefined && config.residentAllowedNodeIds === undefined && suffixIndex >= 0) {
+      const nodeName = sourceModel.slice(suffixIndex + 1)
+      const route = routes.find(route => route.nodeName === nodeName)
+      if (route === undefined) {
+        throw new ResidentResolutionError('no-eligible', 'compaction: no observation route matches the session node')
+      }
+      pinnedNodeId = route.nodeId
+    }
+    let largest: RequestMessage | undefined
+    let largestTokens = -1
+    for (const group of groups) {
+      const full = project(group, false)
+      const fullTokens = this.ctx.tokenMeter.estimateMessage(full)
+      const trimmed = group.some(({ message }) => message.role === 'tool') ? project(group, true) : full
+      const trimmedTokens = this.ctx.tokenMeter.estimateMessage(trimmed)
+      const tokens = Math.min(trimmedTokens, fullTokens)
+      if (tokens > largestTokens) {
+        largest = trimmedTokens < fullTokens ? trimmed : full
+        largestTokens = tokens
+      }
+    }
+    if (largest === undefined) throw new ResidentResolutionError('no-eligible', 'compaction: no projected history to summarize')
+    return resolveResidentSummary(
+      this.residentSource ?? this.ctx.get('residentSummarySource'),
+      {
+        mode: 'resident-preferred',
+        ...config.residentGatewayId === undefined ? {} : { gatewayId: config.residentGatewayId },
+        ...pinnedNodeId === undefined ? {} : { pinnedNodeId },
+        ...config.residentAllowedNodeIds === undefined ? {} : { allowedNodeIds: config.residentAllowedNodeIds },
+        ...config.residentPreferredVariantIds === undefined ? {} : { preferredVariantIds: config.residentPreferredVariantIds },
+        ...config.residentProvider === undefined ? {} : { provider: config.residentProvider },
+        maxAgeMs: config.residentMaxAgeMs,
+      },
+      { messages: [instruction, largest], maxTokens, reserveTokens: 0 },
+      { ...signal === undefined ? {} : { signal } },
+    )
   }
 }

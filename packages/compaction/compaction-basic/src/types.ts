@@ -11,6 +11,7 @@ declare module '@deepseek-ai/dsh-llm/types' {
 }
 
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import type { KinfResidentObservationRoute } from './kinf-resident-observation.ts'
 
 /** Policy fields shared by the default policy and exact model overrides. */
 export interface CompactionPolicyConfig {
@@ -93,6 +94,8 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   residentProvider?: string
   /** Maximum accepted observation age in milliseconds; at most 60000. Defaults to 60000. */
   residentMaxAgeMs?: number
+  /** Explicit KINF routes observed by the Hybrid backend in resident-preferred mode. */
+  residentObservationRoutes?: KinfResidentObservationRoute[]
 }
 
 /** Exactly one validated retention form. */
@@ -129,6 +132,7 @@ export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & {
   readonly residentPreferredVariantIds?: readonly string[]
   readonly residentProvider?: string
   readonly residentMaxAgeMs: number
+  readonly residentObservationRoutes?: readonly KinfResidentObservationRoute[]
 }
 
 /** Fully merged policy for one routed conversation target, before capacity scaling. */

@@ -38,6 +38,12 @@ Hybrid combines chunk results in source order. During a model switch it prices t
 
 Cold Session replay restores the committed checkpoint and original history. Hybrid records each successful chunk in the summary record so adapter replay can reproduce its output in call order. The source test suite uses synthetic Sessions and fake adapters.
 
+The [resident compaction example](../../../apps/cli/config/examples/kinf-resident-compaction.cordis.yml) opts Hybrid into an existing local KINF managed listener. It ranks the configured 27B variant ahead of Flash-Next when both are eligible. Set the order with `residentPreferredVariantIds`. Match each observation route to its pi-ai model row, including the listener and logical model. Enable `residentTransport: true` on those rows.
+
+Hybrid checks fresh observations for loaded text Chat deployments and compares the projected history estimate against the resident's reported runtime context and output budgets. KINF owns final admission. Automatic, manual, overflow, and model-switch compaction share the selector. Hybrid prices each packed chunk against the chosen window before dispatch and records the resident identity, selection reason, and each dispatched projection digest in the committed summary.
+
+The resident contract prohibits cold loads and evictions. A definite stale refusal before first admission permits one refresh and reselect. Missing eligible capacity ends with a typed `no-eligible` cause. An accepted request or uncertain delivery cannot trigger a reselect. The example uses an explicitly configured loopback listener. A conversation alias with a node suffix scopes selection to that configured node unless an explicit compaction allowlist is set.
+
 ### What you get
 
 With the default settings you get four behaviors: automatic condensation as the conversation grows toward the model's context limit; recovery after a confirmed context-overflow error, where the conversation condenses and the request retries; on-demand condensation through the `/compact` command; and — when the pruner is mounted — trimming of oversized tool outputs before condensation.
@@ -99,6 +105,7 @@ All settings are optional. With context window `W`, effective request output cap
 | `residentPreferredVariantIds` | — | Configured quality preference, most preferred first. |
 | `residentProvider` | — | DSH LLM provider route that fronts the gateway. |
 | `residentMaxAgeMs` | `60000` | Maximum accepted observation age, 1–60000 ms. |
+| `residentObservationRoutes` | — | Hybrid KINF loopback bindings with node ID, node name, instance, logical model, and URL. |
 
 Misconfiguration fails fast: unknown settings, duplicate per-model overrides, invalid token counts, both retention forms together, or a retention ratio at least as large as the threshold ratio reject the plugin at load. When the model is first used, `W − O − B` must be positive and the resolved retained budget must be below the trigger. Zero headroom requires an explicit positive `maxTokens`, globally or in that model policy. Explicit headroom must fit the window. An omitted summary cap follows the adjusted headroom on the conversation route when it declares a window, with a minimum of one token. Explicit summary targets keep their configured or inherited cap. Lower `thresholdRatio` to compact earlier.
 

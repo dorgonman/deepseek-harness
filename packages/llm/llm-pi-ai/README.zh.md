@@ -100,6 +100,8 @@ kind: "package-reference"
 
 显式的逐模型 `requestProtocol: kinf-decision-v1` 选择 KINF 的首 token Decision 操作。它要求 `api: openai-completions`、`maxTokens: 1`、`input: [text]` 和 `reasoningEfforts: false`；省略时保留普通 pi-ai 分派。请求发送 `kinf_decision: label_scores`，禁用原生流式传输，仅接受纯文本 system、user 和 assistant 历史。原生工具、推理、停止控制、非零 temperature 及非一的输出上限均被拒绝。完整 JSON 响应限制为 64 KiB，并校验两个 logit、两个未校准标签分数、token 用量和确切服务身份。其原生 `length` 结束状态表示 Decision 成功完成。对话文本仅包含经过校验的 `model`、`decision`、`served_identity` 和 `usage` 字段；私有或未知响应字段被省略。不会尝试普通聊天或其他提供方回退。
 
+启用 `residentTransport: true` 的模型行接受 KINF 常驻绑定，并向专用的仅常驻端点发出请求。绑定含观测来源时，适配器在派送前要求模型端点与其相同。只有明确报告尚未准入及启动且携带已知过期目标错误码的常驻契约 HTTP 409，才允许调用方重选。
+
 跨来源的模型端点覆盖必须使用自定义无密钥提供方路由。已解析的 API 密钥、已命名的凭据引用或已安装目录提供方的环境／OAuth 认证会在发送前拒绝该覆盖。同来源覆盖保留提供方认证。显式部署请求头会应用于所配置的端点；仅配置可信端点。
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-llm-pi-ai)是每个受支持字段及其 JSDoc 的穷尽式真源。

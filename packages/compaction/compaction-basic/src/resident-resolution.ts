@@ -7,7 +7,7 @@
  * @module @deepseek-ai/dsh-compaction-basic/resident-resolution
  */
 
-import type { RequestMessage } from '@deepseek-ai/dsh-llm'
+import { HarnessError, type RequestMessage } from '@deepseek-ai/dsh-llm'
 import { digestCanonical } from './incremental.ts'
 import {
   selectResidentFromSource,
@@ -16,13 +16,13 @@ import {
 } from './resident-observation.ts'
 
 /** Failure classes for resident-preferred resolution. */
-export class ResidentResolutionError extends Error {
+export class ResidentResolutionError extends HarnessError {
   constructor(
     /** Machine-readable cause. */
-    readonly code: 'mode-fixed' | 'source-unavailable' | 'not-configured' | 'scope-required' | 'no-eligible',
+    code: 'mode-fixed' | 'source-unavailable' | 'not-configured' | 'scope-required' | 'no-eligible',
     message: string,
   ) {
-    super(message)
+    super(message, code)
     this.name = 'ResidentResolutionError'
   }
 }
@@ -63,6 +63,8 @@ export interface ResidentResolvedTarget {
   readonly model: string
   /** Receipt identifying the accepted deployment. */
   readonly receipt: ResidentSelectionReceipt
+  /** Observed runtime context window for this exact resident generation. */
+  readonly contextTokens: number
 }
 
 /**
@@ -71,7 +73,7 @@ export interface ResidentResolvedTarget {
  * @returns lowercase hex digest binding the projection content.
  */
 export function residentProjectionId(projection: ResidentProjection): string {
-  return digestCanonical({ messages: projection.messages, maxTokens: projection.maxTokens })
+  return digestCanonical(projection)
 }
 
 /**
@@ -118,5 +120,10 @@ export async function resolveResidentSummary(
     }
     throw new ResidentResolutionError('no-eligible', 'compaction: no eligible resident summarizer is available')
   }
-  return { provider: config.provider, model: selection.target.alias, receipt: selection.receipt }
+  return {
+    provider: config.provider,
+    model: selection.target.alias,
+    receipt: selection.receipt,
+    contextTokens: selection.contextTokens,
+  }
 }

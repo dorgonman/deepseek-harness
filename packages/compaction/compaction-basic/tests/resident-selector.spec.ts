@@ -79,7 +79,7 @@ function candidate(
       hostGeneration: identity.host_generation,
       residentGeneration: identity.resident_generation,
       targetConfigRevision: identity.target_config_revision,
-      renderedPromptTokens: 600,
+      promptTokens: 600,
     },
   }
 }
@@ -191,9 +191,9 @@ describe('resident summary selector', () => {
   })
 
   it('enforces the measured prompt plus reserve boundary exactly', () => {
-    const fits = edit(candidate(), (row) => { row.measurement!.renderedPromptTokens = 1904 })
+    const fits = edit(candidate(), (row) => { row.measurement!.promptTokens = 1904 })
     expectTarget(request([fits]), fits, 'only-eligible')
-    const over = edit(candidate(), (row) => { row.measurement!.renderedPromptTokens = 1905 })
+    const over = edit(candidate(), (row) => { row.measurement!.promptTokens = 1905 })
     expect(selectResidentSummary(request([over])))
       .toEqual({ ok: false, code: 'resident_summary_no_eligible' })
   })

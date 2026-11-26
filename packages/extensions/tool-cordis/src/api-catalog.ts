@@ -8632,7 +8632,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ResidentCallBinding',
-    declaration: 'export interface ResidentCallBinding {\n    readonly schema: string;\n    readonly instance: string;\n    readonly hostGeneration: string;\n    readonly servingVariantId: string;\n    readonly servingVariantRevision: string;\n    readonly modelArtifact: string;\n    readonly artifactRevision: string;\n    readonly targetConfigRevision: string;\n    readonly residentGeneration: string;\n    readonly projectionId: string;\n}',
+    declaration: 'export interface ResidentCallBinding {\n    readonly schema: string;\n    readonly instance: string;\n    readonly hostGeneration: string;\n    readonly servingVariantId: string;\n    readonly servingVariantRevision: string;\n    readonly modelArtifact: string;\n    readonly artifactRevision: string;\n    readonly targetConfigRevision: string;\n    readonly residentGeneration: string;\n    readonly projectionId: string;\n    readonly observedOrigin?: string;\n}',
   },
   {
     name: 'ResolvedAlwaysRetryPolicy',

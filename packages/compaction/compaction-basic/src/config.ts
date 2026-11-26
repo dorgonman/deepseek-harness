@@ -52,6 +52,7 @@ const BASIC_COMPACT_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'residentPreferredVariantIds',
   'residentProvider',
   'residentMaxAgeMs',
+  'residentObservationRoutes',
 ])
 
 /** Complete exact-target override key set. */
@@ -194,6 +195,9 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     ...config.residentPreferredVariantIds === undefined ? {} : { residentPreferredVariantIds: config.residentPreferredVariantIds },
     ...config.residentProvider === undefined ? {} : { residentProvider: config.residentProvider },
     residentMaxAgeMs: config.residentMaxAgeMs ?? 60_000,
+    ...config.residentObservationRoutes === undefined ? {} : {
+      residentObservationRoutes: config.residentObservationRoutes.map(route => ({ ...route })),
+    },
   })
 }
 
