@@ -2084,11 +2084,11 @@ it.each([
       await send(owned.agent, body)
       const { events } = await ctx.sessionQuery.readSession(sessionId)
       expectAdmissionRefusal(events)
-      expect(events.findLast(event => event.type === 'turn/end')?.data.reason).toMatchObject({
-        error: { message: expect.stringContaining(
-          `~${input + reserve} tokens (${input} request + ${reserve} reserved, ${output === undefined ? 'transport-fallback' : 'explicit'}) exceed the ${window}-token window`,
-        ) },
-      })
+      const reason = events.findLast(event => event.type === 'turn/end')?.data.reason
+      const completionSource = output === undefined ? 'transport-fallback' : 'explicit'
+      expect(reason?.kind === 'error' ? reason.error.message : undefined).toContain(
+        `~${input + reserve} tokens (${input} request + ${reserve} reserved, ${completionSource}) exceed the ${window}-token window`,
+      )
       expect(chat.requests).toHaveLength(0)
       expect(events.find(event => event.type === 'request/admission')).toBeUndefined()
     } finally {
