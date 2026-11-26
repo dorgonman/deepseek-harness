@@ -1457,14 +1457,28 @@ it.each([
   })
 })
 
-it.skipIf(process.env['DSH_KINF_RESIDENT_LIVE'] !== 'already-loaded-27b')(
-  'compacts synthetic history through the already-loaded local 27B',
+const live27bTargets = [
+  {
+    optIn: 'already-loaded-27b', origin: 'http://127.0.0.1:49362', instance: 'default',
+    logicalModel: local27b.logicalModel, variant: local27b.variant,
+  },
+  {
+    optIn: 'already-loaded-isolated-27b', origin: 'http://127.0.0.1:49371', instance: 'kinf-0262-private',
+    logicalModel: 'chat-qwen-27b-standard-exl3-6bpw', variant: 'qwen27-standard-native-mtp',
+  },
+] as const
+
+const live27bTarget = live27bTargets.find(target => target.optIn === process.env['DSH_KINF_RESIDENT_LIVE'])
+
+it.skipIf(live27bTarget === undefined)(
+  `compacts synthetic history through the already-loaded local 27B (${live27bTarget?.instance ?? 'opt-in'})`,
   async () => {
-    const baseUrl = 'http://127.0.0.1:49362/v1'
+    if (live27bTarget === undefined) throw new Error('Live compaction requires an explicit 27B target')
+    const { origin, instance, logicalModel, variant } = live27bTarget
+    const baseUrl = `${origin}/v1`
     const gatewayId = 'local-kinf'
     const route = {
-      id: 'local-27b', nodeId: 'kano-local', nodeName: 'local', instance: 'default',
-      logicalModel: local27b.logicalModel, baseUrl,
+      id: 'local-27b', nodeId: 'kano-local', nodeName: 'local', instance, logicalModel, baseUrl,
     }
     const alias = `${route.logicalModel}@${route.nodeName}`
     const liveSignal = AbortSignal.timeout(45_000)
@@ -1474,7 +1488,7 @@ it.skipIf(process.env['DSH_KINF_RESIDENT_LIVE'] !== 'already-loaded-27b')(
       const url = new URL(input instanceof Request ? input.url : input)
       const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
       const request = `${method} ${url.pathname}`
-      if (url.origin !== 'http://127.0.0.1:49362' || url.search !== ''
+      if (url.origin !== origin || url.search !== ''
         || ![`GET ${observationPath}`, `POST ${residentPath}`].includes(request)) {
         throw new Error('Live compaction attempted an undeclared HTTP route')
       }
@@ -1496,8 +1510,10 @@ it.skipIf(process.env['DSH_KINF_RESIDENT_LIVE'] !== 'already-loaded-27b')(
         },
       })
       const [before] = await observe()
-      if (before === undefined || before.host.identity.serving_variant_id !== local27b.variant) {
-        throw new Error('Live compaction requires the 27B deployment to be resident and eligible before the test')
+      const budget = before?.model.budget
+      if (before?.host.identity.serving_variant_id !== variant || budget == null || budget.maxOutputTokens < 1_024) {
+        expect(requests).toEqual([`GET ${observationPath}`])
+        throw new Error(`Live compaction requires an eligible resident 27B on ${instance}`)
       }
 
       await ctx.plugin(LlmPiAi, {
@@ -1505,8 +1521,8 @@ it.skipIf(process.env['DSH_KINF_RESIDENT_LIVE'] !== 'already-loaded-27b')(
           [residentProvider]: {
             api: 'openai-completions', baseURL: baseUrl,
             models: [{
-              id: alias, requestModel: route.logicalModel, contextWindow: 16_380,
-              maxTokens: 2_048, input: ['text'], residentTransport: true,
+              id: alias, requestModel: route.logicalModel, contextWindow: budget.contextTokens,
+              maxTokens: budget.maxOutputTokens, input: ['text'], residentTransport: true,
             }],
           },
         },
@@ -1544,7 +1560,7 @@ it.skipIf(process.env['DSH_KINF_RESIDENT_LIVE'] !== 'already-loaded-27b')(
     }, {
       summarizationProvider: undefined, summarizationModel: undefined, summarizationMode: 'resident-preferred',
       residentGatewayId: gatewayId, residentProvider, residentPinnedNodeId: route.nodeId,
-      residentPreferredVariantIds: [local27b.variant], residentObservationRoutes: [route],
+      residentPreferredVariantIds: [variant], residentObservationRoutes: [route],
     })
   },
   60_000,
