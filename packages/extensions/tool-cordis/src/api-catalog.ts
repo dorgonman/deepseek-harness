@@ -4342,6 +4342,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'tools', description: 'tool schemas to price without mutation.' }],
         returns: 'tool-schema tokens under the fixed service heuristic.',
       },
+      {
+        signature: 'estimateRequest( messages: readonly RequestMessage[], tools: readonly ToolSchema[] | undefined, pricing?: LlmImageRequestPricing, ): number',
+        description: 'Estimate input tokens for the projected request sent to the adapter.',
+        parameters: [{ name: 'messages', description: 'messages with files and text-only image substitutions already projected.' }, { name: 'tools', description: 'tool declarations sent with the request.' }, { name: 'pricing', description: 'image pricing from the prepared route, when declared.' }],
+        returns: 'estimated input tokens with declared visual charges where available.',
+      },
     ],
   },
   {
@@ -5119,9 +5125,9 @@ export const EVENT_API: readonly EventApiEntry[] = [
   {
     name: 'agent/request-envelope',
     mode: 'serial',
-    signature: '\'agent/request-envelope\'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader view: () => Session contextWindow?: number completionMaxTokens?: number completionSource: \'explicit\' | \'adapter-default\' | \'transport-fallback\' | \'unknown\' phase: \'preview\' | \'verify\' signal: AbortSignal }): Promise<void> | void',
+    signature: '\'agent/request-envelope\'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader contextWindow?: number completionMaxTokens?: number completionSource: LlmCompletionReservation[\'source\'] imagePricing?: LlmImageRequestPricing signal: AbortSignal } & ({ phase: \'preview\' view: () => Session projectRequest?: PreparedLlmCall[\'projectRequest\'] } | { phase: \'verify\' request: GenerateOptions turn: number step: number })): Promise<void> | void',
     summary: 'Price the request envelope before it is committed or dispatched.',
-    description: 'Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen request that dispatch will send, so a listener may only refuse. A refusal throws, and no request reaches the provider. The `view` accessor materializes the Session a listener prices: the preview clone is built on its first call, so a listener that never prices never pays for the clone.',
+    description: 'Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen adapter-facing request after projection. A refusal prevents provider dispatch.',
     parameters: [{ name: 'payload', description: '.signal - the current turn\'s cancellation signal.' }],
   },
   {
@@ -8082,7 +8088,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PendingAgentRequest',
-    declaration: 'export interface PendingAgentRequest {\n    readonly header: EpochHeader;\n    readonly contextWindow?: number;\n    preview(events: readonly SessionEvent[], replacement?: PendingRequestReplacement): Session;\n}',
+    declaration: 'export interface PendingAgentRequest {\n    readonly header: EpochHeader;\n    readonly contextWindow?: number;\n    readonly completionSource: LlmCompletionReservation[\'source\'];\n    readonly projectRequest?: PreparedLlmCall[\'projectRequest\'];\n    readonly imagePricing?: LlmImageRequestPricing;\n    preview(events: readonly SessionEvent[], replacement?: PendingRequestReplacement): Session;\n}',
   },
   {
     name: 'PendingModule',
@@ -8230,7 +8236,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PreparedLlmCall',
-    declaration: 'export interface PreparedLlmCall {\n    readonly config: LlmCallConfig;\n    readonly completion: LlmCompletionReservation;\n    readonly retryPolicy: ResolvedRetryPolicy;\n    readonly context?: LlmModelContext;\n    readonly inputModalities?: readonly ModelModality[];\n    readonly systemPromptUpdate?: SystemPromptUpdate;\n    readonly toolUpdate?: ToolUpdate;\n    readonly adapterDefaults: LlmCallConfigAdapterDefaults;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+    declaration: 'export interface PreparedLlmCall {\n    readonly config: LlmCallConfig;\n    readonly completion: LlmCompletionReservation;\n    readonly retryPolicy: ResolvedRetryPolicy;\n    readonly context?: LlmModelContext;\n    readonly inputModalities?: readonly ModelModality[];\n    readonly imagePricing?: LlmImageRequestPricing;\n    projectRequest(messages: readonly RequestMessage[], tools: readonly ToolSchema[] | undefined, toolHistory?: ToolHistory): ProjectedToolUpdates;\n    readonly systemPromptUpdate?: SystemPromptUpdate;\n    readonly toolUpdate?: ToolUpdate;\n    readonly adapterDefaults: LlmCallConfigAdapterDefaults;\n    stream(options: GenerateOptions, beforeDispatch?: RequestDispatchGate): AsyncIterable<StreamChunk>;\n}',
   },
   {
     name: 'PreparedReferencedMessage',
@@ -8303,6 +8309,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ProfileReconciliation',
     declaration: 'export interface ProfileReconciliation {\n    warnings: string[];\n    pending: PendingModule[];\n    restartReason?: \'module-comparison\' | \'package-moved\';\n}',
+  },
+  {
+    name: 'ProjectedToolUpdates',
+    declaration: 'export interface ProjectedToolUpdates {\n    readonly messages: readonly RequestMessage[];\n    readonly tools: readonly ToolSchema[] | undefined;\n}',
   },
   {
     name: 'ProjectionChangeListener',
@@ -8994,7 +9004,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionEventMap',
-    declaration: 'export interface SessionEventMap {\n    \'turn/start\': {\n        turn: number;\n    };\n    \'turn/end\': {\n        turn: number;\n        reason: TurnEndReason;\n    };\n    \'step/start\': {\n        turn: number;\n        step: number;\n    };\n    \'step/end\': {\n        turn: number;\n        step: number;\n    };\n    \'user/message\': UserMessage;\n    \'developer/message\': {\n        turn: number;\n        step: number;\n        message: DeveloperMessage;\n        headerSeq?: SessionSeq;\n    };\n    \'system/message\': {\n        turn: number;\n        step: number;\n        message: SystemMessage;\n    };\n    \'assistant/message\': {\n        turn: number;\n        step: number;\n        message: AssistantMessage;\n        stream: AssistantStreamRecord[];\n        usage?: TokenUsage;\n        interrupted?: true;\n    };\n    \'assistant/attempt\': {\n        turn: number;\n        step: number;\n        stream: AssistantStreamRecord[];\n    };\n    \'tool/call\': {\n        turn: number;\n        step: number;\n        callId: ToolCallId;\n        name: string;\n        arguments: string;\n    };\n    \'tool/result\': {\n        turn: number;\n        step: number;\n        message: ToolResultMessage;\n        error?: {\n            name: string;\n            code: string;\n            reason?: string;\n        };\n        meta?: JsonValue;\n    };\n    \'request/header\': {\n        header: EpochHeader;\n        reason: RequestHeaderReason;\n        startsSeries?: true;\n    };\n    \'request/context\': RequestContext;\n    \'session/end-seed\': {\n   /* …truncated — full shape in source */',
+    declaration: 'export interface SessionEventMap {\n    \'turn/start\': {\n        turn: number;\n    };\n    \'turn/end\': {\n        turn: number;\n        reason: TurnEndReason;\n    };\n    \'step/start\': {\n        turn: number;\n        step: number;\n    };\n    \'step/end\': {\n        turn: number;\n        step: number;\n    };\n    \'user/message\': UserMessage;\n    \'developer/message\': {\n        turn: number;\n        step: number;\n        message: DeveloperMessage;\n        headerSeq?: SessionSeq;\n    };\n    \'system/message\': {\n        turn: number;\n        step: number;\n        message: SystemMessage;\n    };\n    \'assistant/message\': {\n        turn: number;\n        step: number;\n        message: AssistantMessage;\n        stream: AssistantStreamRecord[];\n        usage?: TokenUsage;\n        interrupted?: true;\n    };\n    \'assistant/attempt\': {\n        turn: number;\n        step: number;\n        stream: AssistantStreamRecord[];\n    };\n    \'tool/call\': {\n        turn: number;\n        step: number;\n        callId: ToolCallId;\n        name: string;\n        arguments: string;\n    };\n    \'tool/result\': {\n        turn: number;\n        step: number;\n        message: ToolResultMessage;\n        error?: {\n            name: string;\n            code: string;\n            reason?: string;\n        };\n        meta?: JsonValue;\n    };\n    \'request/header\': {\n        header: EpochHeader;\n        reason: RequestHeaderReason;\n        startsSeries?: true;\n    };\n    \'request/context\': RequestContext;\n    \'request/admission\': {\n  /* …truncated — full shape in source */',
   },
   {
     name: 'SessionEventMetadataFilter',

@@ -921,6 +921,18 @@ interface PreparedLlmCall {
   readonly context?: LlmModelContext
   /** Exact model modalities captured with the adapter dispatch generation. */
   readonly inputModalities?: readonly ModelModality[]
+  /** Image pricing from the registration that will dispatch this call. */
+  readonly imagePricing?: LlmImageRequestPricing
+  /**
+   * Apply deterministic file, image and tool projection for a pending preview.
+   * @param messages - the pending message surface.
+   * @param tools - declarations active at this request.
+   * @param toolHistory - the preview Session's folded declarations and updates.
+   * @returns the base adapter projection before request-time relevance.
+   */
+  projectRequest(
+    messages: readonly RequestMessage[], tools: readonly ToolSchema[] | undefined, toolHistory?: ToolHistory,
+  ): ProjectedToolUpdates
   /** Exact model system prompt update mode captured with the adapter dispatch generation. */
   readonly systemPromptUpdate?: SystemPromptUpdate
   /** Exact model tool update mode captured with the adapter dispatch generation. */
@@ -932,9 +944,10 @@ interface PreparedLlmCall {
    * preparation. The request's call-config fields must match {@link config};
    * reuse or mismatch fails with `INVALID_PREPARED_CALL`.
    * @param options - fully assembled request carrying the prepared config.
+   * @param beforeDispatch - optional final gate on the frozen adapter request, returning a synchronous freshness check.
    * @returns the chunk stream, including the `llm/stream` waterfall.
    */
-  stream(options: GenerateOptions): AsyncIterable<StreamChunk>
+  stream(options: GenerateOptions, beforeDispatch?: RequestDispatchGate): AsyncIterable<StreamChunk>
 }
 ```
 

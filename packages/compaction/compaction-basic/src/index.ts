@@ -175,10 +175,13 @@ export class BasicCompactionEngine extends CompactionEngine {
     }
 
     ctx.on('agent/pre-step', async (
-      { agent, signal },
+      { agent, signal, modelSelection },
       next,
     ): Promise<PreStepDecision> => {
-      if (!signal.aborted) {
+      const current = agent.session.requestHeader()?.config
+      const switching = current !== undefined
+        && (current.provider !== modelSelection.provider || current.model !== modelSelection.model)
+      if (!signal.aborted && (!switching || this.usesLegacySwitchCompaction())) {
         try {
           const result = await this.compactIfNeeded(agent, 'pressure', signal)
           if (result !== null) logResult(result, 'step pressure')
@@ -198,24 +201,46 @@ export class BasicCompactionEngine extends CompactionEngine {
     // Last gate: price the exact envelope — pending input, system/runtime
     // context, tools, retained history and the bound completion reservation.
     // `preview` may commit a checkpoint (the loop rebuilds and re-admits);
-    // `verify` sees the frozen request and may only refuse.
-    ctx.on('agent/request-envelope', async ({ agent, header, view, contextWindow, completionMaxTokens, completionSource, phase, signal }) => {
+    // `verify` sees the exact adapter-facing request and may only refuse.
+    ctx.on('agent/request-envelope', async (envelope) => {
+      const { agent, header, contextWindow, completionMaxTokens, completionSource, imagePricing, signal } = envelope
       if (signal.aborted || contextWindow === undefined) return
       const meter = this.ctx.tokenMeter
-      const prompt = view().deriveMessages().reduce((total, message) => total + meter.estimateMessage(message), 0)
-        + meter.estimateTools(header.tools)
+      const projected = envelope.phase === 'verify' ? envelope.request : (() => {
+        const view = envelope.view()
+        const messages = view.deriveMessages()
+        return envelope.projectRequest?.(messages, header.tools, view.toolHistory()) ?? { messages, tools: header.tools }
+      })()
+      const prompt = meter.estimateRequest(projected.messages, projected.tools, imagePricing)
       // A transport fallback is not a requested budget: the transport clamps it
       // to the room it leaves, so admission prices the effective cap rather than
       // the catalog capability (which can equal the whole window).
       const declaredReserve = completionMaxTokens ?? 0
       const reserve = completionSource === 'transport-fallback'
-        ? Math.min(declaredReserve, Math.max(0, contextWindow - prompt))
+        ? Math.min(declaredReserve, Math.max(1, contextWindow - prompt))
         : declaredReserve
       const total = prompt + reserve
-      if (total <= contextWindow) return
+      if (total <= contextWindow) {
+        if (envelope.phase === 'verify') {
+          agent.session.append('request/admission', {
+            turn: envelope.turn,
+            step: envelope.step,
+            provider: envelope.request.provider,
+            model: envelope.request.model,
+            contextWindow,
+            inputTokens: prompt,
+            completionMaxTokens: reserve,
+            completionSource,
+          })
+          // In-memory Sessions still expose the receipt as a log event.
+          // A mounted durability listener must finish before dispatch.
+          await ctx.sessions.flush(agent.session)
+        }
+        return
+      }
       const detail = `~${total} tokens (${prompt} request + ${reserve} reserved, ${completionSource}) `
         + `exceed the ${contextWindow}-token window`
-      if (phase === 'verify') {
+      if (envelope.phase === 'verify') {
         throw new LlmError(
           `compaction: request refused before dispatch; ${detail}`,
           'CONTEXT_ADMISSION_REFUSED',

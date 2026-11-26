@@ -123,9 +123,13 @@ The oldest balanced span is replaced by one summary message and the recent tail 
 
 ### Switching models
 
-Before a changed provider/model request is committed, automatic compaction measures the existing history against the destination model's capacity, output reservation, and pressure policy. When condensation is needed, it uses the previous routed model and its summary settings; an explicitly configured summary target still takes precedence. The destination request proceeds only after history falls below its threshold. Failure reports `MODEL_SWITCH_COMPACTION_FAILED` with the previous route, destination route, effective summarizer, and failure stage, and leaves the previous request header intact; completed pruning or condensation remains in the session even when a later attempt fails. The check runs when the next request is prepared, and `auto: false` disables it.
+Before a changed provider/model request is committed, Basic automatic compaction measures the existing history against the destination model's capacity, output reservation, and pressure policy. When condensation is needed, it uses the previous routed model and its summary settings; an explicitly configured summary target still takes precedence. The destination request proceeds only after history falls below its threshold. Failure reports `MODEL_SWITCH_COMPACTION_FAILED` with the previous route, destination route, effective summarizer, and failure stage, and leaves the previous request header intact; completed pruning or condensation remains in the session even when a later attempt fails. The check runs when the next request is prepared, and `auto: false` disables it.
 
 The destination must have a registered adapter, declared context capacity, and a valid pressure budget even for short history. For example, an unconfigured 65,536-token destination that reserves 32,768 output tokens uses 4,096 headroom and a 28,672-token pressure threshold. Set `modelPolicies[].headroomTokens` to override that policy for an exact route. See the [upgrade guide](../../../docs/upgrade-guide/v0.2.1-alpha.4/model-switch-compaction/guide.md) for migration.
+
+The opt-in Hybrid backend estimates the full pending request and checks it against the destination's declared context capacity and effective completion reservation. It skips automatic compaction for the switch when that request fits. If the request exceeds capacity, the destination pressure policy sizes the replacement. The transport limits a fallback completion cap to the capacity left after input.
+
+With automatic compaction enabled and a declared context window, final admission checks the frozen adapter request after attachment and tool projection. It records the estimated input, output reservation, and window in `request/admission` and flushes the log before adapter dispatch. A budget refusal or flush failure prevents dispatch. The receipt describes the local budget decision.
 
 ### On-demand condensation with /compact
 

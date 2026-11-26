@@ -409,6 +409,20 @@ export interface SessionEventMap {
    */
   'request/context': RequestContext
   /**
+   * The adapter-facing request fit the estimated input plus reserved output
+   * budget. This ignorable audit record does not imply provider acceptance.
+   */
+  'request/admission': {
+    turn: number
+    step: number
+    provider: string
+    model: string
+    contextWindow: number
+    inputTokens: number
+    completionMaxTokens: number
+    completionSource: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown'
+  }
+  /**
    * Separates inherited or restored history from later lifecycle-owned work.
    * This log-only marker need not be at {@link Session.firstLiveSeq}: a fork
    * seed can already contain its tagged marker and child-owned synthetic

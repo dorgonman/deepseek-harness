@@ -8,7 +8,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type {
-  LlmAttemptId, LlmCallConfig, LlmFailure, MessageId, ReasoningEffortId, ResolvedRetryPolicy, StreamChunk,
+  GenerateOptions, LlmAttemptId, LlmCallConfig, LlmCompletionReservation, LlmFailure, LlmImageRequestPricing,
+  MessageId, PreparedLlmCall, ReasoningEffortId, ResolvedRetryPolicy, StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { AgentCancelCause, EpochHeader, Session, SessionEvent, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
@@ -161,6 +162,11 @@ export interface PendingRequestReplacement {
 export interface PendingAgentRequest {
   readonly header: EpochHeader
   readonly contextWindow?: number
+  readonly completionSource: LlmCompletionReservation['source']
+  /** Synchronous projection bound to the prepared destination. */
+  readonly projectRequest?: PreparedLlmCall['projectRequest']
+  /** Visual token pricing bound to the prepared destination. */
+  readonly imagePricing?: LlmImageRequestPricing
   /**
    * Project the pending request using an exact Session observation and optional
    * replacement. The loop retains this admission plan for the live request.
@@ -399,31 +405,41 @@ declare module '@deepseek-ai/cordis' {
      * Price the request envelope before it is committed or dispatched. The
      * `preview` phase runs before the step commits its admission, so a listener
      * may commit a checkpoint (the loop then rebuilds the preview and re-admits);
-     * the `verify` phase runs on the frozen request that dispatch will send, so
-     * a listener may only refuse. A refusal throws, and no request reaches the
-     * provider. The `view` accessor materializes the Session a listener prices:
-     * the preview clone is built on its first call, so a listener that never
-     * prices never pays for the clone.
+     * the `verify` phase runs on the frozen adapter-facing request after
+     * projection. A refusal prevents provider dispatch.
      * @param payload.agent - the agent whose request is being admitted.
      * @param payload.header - the resolved envelope logged for this attempt.
-     * @param payload.view - the Session whose derived messages are priced, materialized on first call.
      * @param payload.contextWindow - the destination model's window when known.
      * @param payload.completionMaxTokens - the output reservation bound to this attempt, when any.
      * @param payload.completionSource - which layer supplied that reservation.
+     * @param payload.imagePricing - image pricing bound to the adapter registration.
      * @param payload.phase - `preview` may compact; `verify` may only refuse.
+     * @param payload.view - detached preview Session, materialized on first call.
+     * @param payload.projectRequest - deterministic adapter projection available during preview.
+     * @param payload.request - the exact adapter input during verification.
+     * @param payload.turn - the verified request's owning turn.
+     * @param payload.step - the verified request's owning step.
      * @param payload.signal - the current turn's cancellation signal.
      * @mode serial
      */
     'agent/request-envelope'(this: Scoped<Agent>, payload: {
       agent: Agent
       header: EpochHeader
-      view: () => Session
       contextWindow?: number
       completionMaxTokens?: number
-      completionSource: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown'
-      phase: 'preview' | 'verify'
+      completionSource: LlmCompletionReservation['source']
+      imagePricing?: LlmImageRequestPricing
       signal: AbortSignal
-    }): Promise<void> | void
+    } & ({
+      phase: 'preview'
+      view: () => Session
+      projectRequest?: PreparedLlmCall['projectRequest']
+    } | {
+      phase: 'verify'
+      request: GenerateOptions
+      turn: number
+      step: number
+    })): Promise<void> | void
     /**
      * Price the pending host request after the destination adapter resolves
      * and before the loop admits the prompt, input, and route. A rejected

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import Group from '@deepseek-ai/cordis-plugin-group'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -18,7 +19,8 @@ import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import HybridCompactionEngine from '@deepseek-ai/dsh-compaction-basic/hybrid'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import {
-  CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, type GenerateOptions, type StreamChunk,
+  CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, textOnlyImageText,
+  type GenerateOptions, type LlmImageRequestPricing, type ModelModality, type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { deriveReplayScript } from '@deepseek-ai/dsh-llm-replay'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -308,6 +310,86 @@ it('references an oversized result while preserving its tool pair and exact orig
 })
 
 it.each([
+  ['destination pressure', 'wide', 'small'],
+  ['source pressure', 'small', 'wide'],
+  ['destination transport fallback', 'wide', 'small'],
+] as const)('switches without compacting when the request fits despite %s', async (condition, source, destination) => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Source reply.'), textResponse('Destination reply.')])
+    const summary = new WindowAdapter([textResponse('Unnecessary summary.')])
+    const fallback = condition === 'destination transport fallback'
+    if (fallback) {
+      const resolve = chat.resolveModel.bind(chat)
+      vi.spyOn(chat, 'resolveModel').mockImplementation(async (provider, model) => {
+        const info = await resolve(provider, model)
+        return model === destination
+          ? { ...info, transportMaxTokens: info.context.contextWindow }
+          : { ...info, defaultMaxTokens: 64 }
+      })
+    }
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-fitting-switch')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: wide.provider, model: source, ...fallback ? {} : { maxTokens: 64 } },
+      meta: { cwd: root },
+    })
+    await send(owned.agent, 'ORIGINAL_HISTORY '.repeat(1_100))
+    expect(ctx.tokenMeter.measure(owned.agent.session).totalTokens).toBeGreaterThan(4_096)
+
+    owned.agent.model.select({ provider: wide.provider, model: destination })
+    await send(owned.agent, 'Continue on the destination route.')
+
+    const request = chat.requests.at(-1)
+    expect(request?.model).toBe(destination)
+    if (request === undefined) throw new Error('The destination did not receive a request')
+    expect(requestText(request)).toContain('ORIGINAL_HISTORY')
+    expect(summary.requests).toHaveLength(0)
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    expect(events.some(event => event.type === 'compaction/start')).toBe(false)
+    expectCompletedTurn(events)
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.5 })
+})
+
+it('switches without compacting when the text-only destination projects the image to text', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Source reply.'), textResponse('Destination reply.')])
+    const summary = new WindowAdapter([textResponse('Unnecessary summary.')])
+    const resolve = chat.resolveModel.bind(chat)
+    vi.spyOn(chat, 'resolveModel').mockImplementation(async (provider, model) => {
+      const info = await resolve(provider, model)
+      return model === 'narrow' ? { ...info, inputModalities: ['text'] } : info
+    })
+    const visualTokens = 5_000
+    vi.spyOn(chat, 'imageRequestPricing').mockImplementation((_provider, model) => model === 'narrow' ? {
+      priceImages: images => images.map(() => ({ visualTokens, text: 'Detailed image pricing.' })),
+    } : undefined)
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-fitting-text-only-switch')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    owned.agent.followup(attachmentAdmissionInput())
+    await owned.agent.whenIdle()
+    expect(chat.requests[0]?.messages.some(message => message.content.some(block => block.type === 'image'))).toBe(true)
+
+    owned.agent.model.select({ provider: wide.provider, model: 'narrow' })
+    await send(owned.agent, 'Continue on the text-only route.')
+
+    const request = chat.requests.at(-1)
+    expect(request?.model).toBe('narrow')
+    if (request === undefined) throw new Error('The destination did not receive a request')
+    expect(requestText(request)).toContain(textOnlyImageText(admissionImage))
+    expect(summary.requests).toHaveLength(0)
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    expect(events.some(event => event.type === 'compaction/start')).toBe(false)
+    expectCompletedTurn(events)
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.5 })
+})
+
+it.each([
   ['missing context', {}, 'SUMMARY_TARGET_UNVERIFIED'],
   ['invalid context', { context: { contextWindow: -1 } }, 'SUMMARY_TARGET_UNVERIFIED'],
   ['image-only input', { context: { contextWindow: 4_096 }, inputModalities: ['image'] as const }, 'SUMMARY_TARGET_NOT_CHAT'],
@@ -315,6 +397,7 @@ it.each([
 ] as const)('blocks /compact and Model Switch on prepared %s without dispatch or replacement', async (_case, metadata, code) => {
   await withContext(async (ctx, root) => {
     const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Short reply.')))
+    chat.windows.set('small', 7_168)
     const summary = new WindowAdapter([textResponse('Must not dispatch.')])
     ctx.llm.registerAdapter([wide.provider], chat)
     const summaryProvider = 'synthetic-summary'
@@ -354,6 +437,7 @@ it.each([
 it.each(['provider rejection', 'changed modality', 'changed capacity'] as const)('preserves the switch origin after second-chunk %s', async (failure) => {
   await withContext(async (ctx, root) => {
     const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Short reply.')))
+    chat.windows.set('small', 7_168)
     const summary = new WindowAdapter([textResponse('First chunk.'), [...fault]])
     if (failure !== 'provider rejection') {
       const prepare = summary.prepareCall.bind(summary)
@@ -394,9 +478,11 @@ it.each(['provider rejection', 'changed modality', 'changed capacity'] as const)
   }, { auto: true, thresholdRatio: 0.5, summarizationModel: 'narrow', maxTokens: 64 })
 })
 
-it('lands a bounded checkpoint and dispatches on the proposed destination after a switch', async () => {
+it('lands a bounded checkpoint on switch when the completion reserve exceeds the remaining window', async () => {
   await withContext(async (ctx, root) => {
     const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Short reply.')))
+    const destinationWindow = 5_300
+    chat.windows.set('small', destinationWindow)
     const summary = new WindowAdapter([textResponse('Early context.'), textResponse('Recent context.')])
     ctx.llm.registerAdapter([wide.provider], chat)
     ctx.llm.registerAdapter(['synthetic-summary'], summary)
@@ -404,15 +490,20 @@ it('lands a bounded checkpoint and dispatches on the proposed destination after 
     const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
     await send(owned.agent, 'early '.repeat(1_600))
     await send(owned.agent, 'recent '.repeat(1_600))
+    const pending = 'Continue on the smaller route.'
+    const pendingMessage = createUserMessage({ content: [{ type: 'text', text: pending }], source: { kind: 'user' } })
+    const input = ctx.tokenMeter.measure(owned.agent.session).totalTokens + ctx.tokenMeter.estimateMessage(pendingMessage)
+    expect(input).toBeLessThanOrEqual(destinationWindow)
+    expect(input + wide.maxTokens).toBeGreaterThan(destinationWindow)
     owned.agent.model.select({ provider: wide.provider, model: 'small' })
-    await send(owned.agent, 'Continue on the smaller route.')
+    await send(owned.agent, pending)
     expect(summary.requests).toHaveLength(2)
     const destination = chat.requests.at(-1)
     expect(destination?.model).toBe('small')
     if (destination === undefined) throw new Error('The destination did not receive a request')
     const requested = destination.messages.reduce((sum, message) => sum + ctx.tokenMeter.estimateMessage(message), 0)
       + ctx.tokenMeter.estimateTools(destination.tools) + (destination.maxTokens ?? 0)
-    expect(requested).toBeLessThanOrEqual(8_192)
+    expect(requested).toBeLessThanOrEqual(destinationWindow)
     expect(requestText(destination)).toContain('Early context.')
     expect(requestText(destination)).toContain('Recent context.')
     const after = (await ctx.sessionQuery.readSession(sessionId)).events
@@ -528,10 +619,19 @@ it.each(['pressure', 'overflow'] as const)('refuses further dispatch after a %s 
     const { agent } = owned
     await send(agent, 'Original context before the unconfirmed write. '.repeat(500))
     const before = (await ctx.sessionQuery.readSession(sessionId)).events
-    const flush = vi.spyOn(ctx.sessions, 'flush').mockRejectedValueOnce(new Error('synthetic journal flush failure'))
+    const persist = ctx.sessions.flush.bind(ctx.sessions)
+    let checkpointFlushRefused = false
+    const flush = vi.spyOn(ctx.sessions, 'flush').mockImplementation(async (session) => {
+      if (!checkpointFlushRefused && session.ownEvents().some(event => event.type === 'compaction/summary')) {
+        checkpointFlushRefused = true
+        throw new Error('synthetic journal flush failure')
+      }
+      return persist(session)
+    })
     try {
       await send(agent, 'Continue from the original context.')
       expect(flush).toHaveBeenCalledWith(agent.session)
+      expect(checkpointFlushRefused).toBe(true)
     } finally {
       flush.mockRestore()
     }
@@ -1396,15 +1496,15 @@ it('trims oversized tool output at admission before shadowing history', async ()
   })
 }, 60_000)
 
-it('refuses at the frozen request when the tool delta pushes it over the window', async () => {
+it('refuses at the frozen request when the file projection grows past the preview budget', async () => {
   await withContext(async (ctx, root) => {
     const chat = new WindowAdapter([textResponse('First reply.'), textResponse('Second reply.')])
     chat.windows.set('small', 4_096)
-    const summary = new WindowAdapter([textResponse('Compacted.')])
-    summary.windows.set('summary', 4_096)
     ctx.llm.registerAdapter(['synthetic-chat'], chat)
-    ctx.llm.registerAdapter(['synthetic-summary'], summary)
-    const sessionId = SessionId('hybrid-envelope-tool-delta')
+    let path = '/sandbox/notes.txt'
+    ctx.provide('attachments', { fileHostPath: () => '/host/notes.txt' } as never)
+    ctx.provide('fs', { processPathFromHostPath: () => path } as never)
+    const sessionId = SessionId('hybrid-envelope-projection-growth')
     const owned = await ctx.agents.create({
       sessionId,
       agentOptions: { provider: 'synthetic-chat', model: 'small', maxTokens: 512 },
@@ -1413,21 +1513,21 @@ it('refuses at the frozen request when the tool delta pushes it over the window'
     await send(owned.agent, 'warm the header')
     expect(chat.requests).toHaveLength(1)
 
-    // Tools registered after the committed header produce a developer delta that
-    // the preview does not price; the frozen request does carry it.
-    for (let index = 0; index < 80; index += 1) {
-      ctx.tools.register(defineContentToolFixture({
-        name: `delta_${index}_${'x'.repeat(60)}`, description: 'd', parameters: {},
-        async execute() { return [] },
-      }))
-    }
-    await send(owned.agent, 'DELTA_PENDING_INPUT')
+    const remove = ctx.on('llm/stream', (_request, next) => {
+      path = `/sandbox/${'x'.repeat(16_384)}/notes.txt`
+      return next()
+    })
+    owned.agent.followup(attachmentAdmissionInput())
+    await owned.agent.whenIdle()
+    remove()
 
     const events = (await ctx.sessionQuery.readSession(sessionId)).events
     expectAdmissionRefusal(events)
     // No follow-up provider dispatch, and the durable input is not re-queued.
     expect(chat.requests).toHaveLength(1)
     expect(events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')).toHaveLength(2)
+    expect(events.filter(event => event.type === 'request/admission')).toHaveLength(1)
+    expect(checkpoints(events)).toHaveLength(0)
     expect(owned.agent.inbox.nextStep).toHaveLength(0)
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 512,
@@ -1481,14 +1581,15 @@ it('bounds preview rebuilds when a listener keeps replacing the Surface', async 
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
 }, 60_000)
 
+class FallbackAdapter extends WindowAdapter {
+  override async resolveModel(provider: string, model: string) {
+    const info = await super.resolveModel(provider, model)
+    return { ...info, transportMaxTokens: info.context.contextWindow }
+  }
+}
+
 /** A window-sized transport fallback cap must not refuse an ordinary request. */
 it('admits a request whose transport fallback equals the whole window', async () => {
-  class FallbackAdapter extends WindowAdapter {
-    override async resolveModel(provider: string, model: string) {
-      const info = await super.resolveModel(provider, model)
-      return { ...info, transportMaxTokens: this.windows.get(model)! }
-    }
-  }
   await withContext(async (ctx, root) => {
     const chat = new FallbackAdapter([textResponse('Fallback reply.')])
     chat.windows.set('roomy', 4_096)
@@ -1507,6 +1608,31 @@ it('admits a request whose transport fallback equals the whole window', async ()
   }, { auto: true, thresholdRatio: 0.95 })
 }, 60_000)
 
+it('refuses a full-window input when the positive transport fallback needs one output token', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new FallbackAdapter([textResponse('Must not dispatch.')])
+    chat.windows.set('roomy', 4_096)
+    ctx.llm.registerAdapter(['synthetic-chat'], chat)
+    const sessionId = SessionId('hybrid-envelope-no-fallback-room')
+    const owned = await ctx.agents.create({
+      sessionId,
+      agentOptions: { provider: 'synthetic-chat', model: 'roomy' },
+      meta: { cwd: root },
+    })
+    const estimate = vi.spyOn(ctx.tokenMeter, 'estimateRequest').mockReturnValue(4_096)
+    try {
+      await send(owned.agent, 'FULL_WINDOW_INPUT')
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      expectAdmissionRefusal(events)
+      expect(chat.requests).toHaveLength(0)
+      expect(events.find(event => event.type === 'request/admission')).toBeUndefined()
+    } finally {
+      estimate.mockRestore()
+      await owned.dispose()
+    }
+  }, { auto: true, thresholdRatio: 0.95 })
+}, 60_000)
+
 /** One attempt prices through one materialized preview, however many listeners read it. */
 it('shares one materialized preview across reads within an attempt', async () => {
   await withContext(async (ctx, root) => {
@@ -1519,10 +1645,10 @@ it('shares one materialized preview across reads within an attempt', async () =>
     })
     let previewsRead = 0
     let sharedAcrossReads = true
-    const remove = owned.agent.ctx.on('agent/request-envelope', ({ phase, view }) => {
-      if (phase !== 'preview') return
-      const first = view()
-      sharedAcrossReads &&= view() === first
+    const remove = owned.agent.ctx.on('agent/request-envelope', (envelope) => {
+      if (envelope.phase !== 'preview') return
+      const first = envelope.view()
+      sharedAcrossReads &&= envelope.view() === first
       previewsRead += 1
     })
     await send(owned.agent, 'PREVIEW_IDENTITY_INPUT')
@@ -1533,4 +1659,231 @@ it('shares one materialized preview across reads within an attempt', async () =>
     expect(sharedAcrossReads).toBe(true)
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
+}, 60_000)
+
+const ADMISSION_IMAGE_HANDLE = 'Synthetic image handle'
+const ADMISSION_VISUAL_TOKENS = 1_200
+const admissionFile = {
+  attachmentId: AttachmentId(`sha256:${'ab'.repeat(32)}`),
+  name: 'conference-notes-and-attachments.txt',
+  bytes: 1_750_000,
+}
+const admissionImage = {
+  attachmentId: AttachmentId(`sha256:${'cd'.repeat(32)}`),
+  name: 'conference-diagram.png',
+  mediaType: 'image/png',
+  bytes: 8_000,
+  width: 800,
+  height: 600,
+} as const
+
+class AdmissionAdapter extends WindowAdapter {
+  constructor(
+    private readonly modality: 'vision' | 'text',
+    private readonly visualTokens = ADMISSION_VISUAL_TOKENS,
+  ) {
+    super([textResponse('Admission reply.')])
+  }
+
+  override async resolveModel(provider: string, model: string) {
+    const info = await super.resolveModel(provider, model)
+    const inputModalities: readonly ModelModality[] = this.modality === 'vision' ? ['text', 'image'] : ['text']
+    return { ...info, inputModalities }
+  }
+
+  override imageRequestPricing(): LlmImageRequestPricing {
+    return {
+      priceImages: images => images.map(() => ({
+        visualTokens: this.visualTokens, text: ADMISSION_IMAGE_HANDLE,
+      })),
+    }
+  }
+}
+
+function attachmentAdmissionInput() {
+  return createUserMessage({
+    content: [
+      { type: 'text', text: 'Review the attached notes and diagram.' },
+      { type: 'file', attachment: admissionFile },
+      { type: 'image', attachment: admissionImage },
+    ],
+    source: { kind: 'user' },
+  })
+}
+
+it.each(['vision', 'text'] as const)(
+  'prices the exact projected %s adapter request and flushes its receipt before dispatch',
+  async (modality) => {
+    await withContext(async (ctx, root) => {
+      const sessionId = SessionId(`hybrid-envelope-projected-${modality}`)
+      const reader = new Context()
+      try {
+        await reader.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'zstd' })
+        let durableAtDispatch: readonly SessionEvent[] = []
+        const chat = new class extends AdmissionAdapter {
+          override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+            const handle = await reader.sessionPersistence.open(sessionId, 'read')
+            try {
+              durableAtDispatch = (await handle.read()).events
+            } finally {
+              await handle.close()
+            }
+            yield* super.stream(options)
+          }
+        }(modality)
+        ctx.llm.registerAdapter([wide.provider], chat)
+        const owned = await ctx.agents.create({ sessionId, agentOptions: { ...wide, model: 'narrow' }, meta: { cwd: root } })
+        const checked: GenerateOptions[] = []
+        const remove = owned.agent.ctx.on('agent/request-envelope', (envelope) => {
+          if (envelope.phase === 'verify') checked.push(envelope.request)
+        })
+
+        owned.agent.followup(attachmentAdmissionInput())
+        await owned.agent.whenIdle()
+        remove()
+        const { events } = await ctx.sessionQuery.readSession(sessionId)
+        expectCompletedTurn(events)
+        expect(checked).toHaveLength(1)
+        expect(chat.requests).toHaveLength(1)
+        const [dispatched] = chat.requests
+        if (dispatched === undefined) throw new Error('expected one adapter request')
+        expect(checked[0]).toBe(dispatched)
+        expect(Object.isFrozen(dispatched)).toBe(true)
+
+        const imageProjection = modality === 'vision'
+          ? { type: 'image', attachment: admissionImage }
+          : { type: 'text', text: textOnlyImageText(admissionImage) }
+        expect(dispatched.messages.findLast(message => message.role === 'user')?.content).toEqual([
+          { type: 'text', text: 'Review the attached notes and diagram.' },
+          { type: 'text', text: ctx.llm.fileRequestText(admissionFile) },
+          imageProjection,
+        ])
+
+        const inputTokens = dispatched.messages.reduce((sum, message) => {
+          if (modality === 'text') return sum + ctx.tokenMeter.estimateMessage(message)
+          const content = message.content.map(block => block.type === 'image'
+            ? { type: 'text' as const, text: ADMISSION_IMAGE_HANDLE }
+            : block)
+          const visual = message.content.filter(block => block.type === 'image').length * ADMISSION_VISUAL_TOKENS
+          return sum + ctx.tokenMeter.estimateMessage({ ...message, content }) + visual
+        }, ctx.tokenMeter.estimateTools(dispatched.tools))
+
+        const receipt = durableAtDispatch.findLast(event => event.type === 'request/admission')
+        expect(receipt).toMatchObject({
+          type: 'request/admission',
+          ignorable: true,
+          data: {
+            turn: 1, step: 1, provider: wide.provider, model: 'narrow', contextWindow: 4_096,
+            inputTokens, completionMaxTokens: 64, completionSource: 'explicit',
+          },
+        })
+        expect(events.findLast(event => event.type === 'request/admission')).toEqual(receipt)
+        await owned.dispose()
+      } finally {
+        await reader.fiber.dispose()
+      }
+    }, { auto: true, thresholdRatio: 0.95 })
+  }, 60_000,
+)
+
+it('refuses a vision input whose projected image alone exceeds the destination window', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new AdmissionAdapter('vision', 4_096)
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const sessionId = SessionId('hybrid-envelope-visual-overflow')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: { ...wide, model: 'narrow' }, meta: { cwd: root } })
+    owned.agent.followup(attachmentAdmissionInput())
+    await owned.agent.whenIdle()
+
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    expectAdmissionRefusal(events)
+    expect(chat.requests).toHaveLength(0)
+    expect(events.find(event => event.type === 'request/admission')).toBeUndefined()
+    await owned.dispose()
+  }, { auto: true, thresholdRatio: 0.95 })
+}, 60_000)
+
+it('withholds the adapter request when the accepted admission receipt cannot flush', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new AdmissionAdapter('text')
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const sessionId = SessionId('hybrid-envelope-receipt-flush-failure')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: { ...wide, model: 'narrow' }, meta: { cwd: root } })
+    const flush = ctx.sessions.flush.bind(ctx.sessions)
+    let receiptFlushRefused = false
+    let providerErrors = 0
+    const remove = owned.agent.ctx.on('agent/request-error', (_event, next) => {
+      providerErrors += 1
+      return next()
+    })
+    const spy = vi.spyOn(ctx.sessions, 'flush').mockImplementation(async (session) => {
+      if (!receiptFlushRefused && session.ownEvents().some(event => event.type === 'request/admission')) {
+        receiptFlushRefused = true
+        throw new Error('synthetic admission receipt flush failure')
+      }
+      return flush(session)
+    })
+    try {
+      await send(owned.agent, 'Continue with the admitted request.')
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      expect(receiptFlushRefused).toBe(true)
+      const reason = events.findLast(event => event.type === 'turn/end')?.data.reason
+      expect(reason?.kind).toBe('error')
+      expect(reason?.kind === 'error' ? reason.error.message : undefined)
+        .toContain('synthetic admission receipt flush failure')
+      expect(chat.requests).toHaveLength(0)
+      expect(providerErrors).toBe(0)
+    } finally {
+      remove()
+      spy.mockRestore()
+      await owned.dispose()
+    }
+  }, { auto: true, thresholdRatio: 0.95 })
+}, 60_000)
+
+it('refuses a checked request after its Session surface changes during the receipt flush', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new AdmissionAdapter('text')
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const sessionId = SessionId('hybrid-envelope-receipt-stale')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: { ...wide, model: 'narrow' }, meta: { cwd: root } })
+    const pending = createUserMessage({
+      content: [{ type: 'text', text: 'Continue once.' }], source: { kind: 'user' },
+    })
+    const concurrent = createUserMessage({
+      content: [{ type: 'text', text: 'Concurrent surface change.' }], source: { kind: 'user' },
+    })
+    const flush = ctx.sessions.flush.bind(ctx.sessions)
+    let changeInjected = false
+    let providerErrors = 0
+    const remove = owned.agent.ctx.on('agent/request-error', (_event, next) => {
+      providerErrors += 1
+      return next()
+    })
+    const spy = vi.spyOn(ctx.sessions, 'flush').mockImplementation(async (session) => {
+      if (!changeInjected && session.ownEvents().some(event => event.type === 'request/admission')) {
+        changeInjected = true
+        await Promise.resolve()
+        session.append('user/message', concurrent, { surfaceOp: 'append' })
+      }
+      return flush(session)
+    })
+    try {
+      owned.agent.followup(pending)
+      await owned.agent.whenIdle()
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      expect(changeInjected).toBe(true)
+      expectAdmissionRefusal(events)
+      expect(chat.requests).toHaveLength(0)
+      expect(providerErrors).toBe(0)
+      const inputIds = events.flatMap(event => event.type === 'user/message' ? [event.data.id] : [])
+      expect(inputIds.filter(id => id === pending.id)).toHaveLength(1)
+      expect(inputIds).toContain(concurrent.id)
+      expect(owned.agent.inbox.nextStep).toHaveLength(0)
+    } finally {
+      remove()
+      spy.mockRestore()
+      await owned.dispose()
+    }
+  }, { auto: true, thresholdRatio: 0.95 })
 }, 60_000)

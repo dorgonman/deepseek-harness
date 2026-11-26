@@ -539,7 +539,10 @@ function snapshotAppend(
 /** Construct and validate one live event from detached inputs. */
 function createAppendEvent(snapshot: ReturnType<typeof snapshotAppend>, seq: SessionSeq): SessionEvent {
   const { type, data, surface } = snapshot
-  const event = deepFreeze({ type, seq, time: Date.now(), data, ...surface } as SessionEvent)
+  const event = deepFreeze({
+    type, seq, time: Date.now(), data, ...surface,
+    ...type === 'request/admission' ? { ignorable: true } : {},
+  } as SessionEvent)
   validateSessionEventData(event, `session event "${type}" at seq ${seq}`)
   return event
 }

@@ -52,6 +52,7 @@ The [format references](persistence-changes/historical-formats/README.md) cover 
 | `event:model/selection` | event | `35203ba7ad5ef6f97d556b85df20ae98f04f09c65748cecdf8eefdb8b6405ffc` | [`{ type: "model/selection" }`](#persistence-type-sha256-35203ba7ad5ef6f97d556b85df20ae98f04f09c65748cecdf8eefdb8b6405ffc) |
 | `event:permission/preset` | event | `5c45bf4c544a7211dcd8ba6ba7e5f1bc39b49e7a9df9d5cbdc8e87c22771b37b` | [`{ type: "permission/preset" }`](#persistence-type-sha256-5c45bf4c544a7211dcd8ba6ba7e5f1bc39b49e7a9df9d5cbdc8e87c22771b37b) |
 | `event:plan/mode` | event | `a7cf43ce7c2a4c038feed1885cd7a00d5c6ee2d90a7e0d56b46f78a3e1ca327f` | [`{ type: "plan/mode" }`](#persistence-type-sha256-a7cf43ce7c2a4c038feed1885cd7a00d5c6ee2d90a7e0d56b46f78a3e1ca327f) |
+| `event:request/admission` | event | `5c383e739520794452f88610f9cf2e046f080c310a16b22118cbcd667fbf5e07` | [`{ type: "request/admission" }`](#persistence-type-sha256-5c383e739520794452f88610f9cf2e046f080c310a16b22118cbcd667fbf5e07) |
 | `event:request/context` | event | `37cbc9cf06d494cfe5c67f078af1605eacb8e4c2c853e9e26455b73de0ee7ccf` | [`{ type: "request/context" }`](#persistence-type-sha256-37cbc9cf06d494cfe5c67f078af1605eacb8e4c2c853e9e26455b73de0ee7ccf) |
 | `event:request/header` | event | `4208123b50df5006b181481ab45fcf1cde807b88d3fd4d340090bc2e202fac41` | [`{ type: "request/header" }`](#persistence-type-sha256-4208123b50df5006b181481ab45fcf1cde807b88d3fd4d340090bc2e202fac41) |
 | `event:sandbox/mode` | event | `516da4cdd6d2f1e5ce488e648578ca51f40e458f707b803e5b24de870e799415` | [`{ type: "sandbox/mode" }`](#persistence-type-sha256-516da4cdd6d2f1e5ce488e648578ca51f40e458f707b803e5b24de870e799415) |
@@ -162,7 +163,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }[T]
 ```
 
-Sources: [`packages/core/session/src/types.ts:439`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:447`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:470`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:506`](../packages/core/session/src/types.ts)
+Sources: [`packages/core/session/src/types.ts:453`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:461`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:484`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:520`](../packages/core/session/src/types.ts)
 
 ## Events
 
@@ -776,6 +777,29 @@ Source: [`packages/plan/plan-mode/src/index.ts:53`](../packages/plan/plan-mode/s
 
 ### `request/*`
 
+<a id="requestadmission--log-only"></a>
+
+#### `request/admission` — log-only
+
+```ts persistence-catalog
+/**
+ * The adapter-facing request fit the estimated input plus reserved output
+ * budget. This ignorable audit record does not imply provider acceptance.
+ */
+'request/admission': {
+  turn: number
+  step: number
+  provider: string
+  model: string
+  contextWindow: number
+  inputTokens: number
+  completionMaxTokens: number
+  completionSource: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown'
+}
+```
+
+Source: [`packages/core/session/src/types.ts:415`](../packages/core/session/src/types.ts)
+
 <a id="requestcontext--log-only"></a>
 
 #### `request/context` — log-only
@@ -886,7 +910,7 @@ Source: [`packages/schedule/schedule/src/types.ts:625`](../packages/schedule/sch
 'session/end-seed': { inherited?: true }
 ```
 
-Source: [`packages/core/session/src/types.ts:435`](../packages/core/session/src/types.ts)
+Source: [`packages/core/session/src/types.ts:449`](../packages/core/session/src/types.ts)
 
 <a id="sessiontitle--log-only"></a>
 
@@ -1413,6 +1437,14 @@ SHA-256: `c8e6f48878cc2a2f0dc59682280d81f407943fb503f32c64bf9ff3d9393c3eff`
 
 `"active"`
 
+<a id="persistence-type-sha256-ca487e9a45ec67fca30ce54b4e235187cb95631c626240106531494b49a1dd07"></a>
+
+### `"adapter-default"`
+
+SHA-256: `ca487e9a45ec67fca30ce54b4e235187cb95631c626240106531494b49a1dd07`
+
+`"adapter-default"`
+
 <a id="persistence-type-sha256-5b232a9b9bfcc0fc6794dab7865bcf203a65785c5de5aa647a51228bff628413"></a>
 
 ### `"after"`
@@ -1916,6 +1948,14 @@ SHA-256: `a2be0f0cb59f0d4a06557d45847d1938aced238baa77a6da416e590b8b958553`
 SHA-256: `e42b0f40b5d0b628c6e1c44a8fb9eda0780037a81959e1b93d2dfb47b46b0e87`
 
 `"every"`
+
+<a id="persistence-type-sha256-22be2363644506f0a26f26e4b36625813678b08d95bd305244100d17753ed163"></a>
+
+### `"explicit"`
+
+SHA-256: `22be2363644506f0a26f26e4b36625813678b08d95bd305244100d17753ed163`
+
+`"explicit"`
 
 <a id="persistence-type-sha256-fc351843b8ecbd05d739c4ca4fcd4bc7cfad6c0beacbbd48389959bb1bf06cf3"></a>
 
@@ -2555,6 +2595,14 @@ SHA-256: `f6cb462f808309e315fea634f1ed86268b8346bbcee6774d9097ca6eed7ac1f8`
 
 `"replace"`
 
+<a id="persistence-type-sha256-b6005d56125bdf3bab40afd077e0438e3d7e699cc5d9048bb095d4cb5e146a71"></a>
+
+### `"request/admission"`
+
+SHA-256: `b6005d56125bdf3bab40afd077e0438e3d7e699cc5d9048bb095d4cb5e146a71`
+
+`"request/admission"`
+
 <a id="persistence-type-sha256-70b082fe78991edf13cf66e1b4d06cd2dcff9cacfd76f8cfb996bfb61939e7b2"></a>
 
 ### `"request/context"`
@@ -3146,6 +3194,14 @@ SHA-256: `2aed07493b1c65b6d00de5586da1e743cf501684b9ad43a1765fb4007d4ea456`
 SHA-256: `570e85022434613394418ad33e77e9f1f7a05699b33d0b62eae0677a638c3833`
 
 `"tool/result"`
+
+<a id="persistence-type-sha256-9b1d83d529bd1ef0044ff377da7e5be460bc55837e0a9393c1a0046d6761d08c"></a>
+
+### `"transport-fallback"`
+
+SHA-256: `9b1d83d529bd1ef0044ff377da7e5be460bc55837e0a9393c1a0046d6761d08c`
+
+`"transport-fallback"`
 
 <a id="persistence-type-sha256-4312134fc6f9cad507c31390bd3d147535492dd77621ec517c5e85f853d53a03"></a>
 
@@ -5405,7 +5461,7 @@ Sources: [`packages/subagent/subagent/src/continuation-messages.ts:29`](../packa
 
 SHA-256: `335e242de1fcc17b6ca920fc420d71bec2d76e53e37955c00948b65ab77f05c5`
 
-Sources: [`packages/core/session/src/types.ts:470`](../packages/core/session/src/types.ts)
+Sources: [`packages/core/session/src/types.ts:484`](../packages/core/session/src/types.ts)
 
 One of:
 
@@ -6290,6 +6346,19 @@ One of:
 - `"in_progress"`
 - `"pending"`
 
+<a id="persistence-type-sha256-dbd5b16b7dfdd4189eda5b5c8c51189d84cbb991508305204b5b8ad4e1623fea"></a>
+
+### `union (4 variants)`
+
+SHA-256: `dbd5b16b7dfdd4189eda5b5c8c51189d84cbb991508305204b5b8ad4e1623fea`
+
+One of:
+
+- `"adapter-default"`
+- `"explicit"`
+- `"transport-fallback"`
+- `"unknown"`
+
 <a id="persistence-type-sha256-866f7b2dbdc5b421eab3e629312d1c839b75c259633b4b43b50d23bac44d92a0"></a>
 
 ### `union (5 variants)`
@@ -6719,6 +6788,25 @@ Sources: [`packages/compaction/compaction/src/types.ts:109`](../packages/compact
 | `sourceCommandId` | optional | `string` |
 | `turn` | required | [`OptionalSessionSeq`](#persistence-type-sha256-3bd652ebfa8726b3ce3937a4f1bd2759e02f86b3a08a20f9e41a8513656fbc5f) |
 
+<a id="persistence-type-sha256-95735d7081fa0770964089b5cc2193fe6ea3a3087fb9077d361ebeed7751ae3e"></a>
+
+### `{ completionMaxTokens, completionSource, contextWindow, inputTokens, … }`
+
+SHA-256: `95735d7081fa0770964089b5cc2193fe6ea3a3087fb9077d361ebeed7751ae3e`
+
+Sources: [`packages/core/session/src/types.ts:415`](../packages/core/session/src/types.ts)
+
+| Property | Presence | Type |
+|---|---|---|
+| `completionMaxTokens` | required | `number` |
+| `completionSource` | required | [`union (4 variants)`](#persistence-type-sha256-dbd5b16b7dfdd4189eda5b5c8c51189d84cbb991508305204b5b8ad4e1623fea) |
+| `contextWindow` | required | `number` |
+| `inputTokens` | required | `number` |
+| `model` | required | `string` |
+| `provider` | required | `string` |
+| `step` | required | `number` |
+| `turn` | required | `number` |
+
 <a id="persistence-type-sha256-da60ed58a8fa23d7aa4920ab5c1f4e3d28109cb0797ef9e5c8b125721b847582"></a>
 
 ### `{ cwd }`
@@ -6886,7 +6974,7 @@ Sources: [`packages/compaction/compaction/src/types.ts:123`](../packages/compact
 
 SHA-256: `bcf0caf62d964b2fcf5404bd5c909cfa9a21c3f3c96e6b7e36d9e33565223825`
 
-Sources: [`packages/core/session/src/types.ts:472`](../packages/core/session/src/types.ts)
+Sources: [`packages/core/session/src/types.ts:486`](../packages/core/session/src/types.ts)
 
 | Property | Presence | Type |
 |---|---|---|
@@ -7073,7 +7161,7 @@ SHA-256: `e3e77b26f0148755a505f5b8ea843a3be117827d4703bb5754d9dc8ddbef521f`
 
 SHA-256: `17d1afb770d9941936130996da00dc86782cfef731d8d6526162c301256a4ac3`
 
-Sources: [`packages/core/session/src/types.ts:435`](../packages/core/session/src/types.ts)
+Sources: [`packages/core/session/src/types.ts:449`](../packages/core/session/src/types.ts)
 
 | Property | Presence | Type |
 |---|---|---|
@@ -9367,6 +9455,22 @@ Sources: [`packages/llm/llm/src/types.ts:516`](../packages/llm/llm/src/types.ts)
 | `index` | required | `number` |
 | `text` | required | `string` |
 | `type` | required | `"reasoning-delta"` |
+
+<a id="persistence-type-sha256-5c383e739520794452f88610f9cf2e046f080c310a16b22118cbcd667fbf5e07"></a>
+
+<a id="persistence-type-eventrequestadmission"></a>
+
+### `{ type: "request/admission" }`
+
+SHA-256: `5c383e739520794452f88610f9cf2e046f080c310a16b22118cbcd667fbf5e07`
+
+| Property | Presence | Type |
+|---|---|---|
+| `data` | required | [`{ completionMaxTokens, completionSource, contextWindow, inputTokens, … }`](#persistence-type-sha256-95735d7081fa0770964089b5cc2193fe6ea3a3087fb9077d361ebeed7751ae3e) |
+| `ignorable` | optional | `true` |
+| `seq` | required | `number` |
+| `time` | required | `number` |
+| `type` | required | `"request/admission"` |
 
 <a id="persistence-type-sha256-37cbc9cf06d494cfe5c67f078af1605eacb8e4c2c853e9e26455b73de0ee7ccf"></a>
 

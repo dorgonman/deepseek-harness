@@ -38,7 +38,7 @@ import { advanceMeasurement, measurementProjectionDefinition } from './measureme
 import type { MeasurementState } from './measurement-projection.ts'
 import { commitSurfaceTokens, planSurfaceTokens } from './surface-fold.ts'
 import type { MeterSurfaceNode } from './surface-fold.ts'
-import { priceSurface } from './route-pricing.ts'
+import { estimateRequestTokens, priceSurface } from './route-pricing.ts'
 
 export type * from './types.ts'
 
@@ -228,6 +228,21 @@ export class TokenMeter extends Service {
    */
   estimateTools(tools: readonly ToolSchema[] | undefined): number {
     return estimateToolSchemasTokens(tools)
+  }
+
+  /**
+   * Estimate input tokens for the projected request sent to the adapter.
+   * @param messages - messages with files and text-only image substitutions already projected.
+   * @param tools - tool declarations sent with the request.
+   * @param pricing - image pricing from the prepared route, when declared.
+   * @returns estimated input tokens with declared visual charges where available.
+   */
+  estimateRequest(
+    messages: readonly RequestMessage[],
+    tools: readonly ToolSchema[] | undefined,
+    pricing?: LlmImageRequestPricing,
+  ): number {
+    return estimateRequestTokens(messages, tools, pricing)
   }
 
   /** Resolve one of the two header payloads retained by the rebuildable price cache. */

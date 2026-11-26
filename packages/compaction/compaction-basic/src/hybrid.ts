@@ -10,7 +10,7 @@ import {
   type RequestMessage, type ResidentCallBinding,
 } from '@deepseek-ai/dsh-llm'
 import {
-  deriveEventMessage, foldSurface, isAppendSurfaceEvent, SessionSeq, type EpochHeader, type SessionEvent,
+  deriveEventMessage, foldSurface, isAppendSurfaceEvent, SessionSeq, type EpochHeader, type Session, type SessionEvent,
 } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-query'
 import { resolveCompactSpec, resolveSummaryMaxTokens, resolveTargetPolicy } from './config.ts'
@@ -182,21 +182,31 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     return super.compactIfNeeded(agent, trigger, signal)
   }
 
+  private estimatePendingRequest(request: PendingAgentRequest, preview: Session): number {
+    const messages = preview.deriveMessages()
+    const { tools } = request.header
+    const projected = request.projectRequest?.(messages, tools, preview.toolHistory()) ?? { messages, tools }
+    return this.ctx.tokenMeter.estimateRequest(projected.messages, projected.tools, request.imagePricing)
+  }
+
   private async compactPendingSwitch(agent: Agent, request: PendingAgentRequest, signal: AbortSignal): Promise<void> {
     const { ctx } = this
     const { session } = agent
     const from = session.requestHeader()?.config
-    const { header, contextWindow } = request
+    const { header, contextWindow, completionSource } = request
     try {
       const reserve = header.config.maxTokens
       if (contextWindow === undefined || reserve === undefined) {
         throw new Error('destination context and completion reserve must be known')
       }
-      const spec = resolveCompactSpec(resolveTargetPolicy(this.config, header.config), contextWindow, reserve)
       using observation = await ctx.sessionQuery.observeSession(session.id, { projectionMode: 'none', signal })
       if (observation.source !== 'live') throw new Error('the source Session must be live')
       const meter = ctx.tokenMeter
-      if (meter.measure(request.preview(observation.events), header).totalTokens < spec.thresholdTokens) return
+      // The transport clamps its fallback, leaving at least one output token.
+      const requiredReserve = completionSource === 'transport-fallback' ? 1 : reserve
+      const inputTokens = this.estimatePendingRequest(request, request.preview(observation.events))
+      if (inputTokens + requiredReserve <= contextWindow) return
+      const spec = resolveCompactSpec(resolveTargetPolicy(this.config, header.config), contextWindow, requiredReserve)
       if (this.config.incremental) {
         const coverage = deriveCommittedCoverage(observation.events)
         if (coverage !== undefined && !hasUnprocessedRawEvents(observation.events, coverage)) {
@@ -348,7 +358,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     const destinationCall = admission === undefined ? await ctx.llm.prepareCall(destination.config, signal) : undefined
     const destinationWindow = admission?.contextWindow ?? destinationCall?.context?.contextWindow
     const destinationHeader = destinationCall === undefined ? destination : { ...destination, config: destinationCall.config }
-    const reserve = destinationHeader.config.maxTokens
+    const reserve = admission?.completionSource === 'transport-fallback' ? 0 : destinationHeader.config.maxTokens
     if (destinationWindow === undefined || reserve === undefined) {
       throw new Error('compaction: destination context and completion reserve must be known')
     }
@@ -473,7 +483,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
           replacementSeq: SessionSeq(session.seq + 1),
           message: empty,
         })
-        pendingReserve = Math.max(0, meter.measure(preview, destinationHeader).totalTokens
+        pendingReserve = Math.max(0, this.estimatePendingRequest(admission, preview)
           - retainedTokens - meter.estimateMessage(empty))
       }
       const frameTokens = meter.estimateMessage(createUserMessage({
@@ -518,7 +528,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       ...nextCoverage === undefined ? {} : { incremental: nextCoverage },
       ...factLedger && ledger !== undefined ? { ledger } : {},
       chunkCalls,
-      validateCommit(checkpoint) {
+      validateCommit: (checkpoint) => {
         assertCurrent()
         if (incremental) {
           // The compaction lock forbids a concurrent summary, and assertCurrent
@@ -539,7 +549,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
             replacementSeq: SessionSeq(session.seq + 1),
             message: checkpoint,
           })
-          inputTokens = meter.measure(preview, destinationHeader).totalTokens
+          inputTokens = this.estimatePendingRequest(admission, preview)
         } else {
           const { nodes, totalTokens } = meter.measure(session, destinationHeader)
           const shadowed = nodes.slice(selection.startIdx, selection.endIdx + 1)
