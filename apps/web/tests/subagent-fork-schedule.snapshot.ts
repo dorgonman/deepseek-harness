@@ -30,6 +30,7 @@ it.skipIf(MODE === 'record')('replays inherited schedule tools and refusals in a
   let expected = await Promise.all(paths.map(path => readFile(path, 'utf8')))
   const scaffold = await launchWebScaffold({
     replayFixture: paths[0]!, replayChildFixtures: [paths[1]!], compareReplaySession: false,
+    workspacePathLength: 192,
   })
   try {
     const sessions: Session[] = []
