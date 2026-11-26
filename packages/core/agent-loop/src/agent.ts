@@ -541,10 +541,11 @@ export class ReactLoopAgent implements Agent {
         ? new StreamRepetition() : undefined
       let started = false
       try {
+        const context = preparedCall?.context
         const stream = preparedCall?.stream(request, {
           assertCurrent,
-          ...preparedCall.context === undefined ? {} : {
-            verify: projected => this.verifyEnvelope(header, preparedCall, projected, position, signal),
+          ...context === undefined ? {} : {
+            verify: projected => this.verifyEnvelope(header, preparedCall, projected, position, context.contextWindow, signal),
           },
         }) ?? this.loopCtx.llm.stream(request)
         signal.throwIfAborted()
@@ -878,12 +879,13 @@ export class ReactLoopAgent implements Agent {
     }
   }
 
-  /** Price the frozen request dispatch is about to send; refusal only. */
+  /** Verify the frozen request before dispatch on a prepared route with a declared context window. */
   private async verifyEnvelope(
     header: EpochHeader,
     preparedCall: PreparedLlmCall,
     request: GenerateOptions,
     position: StepPosition,
+    contextWindow: number,
     signal: AbortSignal,
   ): Promise<void> {
     await this.dispatch.serial('agent/request-envelope', {
@@ -899,7 +901,7 @@ export class ReactLoopAgent implements Agent {
         }
       },
       ...position,
-      ...preparedCall.context === undefined ? {} : { contextWindow: preparedCall.context.contextWindow },
+      contextWindow,
       ...preparedCall.imagePricing === undefined ? {} : { imagePricing: preparedCall.imagePricing },
       ...completionFields(preparedCall),
       phase: 'verify',

@@ -536,32 +536,70 @@ describe.skipIf(!isWin32 || !pwshAvailable())('windows-acl runner', () => {
     const child = join(granted, 'child')
     mkdirSync(granted)
     mkdirSync(child)
+    // This case measures inheritance. A hosted temp directory can give new
+    // children an explicit allow that Windows evaluates before inherited ACEs.
+    const reset = spawnSync('icacls', [child, '/reset'], { encoding: 'utf8' })
+    expect(reset.status, `Cannot prepare an inherited scratch DACL with icacls /reset: ${reset.stderr}`).toBe(0)
     writeFileSync(join(granted, 'file.txt'), 'x')
     writeFileSync(join(child, 'deep.txt'), 'x')
     const grant = AclWriteGrant.create(workspaceWriteSid(granted))
     grant.add(granted, true)
     try {
       const probe = `
-$ErrorActionPreference='SilentlyContinue'
+$ErrorActionPreference='Stop'
 Add-Type -Namespace P -Name F -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode, EntryPoint="CreateFileW")]
-public static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
+private static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
 [DllImport("kernel32.dll", SetLastError=true)]
-public static extern bool CloseHandle(IntPtr h);
-'@ | Out-Null
-function TryOpen([string]$label, [string]$path) {
-  $h = [P.F]::CreateFileW($path, 0x10000000, 7, [IntPtr]::Zero, 3, 0x02000000, [IntPtr]::Zero)
-  if ($h -eq [IntPtr]::new(-1)) { "$($label): DENIED" } else { [void][P.F]::CloseHandle($h); "$($label): OK" }
+private static extern bool CloseHandle(IntPtr h);
+[DllImport("kernel32.dll")]
+private static extern IntPtr GetCurrentProcess();
+[DllImport("advapi32.dll", SetLastError=true)]
+private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+[DllImport("advapi32.dll", SetLastError=true)]
+private static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAllPrivileges, IntPtr state,
+  uint bufferLength, IntPtr previousState, IntPtr returnLength);
+
+public static void DisablePrivileges() {
+  IntPtr token;
+  if (!OpenProcessToken(GetCurrentProcess(), 0x20, out token))
+    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Open probe token for TOKEN_ADJUST_PRIVILEGES");
+  try {
+    if (!AdjustTokenPrivileges(token, true, IntPtr.Zero, 0, IntPtr.Zero, IntPtr.Zero))
+      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Disable backup and restore privileges in the probe token");
+  } finally {
+    CloseHandle(token);
+  }
 }
-TryOpen 'FILE' '${join(granted, 'file.txt')}'
-TryOpen 'NESTED-FILE' '${join(child, 'deep.txt')}'
-TryOpen 'DIRECTORY' '${child}'
+
+public static string Open(string path, uint access) {
+  IntPtr handle = CreateFileW(path, access, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+  if (handle != new IntPtr(-1)) {
+    CloseHandle(handle);
+    return "OK";
+  }
+  int error = Marshal.GetLastWin32Error();
+  if (error == 5) return "DENIED";
+  throw new System.ComponentModel.Win32Exception(error, "Unexpected error opening the ACL probe path");
+}
+'@ | Out-Null
+# CreateFile needs FILE_FLAG_BACKUP_SEMANTICS for directories. Disable token
+# privileges for this subprocess so its open checks use the DACL on elevated CI too.
+[P.F]::DisablePrivileges()
+'FILE: ' + [P.F]::Open('${join(granted, 'file.txt')}', 0x10000000)
+'NESTED-FILE: ' + [P.F]::Open('${join(child, 'deep.txt')}', 0x10000000)
+'DIRECTORY-ATTRIBUTES: ' + [P.F]::Open('${child}', 0x80)
+'DIRECTORY-DELETE-CHILD: ' + [P.F]::Open('${child}', 0x40)
+'DIRECTORY: ' + [P.F]::Open('${child}', 0x10000000)
 `
       const result = spawnSync('pwsh', ['-NoLogo', '-NonInteractive', '-NoProfile', '-Command', probe], { encoding: 'utf8', timeout: 60_000 })
       expect(result.status, `stderr: ${result.stderr}`).toBe(0)
       expect(result.stdout).toContain('FILE: OK')
       expect(result.stdout).toContain('NESTED-FILE: OK')
-      expect(result.stdout).toContain('DIRECTORY: DENIED')
+      expect(result.stdout).toContain('DIRECTORY-ATTRIBUTES: OK')
+      expect(result.stdout).toContain('DIRECTORY-DELETE-CHILD: DENIED')
+      expect(result.stdout, 'The workspace grant must propagate the FILE_DELETE_CHILD deny to the scratch child directory.')
+        .toContain('DIRECTORY: DENIED')
     } finally {
       grant.dispose()
       rmSync(granted, { recursive: true, force: true })

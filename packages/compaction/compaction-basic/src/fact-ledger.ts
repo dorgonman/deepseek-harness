@@ -199,8 +199,13 @@ export function mergeFacts(existing: readonly FactRecord[], incoming: readonly F
   return merged.sort((left, right) => {
     const key = JSON.stringify([left.kind, left.key])
     const other = JSON.stringify([right.kind, right.key])
-    return key < other ? -1 : key > other ? 1 : left.factId < right.factId ? -1 : left.factId > right.factId ? 1 : 0
+    return compareText(key, other) || compareText(left.factId, right.factId)
   })
+}
+
+/** Compare exact code units so ledger ordering stays stable across locales. */
+function compareText(left: string, right: string): number {
+  return Number(left > right) - Number(left < right)
 }
 
 /**
@@ -318,9 +323,9 @@ export function composeCompactView(facts: readonly FactRecord[], options: Compac
   const candidates = facts
     .filter(fact => fact.status !== 'superseded')
     .sort((left, right) => rank(left) - rank(right)
-      || (left.kind < right.kind ? -1 : left.kind > right.kind ? 1 : 0)
-      || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0)
-      || (left.factId < right.factId ? -1 : left.factId > right.factId ? 1 : 0))
+      || compareText(left.kind, right.kind)
+      || compareText(left.key, right.key)
+      || compareText(left.factId, right.factId))
   const included: FactRecord[] = []
   const omitted: FactRecord[] = []
   let used = 0

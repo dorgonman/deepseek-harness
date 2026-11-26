@@ -278,7 +278,8 @@ function preferredIndex(input: SelectionInput, row: Candidate): number {
 function knownSize(value: Size | undefined): value is Size {
   return value?.source === 'authoritative' && comparableUnit(value.units) && token(value.group) && positive(value.value)
 }
-function minTier(rows: readonly Candidate[], value: (row: Candidate) => number): Candidate[] {
+/** Return every minimum-scoring row at its verified candidate type. */
+function minTier<Row extends Candidate>(rows: readonly Row[], value: (row: Row) => number): Row[] {
   const best = Math.min(...rows.map(value))
   return rows.filter(row => value(row) === best)
 }
@@ -396,11 +397,9 @@ export function selectResidentSummary(input: SelectionInput): SelectionResult {
   const size = tier[0]?.model.size
   // Pairwise comparisons across mixed/unknown groups can produce cycles. Only
   // use size when the entire tied tier is known and directly comparable.
-  if (knownSize(size) && tier.every(row => knownSize(row.model.size) && row.model.size.group === size.group)) {
-    tier = minTier(tier, (row) => {
-      const size = row.model.size
-      return knownSize(size) ? -size.value : 0
-    })
+  if (knownSize(size) && tier.every((row): row is Candidate & { readonly model: { readonly size: Size } } =>
+    knownSize(row.model.size) && row.model.size.group === size.group)) {
+    tier = minTier(tier, row => -row.model.size.value)
     if (tier.length === 1) return selected(first(tier), 'comparable-size')
   }
   tier = minTier(tier, row => pressure(row.queue?.pending))

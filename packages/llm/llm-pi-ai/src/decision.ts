@@ -106,6 +106,11 @@ function readout(raw: unknown, request: DecisionRequest, headers: Headers) {
   }
 }
 
+/**
+ * Convert Decision history to plain text, validating each block as its text is read.
+ * @param options - request options with system text and typed message history.
+ * @returns the ordered plain-text messages sent to KINF.
+ */
 function messages(options: GenerateOptions) {
   if ((options.tools?.length ?? 0) > 0) {
     throw new LlmError('KINF Decision requests do not support native tools.', 'UNSUPPORTED_TOOLS')
@@ -117,15 +122,15 @@ function messages(options: GenerateOptions) {
   }
   const result: { role: 'system' | 'user' | 'assistant'; content: string }[] = []
   if (options.system !== undefined) result.push({ role: 'system', content: options.system })
+  const unsupportedHistory = 'KINF Decision requests require plain text system, user, or assistant history.'
   for (const message of options.messages) {
-    if (message.role !== 'system' && message.role !== 'user' && message.role !== 'assistant'
-      || message.content.some(block => block.type !== 'text')) {
-      throw new LlmError('KINF Decision requests require plain text system, user, or assistant history.', 'UNSUPPORTED_CONTENT')
+    if (message.role !== 'system' && message.role !== 'user' && message.role !== 'assistant') {
+      throw new LlmError(unsupportedHistory, 'UNSUPPORTED_CONTENT')
     }
     result.push({
       role: message.role,
       content: message.content.map((block) => {
-        if (block.type !== 'text') throw new LlmError('KINF Decision requests require plain text history.', 'UNSUPPORTED_CONTENT')
+        if (block.type !== 'text') throw new LlmError(unsupportedHistory, 'UNSUPPORTED_CONTENT')
         return block.text
       }).join(''),
     })
