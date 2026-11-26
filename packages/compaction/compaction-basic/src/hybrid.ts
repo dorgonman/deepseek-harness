@@ -98,7 +98,14 @@ function rawGroups(
       continue
     }
     if (!isAppendSurfaceEvent(event)) throw new Error('compaction: expected an original Surface event')
-    if (coverage !== undefined && event.seq <= coverage.highWatermark) continue
+    if (coverage !== undefined && event.seq <= coverage.highWatermark) {
+      // A watermark orders revisions. Only a committed range proves that
+      // skipping a still-selected original will not lose it from the view.
+      if (!coverage.covered.some(({ start, end }) => event.seq >= start && event.seq <= end)) {
+        throw new Error(`compaction: selected RAW event ${event.seq} is outside committed coverage at watermark ${coverage.highWatermark}`)
+      }
+      continue
+    }
     leaves.add(seq)
   }
   const groups: OriginalMessage[][] = []

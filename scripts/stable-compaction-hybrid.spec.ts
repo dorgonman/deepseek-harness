@@ -7,7 +7,7 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import Group from '@deepseek-ai/cordis-plugin-group'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import AgentPreset from '@deepseek-ai/dsh-agent-preset'
@@ -19,12 +19,12 @@ import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import HybridCompactionEngine from '@deepseek-ai/dsh-compaction-basic/hybrid'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import {
-  CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, textOnlyImageText,
+  CONTEXT_WINDOW_EXCEEDED_CODE, createMessage, createToolResultMessage, createUserMessage, textOnlyImageText, ReasoningEffortId, ToolCallId,
   type GenerateOptions, type LlmImageRequestPricing, type ModelModality, type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { deriveReplayScript } from '@deepseek-ai/dsh-llm-replay'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent, type SessionSeq } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
@@ -731,6 +731,62 @@ it.each(['cancellation', 'mutation'] as const)('refuses a checkpoint after %s du
     if (condition === 'mutation') expect(after).toContainEqual(mutation)
     await owned.dispose()
   })
+})
+
+it('preserves earlier uncovered RAW when a later span already advanced the incremental watermark', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Reply.')))
+    const summary = new WindowAdapter([textResponse('Later checkpoint.'), textResponse('Would skip earlier RAW.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-incremental-uncovered-raw')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      const { session } = owned.agent
+      await send(owned.agent, 'EARLIER_UNCOVERED_RAW '.repeat(100))
+      await send(owned.agent, 'LATER_SELECTED_RAW '.repeat(100))
+      await send(owned.agent, 'NEWEST_RAW '.repeat(100))
+      const raw = session.ownEvents().filter(event => event.type === 'user/message' && event.data.source.kind === 'user')
+      const earlier = raw[0]!
+      const later = raw[1]!
+      const laterEnd = session.ownEvents().find(event => event.type === 'assistant/message' && event.data.turn === 2)!.seq
+      session.append('turn/start', { turn: 4 })
+      try {
+        await ctx.compaction.compactRegion(later.seq, laterEnd, owned.agent, signal)
+      } finally {
+        session.append('turn/end', { turn: 4, reason: { kind: 'completed' } })
+      }
+      const { events: before } = await ctx.sessionQuery.readSession(sessionId)
+      const coverage = deriveCommittedCoverage(before)
+      expect(coverage).toMatchObject({ revision: 1, highWatermark: laterEnd })
+      expect(coverage?.covered.map(range => [range.start, range.end])).toEqual([[later.seq, laterEnd]])
+      const nodes = [...session.surface.nodes]
+      expect(nodes).toContain(earlier.seq)
+      expect(summary.requests).toHaveLength(1)
+      const expected = `is outside committed coverage at watermark ${laterEnd}`
+      const resolve = vi.spyOn(summary, 'resolveModel')
+      try {
+        await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toMatchObject({ code: 'summary' })
+        expect(resolve).not.toHaveBeenCalled()
+        expect(summary.requests).toHaveLength(1)
+      } finally {
+        resolve.mockRestore()
+      }
+      const { events: after } = await ctx.sessionQuery.readSession(sessionId)
+      expect(after.slice(0, before.length)).toEqual(before)
+      expect(after.slice(before.length).map(event => event.type)).toEqual(['compaction/start', 'compaction/end'])
+      expect(after.findLast(event => event.type === 'compaction/end')?.data.error).toContain(expected)
+      expect(checkpoints(after)).toEqual(checkpoints(before))
+      expect(deriveCommittedCoverage(after)).toEqual(coverage)
+      expect(session.surface.nodes).toEqual(nodes)
+      await owned.dispose()
+      const { events: reopened } = await ctx.sessionQuery.readSession(sessionId)
+      expect(reopened).toEqual(after)
+      expect((await ctx.sessionQuery.readEvent({ sessionId, seq: earlier.seq })).target).toEqual(earlier)
+    } finally {
+      await owned.dispose()
+    }
+  }, { incremental: true })
 })
 
 it('records disjoint incremental coverage and carries the checkpoint forward', async () => {
@@ -2958,3 +3014,341 @@ it.each(['returns a checkpoint', 'rejects with non-Error data'] as const)(
     }, { auto: true, thresholdRatio: 0.95, maxTokens: 64 })
   },
 )
+
+// DSH-TSK-0021 draft regressions for Hybrid history validation.
+
+it.each([
+  ['duplicate calls', 'duplicate tool call in original history'],
+  ['a mismatched result', 'result lacks its original tool call'],
+  ['an unmatched original behind a checkpoint', 'selected history has unmatched tool calls'],
+  ['an empty original assistant message', 'an original event has no recoverable message'],
+] as const)('refuses malformed raw history carrying %s', async (kind, diagnosis) => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Warm route.')])
+    const summary = new WindowAdapter([])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-malformed-historical-originals')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'Commit the source route.')
+      const { session } = owned.agent
+      const originalCall = ToolCallId('fixture-call')
+      const mismatchedCall = ToolCallId('mismatched-call')
+      const duplicate = kind === 'duplicate calls'
+      const unmatched = kind === 'an unmatched original behind a checkpoint'
+      const empty = kind === 'an empty original assistant message'
+      session.append('turn/start', { turn: 2 })
+      session.append('step/start', { turn: 2, step: 1 })
+      const toolBlock = { type: 'tool-call', id: originalCall, name: 'fixture_read', arguments: '{}' } as const
+      const assistant = session.append('assistant/message', {
+        turn: 2, step: 1, stream: [],
+        message: createMessage({
+          role: 'assistant', source: { kind: 'model', provider: wide.provider, model: wide.model },
+          content: empty ? [] : duplicate ? [toolBlock, toolBlock] : [toolBlock],
+        }),
+      }, { surfaceOp: 'append' })
+      let last = assistant.seq
+      if (!empty) {
+        const resultIds = duplicate ? [originalCall, originalCall]
+          : [kind === 'a mismatched result' ? mismatchedCall : originalCall]
+        for (const callId of resultIds) {
+          session.append('tool/call', { turn: 2, step: 1, callId, name: toolBlock.name, arguments: toolBlock.arguments })
+          last = session.append('tool/result', {
+            turn: 2, step: 1,
+            message: createToolResultMessage({ callId, isError: false, content: [{ type: 'text', text: 'Historical result.' }] }),
+          }, { surfaceOp: 'append' }).seq
+        }
+      }
+      session.append('step/end', { turn: 2, step: 1 })
+      session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+      let start = assistant.seq
+      let end = last
+      if (unmatched) {
+        // Both visible cuts are balanced, but selecting only the first
+        // checkpoint reveals the unmatched original assistant call.
+        const replace = (seq: SessionSeq) => session.append('user/message', createUserMessage({
+          source: compactCheckpointSource(CompactionId(`inherited-${seq}`)),
+          content: [{ type: 'text', text: 'Inherited partial checkpoint.' }],
+        }), {
+          surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq },
+          sourceEventSeqs: [seq],
+        }).seq
+        start = replace(assistant.seq)
+        replace(last)
+        end = start
+      }
+      const nodes = [...session.surface.nodes]
+      session.append('turn/start', { turn: 3 })
+      try {
+        await expect(ctx.compaction.compactRegion(start, end, owned.agent, signal)).rejects.toThrow(diagnosis)
+      } finally {
+        session.append('turn/end', { turn: 3, reason: { kind: 'completed' } })
+      }
+      expect(summary.requests).toHaveLength(0)
+      expect(session.ownEvents().some(event => event.type === 'compaction/summary')).toBe(false)
+      expect(session.surface.nodes).toEqual(nodes)
+    } finally {
+      await owned.dispose()
+    }
+  })
+})
+
+it('refuses selected raw history without a committed request envelope', async () => {
+  await withContext(async (ctx, root) => {
+    const summary = new WindowAdapter([])
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-missing-committed-envelope')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      const { session } = owned.agent
+      session.append('turn/start', { turn: 1 })
+      const seed = session.append('user/message', createUserMessage({
+        source: { kind: 'user' }, content: [{ type: 'text', text: 'Raw history without a bound route.' }],
+      }), { surfaceOp: 'append' })
+      try {
+        await expect(ctx.compaction.compactRegion(seed.seq, seed.seq, owned.agent, signal))
+          .rejects.toThrow('a committed request envelope is required')
+      } finally {
+        session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      }
+      expect(summary.requests).toHaveLength(0)
+      expect(checkpoints(session.ownEvents())).toHaveLength(0)
+      expect(session.surface.nodes).toContain(seed.seq)
+    } finally {
+      await owned.dispose()
+    }
+  })
+})
+
+it.each(['window', 'completion reserve'] as const)(
+  'refuses a prepared Hybrid destination missing its %s',
+  async (missing) => {
+    await withContext(async (ctx, root) => {
+      const chat = new WindowAdapter([textResponse('Warm route.')])
+      const unknownWindow = new MockAdapter([])
+      const summary = new WindowAdapter([])
+      ctx.llm.registerAdapter([wide.provider], chat)
+      ctx.llm.registerAdapter(['unknown-window'], unknownWindow)
+      ctx.llm.registerAdapter(['synthetic-summary'], summary)
+      const sessionId = SessionId('hybrid-destination-unknown-envelope')
+      const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+      try {
+        await send(owned.agent, 'Original history before preparing the destination.')
+        const { session } = owned.agent
+        const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
+        const header = session.requestHeader()!
+        const destination = {
+          ...header,
+          config: missing === 'window' ? { ...wide, provider: 'unknown-window' }
+            : { provider: wide.provider, model: wide.model },
+        }
+        const hybrid = ctx.compaction
+        if (!(hybrid instanceof HybridCompactionEngine)) throw new Error('Expected the Hybrid compaction backend')
+        const nodes = [...session.surface.nodes]
+        session.append('turn/start', { turn: 2 })
+        try {
+          await expect(hybrid.compactRegion(original.seq, nodes.at(-1)!, owned.agent, signal, destination))
+            .rejects.toThrow('destination context and completion reserve must be known')
+        } finally {
+          session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+        }
+        expect(unknownWindow.requests).toHaveLength(0)
+        expect(summary.requests).toHaveLength(0)
+        expect(checkpoints(session.ownEvents())).toHaveLength(0)
+        expect(session.surface.nodes).toEqual(nodes)
+      } finally {
+        await owned.dispose()
+      }
+    })
+  },
+)
+
+it.each(['sizes the unprojected preview', 'reports a non-Error extension refusal'] as const)(
+  'uses the request-admission contract when the extension %s',
+  async (condition) => {
+    await withContext(async (ctx, root) => {
+      const chat = new WindowAdapter([textResponse('Warm route.')])
+      const summary = new WindowAdapter([])
+      ctx.llm.registerAdapter([wide.provider], chat)
+      ctx.llm.registerAdapter(['synthetic-summary'], summary)
+      const sessionId = SessionId('hybrid-pending-contract')
+      const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+      try {
+        await send(owned.agent, 'History for one tentative request.')
+        const { agent } = owned
+        const header = agent.session.requestHeader()!
+        const fail = condition === 'reports a non-Error extension refusal'
+        const preview = vi.fn(() => agent.session)
+        if (fail) preview.mockImplementationOnce(() => { throw 'synthetic extension refusal' })
+        const operation = agentEvents(ctx, agent).serial('agent/request-admission', {
+          request: { header, contextWindow: 4_096, completionSource: 'explicit', preview },
+          signal,
+        })
+        if (fail) {
+          await expect(operation).rejects.toMatchObject({
+            code: 'MODEL_SWITCH_COMPACTION_FAILED',
+            message: 'Cannot switch from synthetic-chat/wide to synthetic-chat/wide: synthetic extension refusal',
+          })
+        } else {
+          await expect(operation).resolves.toBeUndefined()
+        }
+        expect(preview).toHaveBeenCalledOnce()
+        expect(summary.requests).toHaveLength(0)
+        expect(checkpoints(agent.session.ownEvents())).toHaveLength(0)
+      } finally {
+        await owned.dispose()
+      }
+    }, { auto: true })
+  },
+)
+
+it('quotes the resolved file handle and records the adapter reasoning effort', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Warm route.')])
+    const effort = ReasoningEffortId('balanced')
+    const summary = new WindowAdapter([textResponse('Attachment reviewed.')], {
+      efforts: [{ id: effort, name: 'Balanced' }], defaultEffort: effort,
+    })
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-file-request-text')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    const render = vi.spyOn(ctx.llm, 'fileRequestText').mockReturnValue('fixture attachment handle')
+    try {
+      owned.agent.followup(createUserMessage({
+        source: { kind: 'user' },
+        content: [
+          { type: 'text', text: 'Inspect the attached material. '.repeat(80) },
+          { type: 'file', attachment: admissionFile },
+        ],
+      }))
+      await owned.agent.whenIdle()
+      expect(chat.requests).toHaveLength(1)
+      render.mockClear()
+      expect(await ctx.compaction.compactNow(owned.agent, signal)).not.toBeNull()
+      expect(render).toHaveBeenCalledWith(admissionFile)
+      expect(summary.requests).toHaveLength(1)
+      expect(requestText(summary.requests[0]!)).toContain('fixture attachment handle')
+      expect(summary.requests[0]!.reasoningEffort).toBe(effort)
+      const receipt = owned.agent.session.ownEvents().findLast(event => event.type === 'compaction/summary')
+      expect(receipt?.data.chunkCalls?.[0]?.reasoningEffort).toBe(effort)
+    } finally {
+      render.mockRestore()
+      await owned.dispose()
+    }
+  })
+})
+
+it('compacts to admit a switch with a transport-owned completion fallback', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new FallbackAdapter(Array.from({ length: 3 }, () => textResponse('Reply.')))
+    const summary = new WindowAdapter([textResponse('Original history summarized.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-transport-fallback-switch-compaction')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { provider: wide.provider, model: wide.model }, meta: { cwd: root },
+    })
+    try {
+      await send(owned.agent, 'First history. '.repeat(650))
+      await send(owned.agent, 'Second history. '.repeat(650))
+      const { agent } = owned
+      agent.model.select({ provider: wide.provider, model: 'narrow' })
+      await send(agent, 'Continue after switching.')
+      const events = agent.session.ownEvents()
+      expectCompletedTurn(events)
+      expect(summary.requests).toHaveLength(1)
+      expect(checkpoints(events)).toHaveLength(1)
+      expect(chat.requests.at(-1)?.model).toBe('narrow')
+      expect(events.findLast(event => event.type === 'request/admission')?.data.completionSource).toBe('transport-fallback')
+    } finally {
+      await owned.dispose()
+    }
+  }, { auto: true, thresholdRatio: 0.95 })
+})
+
+it.each([
+  ['two competing checkpoints', 'selected span has more than one checkpoint'],
+  ['a checkpoint with no summary record', 'the carried checkpoint has no summary record'],
+] as const)('preserves the existing incremental coverage on %s', async (kind, diagnosis) => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Reply.')))
+    const summary = new WindowAdapter([textResponse('First coherent checkpoint.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-incremental-invalid-carried')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      const { session } = owned.agent
+      await send(owned.agent, 'First committed coverage. '.repeat(85))
+      expect(await ctx.compaction.compactNow(owned.agent, signal)).not.toBeNull()
+      await send(owned.agent, 'This raw message belongs to a different turn.')
+      await send(owned.agent, 'A later raw turn is still available.')
+      const original = session.ownEvents().findLast(event => event.type === 'user/message'
+        && event.data.source.kind === 'user'
+        && event.data.content.some(block => block.type === 'text' && block.text.startsWith('This raw message')))!
+      const maintained = checkpoints(session.ownEvents())[0]!
+      const orphan = session.append('user/message', createUserMessage({
+        source: compactCheckpointSource(CompactionId('missing-summary')),
+        content: [{ type: 'text', text: 'Imported checkpoint with no summary.' }],
+      }), {
+        surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq },
+        sourceEventSeqs: [original.seq],
+      })
+      const initialCoverage = deriveCommittedCoverage(session.ownEvents())
+      expect(initialCoverage?.revision).toBe(1)
+      const nodes = [...session.surface.nodes]
+      const start = kind === 'two competing checkpoints' ? maintained.seq : orphan.seq
+      session.append('turn/start', { turn: 4 })
+      try {
+        await expect(ctx.compaction.compactRegion(start, nodes.at(-1)!, owned.agent, signal)).rejects.toThrow(diagnosis)
+      } finally {
+        session.append('turn/end', { turn: 4, reason: { kind: 'completed' } })
+      }
+      expect(summary.requests).toHaveLength(1)
+      expect(deriveCommittedCoverage(session.ownEvents())).toEqual(initialCoverage)
+      expect(session.surface.nodes).toEqual(nodes)
+    } finally {
+      await owned.dispose()
+    }
+  }, { incremental: true })
+})
+
+it('rejects a live observation whose Surface disagrees with the selected span at the same cursor', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Reply.')])
+    const summary = new WindowAdapter([])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-inconsistent-observation')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'Live original retained after the query disagrees. '.repeat(60))
+      const { session } = owned.agent
+      const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
+      const nodes = [...session.surface.nodes]
+      const observe = ctx.sessionQuery.observeSession.bind(ctx.sessionQuery)
+      const spy = vi.spyOn(ctx.sessionQuery, 'observeSession').mockImplementation(async (...args) => {
+        const observation = await observe(...args)
+        const absent: SessionEvent<'turn/end'> = {
+          type: 'turn/end', seq: original.seq, time: original.time, data: { turn: 1, reason: { kind: 'completed' } },
+        }
+        return { ...observation, events: observation.events.map(event => event.seq === original.seq ? absent : event) }
+      })
+      try {
+        await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toMatchObject({
+          cause: { message: 'compaction: observed Surface differs from the selected span' },
+        })
+        expect(spy).toHaveBeenCalledOnce()
+      } finally {
+        spy.mockRestore()
+      }
+      expect(summary.requests).toHaveLength(0)
+      expect(checkpoints(session.ownEvents())).toHaveLength(0)
+      expect(session.surface.nodes).toEqual(nodes)
+    } finally {
+      await owned.dispose()
+    }
+  })
+})
