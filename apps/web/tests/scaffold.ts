@@ -304,6 +304,9 @@ export interface WebScaffold {
   close(): Promise<void>
 }
 
+/** Quoted workspace root length shared by fixtures that compare admission token estimates. */
+export const ADMISSION_WORKSPACE_PATH_LENGTH = 192
+
 /** Options for {@link launchWebScaffold}. */
 export interface LaunchOptions {
   /** Override the developer-tools preference; omitted uses the shipped default. */
@@ -312,7 +315,7 @@ export interface LaunchOptions {
   openInAppEnvironment?: LaunchEnvironmentSnapshot
   /** Compare the replayed root Session; `read-only` also forbids refresh writes to a borrowed fixture. */
   compareReplaySession?: boolean | 'read-only'
-  /** Fixed JSON-quoted workspace path length for compaction estimates; omitted values use the ordinary prefix. */
+  /** Fixed JSON-quoted workspace path length for token estimates; omitted values use the ordinary prefix. */
   workspacePathLength?: number
   /**
    * Optional product overlay applied after the shipped Web surface and before
