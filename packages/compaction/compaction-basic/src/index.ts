@@ -232,9 +232,7 @@ export class BasicCompactionEngine extends CompactionEngine {
             completionMaxTokens: reserve,
             completionSource,
           })
-          // In-memory Sessions still expose the receipt as a log event.
-          // A mounted durability listener must finish before dispatch.
-          await ctx.sessions.flush(agent.session)
+          await envelope.flushReceipt()
         }
         return
       }

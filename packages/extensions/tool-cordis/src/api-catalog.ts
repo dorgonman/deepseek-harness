@@ -3473,10 +3473,10 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         throws: ['if the session is not live or its announcement already began, including a reentrant call from a creation listener.'],
       },
       {
-        signature: 'async flush(session: Session): Promise<boolean>',
+        signature: 'async flush(session: Session, expectedWriter?: object): Promise<boolean>',
         description: 'Dispatch the awaited `session/flush` durability checkpoint for `session`, with the carrier captured at enter. THE flush entry point: the store owns the carrier, so callers (the checkpoint policy\'s per-request barrier, goal-round-driver\'s idle checkpoint, teardown drains, and consumers that flush themselves before reading storage) must come through here rather than dispatch a raw `ctx.parallel(\'session/flush\', …)` — one owner and one spelling.',
-        parameters: [{ name: 'session', description: 'the session whose buffered events must reach durable storage.' }],
-        returns: 'whether at least one durability listener participated, after every listener has settled successfully.',
+        parameters: [{ name: 'session', description: 'the session whose buffered events must reach durable storage.' }, { name: 'expectedWriter', description: 'optional write handle whose acknowledgement is required.' }],
+        returns: 'after all listeners settle, whether the expected handle acknowledged the flush, or whether any listener ran when no handle was supplied.',
         throws: ['the first registered listener failure after every listener settles.'],
       },
       {
@@ -5125,7 +5125,7 @@ export const EVENT_API: readonly EventApiEntry[] = [
   {
     name: 'agent/request-envelope',
     mode: 'serial',
-    signature: '\'agent/request-envelope\'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader contextWindow?: number completionMaxTokens?: number completionSource: LlmCompletionReservation[\'source\'] imagePricing?: LlmImageRequestPricing signal: AbortSignal } & ({ phase: \'preview\' view: () => Session projectRequest?: PreparedLlmCall[\'projectRequest\'] } | { phase: \'verify\' request: GenerateOptions turn: number step: number })): Promise<void> | void',
+    signature: '\'agent/request-envelope\'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader contextWindow?: number completionMaxTokens?: number completionSource: LlmCompletionReservation[\'source\'] imagePricing?: LlmImageRequestPricing signal: AbortSignal } & ({ phase: \'preview\' view: () => Session projectRequest?: PreparedLlmCall[\'projectRequest\'] } | { phase: \'verify\' request: GenerateOptions flushReceipt: () => Promise<void> turn: number step: number })): Promise<void> | void',
     summary: 'Price the request envelope before it is committed or dispatched.',
     description: 'Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen adapter-facing request after projection. A refusal prevents provider dispatch.',
     parameters: [{ name: 'payload', description: '.signal - the current turn\'s cancellation signal.' }],
@@ -5565,9 +5565,9 @@ export const EVENT_API: readonly EventApiEntry[] = [
   {
     name: 'session/flush',
     mode: 'parallel',
-    signature: '\'session/flush\'(this: Scoped<Session>, session: Session): Promise<void> | void',
+    signature: '\'session/flush\'(this: Scoped<Session>, session: Session): Promise<object | void> | object | void',
     summary: 'Awaited parallel durability checkpoint: every listener runs and the caller awaits all of them, with no waterfall veto.',
-    description: 'Awaited parallel durability checkpoint: every listener runs and the caller awaits all of them, with no waterfall veto. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`) reuses the session\'s owner scope.',
+    description: 'Awaited parallel durability checkpoint: every listener runs and the caller awaits all of them, with no waterfall veto. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`) reuses the session\'s owner scope. The storage listener returns its write handle after durable completion. Observers that do not persist the session return void.',
     parameters: [{ name: 'session', description: 'the session whose buffered events must reach durable storage.' }],
   },
   {

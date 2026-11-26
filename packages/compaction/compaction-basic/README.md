@@ -129,7 +129,7 @@ The destination must have a registered adapter, declared context capacity, and a
 
 The opt-in Hybrid backend estimates the full pending request and checks it against the destination's declared context capacity and effective completion reservation. It skips automatic compaction for the switch when that request fits. If the request exceeds capacity, the destination pressure policy sizes the replacement. The transport limits a fallback completion cap to the capacity left after input.
 
-With automatic compaction enabled and a declared context window, final admission checks the frozen adapter request after attachment and tool projection. It records the estimated input, output reservation, and window in `request/admission` and flushes the log before adapter dispatch. A budget refusal or flush failure prevents dispatch. The receipt describes the local budget decision.
+With automatic compaction enabled and a declared context window, final admission checks the frozen adapter request after attachment and tool projection. It records the estimated input, output reservation, and window in `request/admission`. A persisted Session requires its own write handle to acknowledge the durable receipt before dispatch. A missing acknowledgement raises `CONTEXT_ADMISSION_REFUSED` and asks the caller to reopen the Session. A budget refusal or flush failure stops dispatch. An in-memory Session records the receipt in its live log.
 
 ### On-demand condensation with /compact
 

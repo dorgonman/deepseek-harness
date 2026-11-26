@@ -60,7 +60,7 @@ async function mountCompactionHarness(
   ctx: Context, root: string, extraBuiltins: Record<string, unknown> = {},
 ) {
   await mountAgentLoopTestDependencies(ctx)
-  await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'zstd' })
+  const persistence = await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'zstd' })
   await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'never' })
   await ctx.plugin(TokenMeter)
   await ctx.plugin(AgentLoop, { agents: [] })
@@ -70,6 +70,7 @@ async function mountCompactionHarness(
   ctx.loader.builtins['hybrid-fixture'] = HybridCompactionEngine
   Object.assign(ctx.loader.builtins, extraBuiltins)
   ctx.loader.builtins['compact-fixture'] = CommandCompact
+  return persistence.dispose
 }
 
 async function loadCompactionComposition(
@@ -111,16 +112,16 @@ async function mountStandardPreset(ctx: Context, config: CompactionOverrides = {
 }
 
 async function withContext(
-  run: (ctx: Context, root: string) => Promise<void>,
+  run: (ctx: Context, root: string, disposePersistence: () => Promise<void>) => Promise<void>,
   config: CompactionOverrides = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-hybrid-compaction-'))
   const ctx = new Context()
   try {
-    await mountCompactionHarness(ctx, root)
+    const disposePersistence = await mountCompactionHarness(ctx, root)
     await loadCompactionComposition(ctx, root, 'cordis.yml', 'hybrid', config)
     expect(ctx.compaction).toBeInstanceOf(HybridCompactionEngine)
-    await run(ctx, root)
+    await run(ctx, root, disposePersistence)
   } finally {
     await ctx.fiber.dispose()
     await rm(root, { recursive: true, force: true })
@@ -1840,6 +1841,57 @@ it('withholds the adapter request when the accepted admission receipt cannot flu
     }
   }, { auto: true, thresholdRatio: 0.95 })
 }, 60_000)
+
+it.each(['removed', 'replaced'] as const)(
+  'refuses an attached Session after its persisted writer is %s',
+  async (mode) => {
+    await withContext(async (ctx, root, disposePersistence) => {
+      const chat = new WindowAdapter([textResponse('Stored warm-up.'), textResponse('Unexpected dispatch.')])
+      ctx.llm.registerAdapter([wide.provider], chat)
+      const sessionId = SessionId(`hybrid-envelope-writer-${mode}`)
+      const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+      const { agent } = owned
+      const original = ctx.sessionPersistence
+      let observedFlushes = 0
+      const removeObserver = ctx.on('session/flush', (session) => {
+        if (session === agent.session) observedFlushes += 1
+      })
+      try {
+        await send(agent, 'Write a durable warm-up turn.')
+        expectCompletedTurn(agent.session.ownEvents())
+        expect(chat.requests).toHaveLength(1)
+        expect(observedFlushes).toBeGreaterThan(0)
+        const reader = await original.open(sessionId, 'read')
+        try {
+          expect((await reader.read()).events).toContainEqual(expect.objectContaining({ type: 'request/admission' }))
+        } finally {
+          await reader.close()
+        }
+
+        await disposePersistence()
+        expect(ctx.get('sessionPersistence')).toBeUndefined()
+        expect(ctx.agents.get(sessionId)).toBe(agent)
+        expect(ctx.sessions.get(sessionId)).toBe(agent.session)
+
+        if (mode === 'replaced') {
+          await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'zstd' })
+          expect(ctx.sessionPersistence).not.toBe(original)
+        }
+        const replacementWriter = mode === 'replaced' ? await ctx.sessionPersistence.open(sessionId, 'write') : undefined
+        try {
+          await send(agent, 'Only dispatch if the original writer acknowledges admission.')
+          expectAdmissionRefusal(agent.session.ownEvents())
+          expect(chat.requests).toHaveLength(1)
+        } finally {
+          await replacementWriter?.close()
+        }
+      } finally {
+        removeObserver()
+        await owned.dispose()
+      }
+    }, { auto: true, thresholdRatio: 0.95 })
+  }, 60_000,
+)
 
 it('refuses a checked request after its Session surface changes during the receipt flush', async () => {
   await withContext(async (ctx, root) => {

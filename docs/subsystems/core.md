@@ -1083,12 +1083,13 @@ Price the request envelope before it is committed or dispatched. The `preview` p
  * @param payload.view - detached preview Session, materialized on first call.
  * @param payload.projectRequest - deterministic adapter projection available during preview.
  * @param payload.request - the exact adapter input during verification.
+ * @param payload.flushReceipt - flush the receipt and require the original writer for a persisted Session.
  * @param payload.turn - the verified request's owning turn.
  * @param payload.step - the verified request's owning step.
  * @param payload.signal - the current turn's cancellation signal.
  * @mode serial
  */
-'agent/request-envelope'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader contextWindow?: number completionMaxTokens?: number completionSource: LlmCompletionReservation['source'] imagePricing?: LlmImageRequestPricing signal: AbortSignal } & ({ phase: 'preview' view: () => Session projectRequest?: PreparedLlmCall['projectRequest'] } | { phase: 'verify' request: GenerateOptions turn: number step: number })): Promise<void> | void
+'agent/request-envelope'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader contextWindow?: number completionMaxTokens?: number completionSource: LlmCompletionReservation['source'] imagePricing?: LlmImageRequestPricing signal: AbortSignal } & ({ phase: 'preview' view: () => Session projectRequest?: PreparedLlmCall['projectRequest'] } | { phase: 'verify' request: GenerateOptions flushReceipt: () => Promise<void> turn: number step: number })): Promise<void> | void
 ```
 
 Types: [EpochHeader](session.md) · [GenerateOptions](llm-streaming.md) · [LlmCompletionReservation](llm-streaming.md) · [LlmImageRequestPricing](llm-streaming.md) · [PreparedLlmCall](llm-streaming.md) · [Scoped](scope.md) · [Session](session.md)

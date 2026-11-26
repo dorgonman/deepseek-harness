@@ -97,7 +97,7 @@ turn/start
      log request/header and request/context as needed
      derive and freeze model history from the log
      stream the bound prepared call -> llm/stream -> agent/assistant-stream start
-       project the adapter request -> agent/request-envelope (verify) -> adapter dispatch
+       project the adapter request -> agent/request-envelope (verify and flush receipt) -> adapter dispatch
        agent/assistant-stream chunk*
        assistant/message | assistant/attempt -> agent/assistant-stream end
      tool/call* -> tools/pre-execute -> tools/execute -> tools/post-execute -> tool/result*

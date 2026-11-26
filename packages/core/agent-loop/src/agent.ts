@@ -33,6 +33,7 @@ import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { EpochHeader, RequestContext, SessionEvent, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader, headerEquals, Session, ToolCallRecovery } from '@deepseek-ai/dsh-session'
+import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import { renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import { ToolActivationError, ToolBatchExecutionError } from '@deepseek-ai/dsh-tools'
@@ -168,6 +169,7 @@ export class ReactLoopAgent implements Agent {
     projections: LoopProjections,
     lastTurn: number,
     private readonly lifetimeSignal: AbortSignal,
+    private readonly sessionWriter?: SessionHandle,
   ) {
     this.requestSurfaceGeneration = session.surface.contentGeneration
     this.dispatch = agentEvents(loopCtx, this)
@@ -889,6 +891,15 @@ export class ReactLoopAgent implements Agent {
     await this.dispatch.serial('agent/request-envelope', {
       header,
       request,
+      flushReceipt: async () => {
+        const acknowledged = await this.loopCtx.sessions.flush(this.session, this.sessionWriter)
+        if (this.sessionWriter !== undefined && !acknowledged) {
+          throw new LlmError(
+            'agent: Session writer did not acknowledge the admission receipt; reopen the session before sending another request',
+            'CONTEXT_ADMISSION_REFUSED',
+          )
+        }
+      },
       ...position,
       ...preparedCall.context === undefined ? {} : { contextWindow: preparedCall.context.contextWindow },
       ...preparedCall.imagePricing === undefined ? {} : { imagePricing: preparedCall.imagePricing },
