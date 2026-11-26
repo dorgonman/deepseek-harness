@@ -448,10 +448,11 @@ async function fixtureFiles(scenario: CorpusScenario): Promise<string[]> {
 
 async function hydrateReplayFixtures(scenario: CorpusScenario, cwd: string): Promise<string[]> {
   const root = join(cwd, '.replay-fixtures')
+  const jsonCwd = JSON.stringify(cwd).slice(1, -1)
   await mkdir(root, { recursive: true })
   return Promise.all((await fixtureFiles(scenario)).map(async (source) => {
     const destination = join(root, basename(source))
-    await writeFile(destination, (await readFile(source, 'utf8')).replaceAll('{{cwd}}', cwd))
+    await writeFile(destination, (await readFile(source, 'utf8')).replaceAll('{{cwd}}', () => jsonCwd))
     return destination
   }))
 }
@@ -752,7 +753,9 @@ async function runScenario(scenario: CorpusScenario): Promise<{
 }> {
   const workspaceParent = await realpath(tmpdir())
   let workspacePrefix = `sdk-snapshot-${scenario.name}-`
-  const fixedWidthCwd = scenario.name === 'minimal-image-compaction' || scenario.name === 'manual-compact'
+  const fixedWidthCwd = scenario.name === 'minimal-image-compaction'
+    || scenario.name === 'manual-compact'
+    || scenario.name === 'session-resume'
   if (fixedWidthCwd) {
     // mkdtemp appends six characters; JSON quoting is part of the runtime-context text.
     const paddingLength = 192 - JSON.stringify(join(workspaceParent, `${workspacePrefix}XXXXXX`)).length
