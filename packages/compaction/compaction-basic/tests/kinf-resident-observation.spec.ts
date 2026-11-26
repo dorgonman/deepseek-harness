@@ -231,6 +231,7 @@ describe('KINF resident observations', () => {
   it.each([
     { ...route, baseUrl: 'https://remote.invalid/v1' },
     { ...route, baseUrl: 'http://127.0.0.1:49362/another-provider/v1' },
+    { ...route, baseUrl: 'http://[' },
     { ...route, nodeName: 'auto' },
     { ...route, logicalModel: 'another/model' },
   ])('rejects a route outside direct local managed scope', (invalidRoute) => {
@@ -259,7 +260,23 @@ describe('KINF resident observations', () => {
     expect(fetcher).not.toHaveBeenCalled()
   })
 
+  it('rejects distinct endpoints for one managed instance', () => {
+    const fetcher = vi.fn<typeof fetch>()
+    const other = {
+      ...route,
+      id: 'alternate-binding',
+      logicalModel: 'other-model',
+      baseUrl: 'http://127.0.0.1:49363/v1',
+    }
+    expect(() => createKinfResidentObservationSource(gatewayId, [route, other], {
+      fetch: fetcher, measure: () => 128,
+    })).toThrow('compaction: invalid local KINF resident observation bindings')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
   it.each([
+    new Response(null, { status: 204 }),
+    new Response(new Uint8Array([0x7b, 0x7d])),
     new Response('', { status: 401 }),
     new Response('', { status: 302, headers: { location: 'http://127.0.0.1:49363/v1/observations' } }),
     new Response('{not-json', { headers: { 'content-type': 'application/json' } }),
@@ -269,6 +286,40 @@ describe('KINF resident observations', () => {
     fetcher.mockResolvedValueOnce(response)
     expect(await source.observe(request)).toEqual([])
     expect(measure).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['an invalid model collection', {}],
+    ['too many model rows', Array.from({ length: 129 }, () => null)],
+  ])('refuses %s before measuring the prompt', async (_scenario, models) => {
+    const { source, measure } = sourceFor({ ...snapshot(), models })
+    expect(await source.observe(request)).toEqual([])
+    expect(measure).not.toHaveBeenCalled()
+  })
+
+  it('refuses a resident when the projected prompt has no usable token count', async () => {
+    const { source, measure } = sourceFor(snapshot())
+    measure.mockReturnValue(0)
+    expect(await source.observe(request)).toEqual([])
+    expect(measure).toHaveBeenCalledExactlyOnceWith(projection.messages)
+  })
+
+  it('withholds a receipt when the matching route has no budget', async () => {
+    const { source } = sourceFor(snapshot())
+    const rows = await source.observe(request)
+    expect(rows).toHaveLength(1)
+    const current = rows[0]!
+    const stale = {
+      ...current,
+      node: { ...current.node, observedAtMs: seen - 501 },
+      model: { ...current.model, budget: null },
+    }
+    await expect(selectResidentFromSource({
+      gatewayId, pinnedNodeId: route.nodeId,
+      projectionId: projection.id, outputTokens: projection.outputTokens, reserveTokens: 16, maxAgeMs: 500,
+    }, {
+      observe: async () => [stale, current],
+    }, { now: () => seen })).resolves.toEqual({ ok: false, code: 'resident_summary_no_eligible' })
   })
 
   it('keeps caller cancellation distinct from an unavailable observation', async () => {

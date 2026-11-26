@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -77,6 +77,7 @@ function stabilize(
 const RECORD_SRC = fileURLToPath(new URL('./fixtures/record-suite', import.meta.url))
 
 // Replay pins explicit header classes; recording covers the default fallback.
+const workspaceCwdTextLength = JSON.stringify(realpathSync(tmpdir())).length + 48
 const REPLAY_SCENARIOS: Scenario[] = [
   {
     name: 'pin-turn',
@@ -106,9 +107,11 @@ const REPLAY_SCENARIOS: Scenario[] = [
     env: { DSH_PERMISSION_MODE: 'never' },
     configPath: AGENT.configPath,
     workspaceParent: tmpdir(),
+    workspaceCwdTextLength,
     pinsChildToolSchemas: [1],
     pinsChildSystemPrompts: [1],
     prepareWorkspace: (cwd) => {
+      expect(JSON.stringify(cwd)).toHaveLength(workspaceCwdTextLength)
       writeFileSync(join(cwd, 'seed.txt'), 'prepared at runtime')
     },
   },

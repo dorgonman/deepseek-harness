@@ -1012,6 +1012,102 @@ describe('deriveReplayScript', () => {
     ])
   })
 
+  describe('recorded Hybrid compaction', () => {
+    const first = { type: 'text' as const, text: 'first chunk' }
+    const second = { type: 'text' as const, text: 'second chunk' }
+    const usage = { inputTokens: 9, outputTokens: 2 }
+    const summary: SessionEvent<'compaction/summary'> = {
+      type: 'compaction/summary',
+      seq: SessionSeq(4),
+      time: 0,
+      data: {
+        compactionId: COMPACTION_ID,
+        summary: [first, second],
+        shadowedRange: { start: SessionSeq(1), end: SessionSeq(2) },
+        shadowedSeqs: [SessionSeq(1), SessionSeq(2)],
+        shadowedTokenCount: 20,
+        provider: 'mock',
+        model: 'mock',
+        maxTokens: 32,
+        chunkCalls: [
+          {
+            groups: [{ eventSeqs: [SessionSeq(1)], toolBodiesOmitted: false }],
+            contextWindow: 128,
+            estimatedInputTokens: 9,
+            rawOutput: [first],
+            usage,
+          },
+          {
+            groups: [{ eventSeqs: [SessionSeq(2)], toolBodiesOmitted: false }],
+            contextWindow: 128,
+            estimatedInputTokens: 12,
+            rawOutput: [second],
+          },
+        ],
+      },
+    }
+
+    it('restores one replay entry per durable chunk call in dispatch order', () => {
+      const source = sessionJsonl([
+        { type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } },
+        ...[first, second].map((block, index): SessionEvent<'user/message'> => ({
+          type: 'user/message', seq: SessionSeq(index + 1), time: 0,
+          data: createUserMessage({ content: [block], source: { kind: 'user' } }),
+          surfaceOp: 'append',
+        })),
+        { type: 'compaction/start', seq: SessionSeq(3), time: 0, data: { compactionId: COMPACTION_ID, turn: 1 } },
+        summary,
+        {
+          type: 'user/message', seq: SessionSeq(5), time: 0,
+          data: createUserMessage({ content: [first, second], source: { kind: 'compact-checkpoint', compactionId: COMPACTION_ID } }),
+          surfaceOp: { op: 'replace', startSeq: SessionSeq(1), endSeq: SessionSeq(2) },
+          sourceEventSeqs: [SessionSeq(3), SessionSeq(4), SessionSeq(1), SessionSeq(2)],
+        },
+        { type: 'compaction/end', seq: SessionSeq(6), time: 0, data: { compactionId: COMPACTION_ID, turn: 1 } },
+        { type: 'turn/end', seq: SessionSeq(7), time: 0, data: { turn: 1, reason: { kind: 'completed' } } },
+      ], { version: SESSION_FORMAT_VERSION })
+
+      expect(deriveReplayScript(parseSessionLog(source))).toEqual([
+        {
+          kind: 'chunks',
+          chunks: [
+            { type: 'block-start', index: 0, blockType: 'text' },
+            { type: 'block-end', index: 0, block: first },
+            { type: 'usage', usage },
+            { type: 'finish', reason: { kind: 'stop' } },
+          ],
+        },
+        {
+          kind: 'chunks',
+          chunks: [
+            { type: 'block-start', index: 0, blockType: 'text' },
+            { type: 'block-end', index: 0, block: second },
+            { type: 'finish', reason: { kind: 'stop' } },
+          ],
+        },
+      ])
+    })
+
+    it.each([
+      ['a single-call marker', { llmStreamCall: true }],
+      ['a summary-level output', { rawOutput: [first] }],
+      ['a non-array', { chunkCalls: {} }],
+      ['an empty array', { chunkCalls: [] }],
+    ])('rejects chunk receipts with %s', (_case, invalidFields) => {
+      const event = { ...summary, data: { ...summary.data, ...invalidFields } } as SessionEvent<'compaction/summary'>
+      expect(() => deriveReplayScript([event])).toThrow('llm-replay: invalid or conflicting compaction chunk calls')
+    })
+
+    it.each([
+      ['a null receipt', null],
+      ['missing output', {}],
+      ['empty output', { rawOutput: [] }],
+    ])('rejects %s when deriving a chunk replay', (_case, call) => {
+      const event = { ...summary, data: { ...summary.data, chunkCalls: [call] } } as SessionEvent<'compaction/summary'>
+      expect(() => deriveReplayScript([event])).toThrow('llm-replay: compaction chunk call lacks rawOutput')
+    })
+  })
+
   it.each([undefined, 'conversation-prefix-v1', 'text-transcript-v1'] as const)(
     'retains the recorded summary projection %s without changing output replay',
     (requestProjection) => {
@@ -2209,7 +2305,7 @@ describe('apply (the plugin entry)', () => {
         {
           id: 'm',
           models: [
-            { id: 'm', inputModalities: ['image'], reasoningEfforts: ['low'] },
+            { id: 'm', inputModalities: ['image'], reasoningEfforts: ['low'], nativeTools: false, inputProjectionPolicy: 'reject' },
             { id: 'text' },
           ],
         },
@@ -2218,7 +2314,11 @@ describe('apply (the plugin entry)', () => {
       paceMs: 1,
     })
     expect(ctx.llm.listProviders()).toEqual([{ id: 'm', name: 'm' }, { id: 'empty', name: 'empty' }])
-    await expect(ctx.llm.resolveModelInfo('m', 'm')).resolves.toMatchObject({ inputModalities: ['image'] })
+    await expect(ctx.llm.resolveModelInfo('m', 'm')).resolves.toMatchObject({
+      inputModalities: ['image'],
+      nativeTools: false,
+      inputProjectionPolicy: 'reject',
+    })
     expect(await drain(ctx.llm.stream({ provider: 'm', model: 'm', messages: [] }))).toEqual(TEXT_CHUNKS)
   })
 
@@ -2282,6 +2382,15 @@ describe('apply (the plugin entry)', () => {
     expect(() => { apply(ctx, { file, providers }) }).toThrow(
       'llm-replay: provider "m" model "m" toolUpdate must be "in-history" or "addition-only" when present',
     )
+  })
+
+  it.each([
+    [{ nativeTools: 'false' as never }, 'nativeTools must be a boolean when present'],
+    [{ inputProjectionPolicy: 'omit' as never }, 'inputProjectionPolicy must be "reject" when present'],
+  ] as const)('rejects unsupported replay capability configuration %j', (fields, diagnostic) => {
+    const ctx = new Context()
+    const providers: NonNullable<Config['providers']> = [{ id: 'm', models: [{ id: 'm', ...fields }] }]
+    expect(() => { apply(ctx, { file, providers }) }).toThrow(`llm-replay: provider "m" model "m" ${diagnostic}`)
   })
 
   it.each([

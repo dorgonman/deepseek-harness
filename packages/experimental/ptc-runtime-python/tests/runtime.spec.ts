@@ -4971,33 +4971,16 @@ describe('PythonPtcRuntime — hostile peer', () => {
   }, 30_000)
 
   it('checks and encodes a wide completion value in O(depth), not O(width)', async () => {
-    // A wide flat list serializes to ~2 bytes per element but the pre-fix walk
-    // enqueued one traversal tuple per element (_check_done_value) and one stack
-    // entry plus a separator marker per element (_encode_json_plain) — ~56 bytes
-    // per element, ~28x the serialized size. A value the byte meter admits could
-    // therefore OOM on the checker's or encoder's own bookkeeping, the inversion
-    // the load gate exists to prevent (the gate reserves 12x, not 28x). Both now
-    // walk with an O(depth) cursor that pulls one child at a time, so the only
-    // width-proportional allocation is the output string the meter bounded.
-    //
-    // Config: maxValueBytes 20 MiB against 384 MiB (20*12 = 240 MiB < 320 MiB
-    // budgetable, so it loads). `[0] * 6_000_000` is ~12 MB of JSON, under the
-    // 20 MiB budget, so it must round-trip. Pre-fix the ~400 MB of per-element
-    // frames plus the interpreter exceeded 384 MiB and returned MemoryError as an
-    // exception. Linux-only RLIMIT_AS repro; on macOS the value round-trips
-    // either way, but the fixture stays within the address space so it is honest.
-    //
-    // `maxWallMs` is 60s, not the 20s the memory assertion alone needs: the O(depth)
-    // cursor pulls 6M elements one at a time through Python-level frames, which costs
-    // ~11s on an idle machine and more under the coverage lane's V8 instrumentation
-    // with several workers sharing a box. This budget bounds the run without letting a
-    // loaded runner's scheduling latency read as a `timeout` — what this test asserts
-    // is the O(depth) memory shape, not a speed claim.
-    const { runtime } = await setup({ maxValueBytes: 20 * 1024 * 1024, addressSpaceMb: 384, maxWallMs: 60_000 })
-    const result = await runtime.run(runtime.resolve({ program: 'return [0] * 6_000_000', bindings: [] }))
+    // A 1.6M-element flat list encodes to 3.2 MB. The 112 MiB address-space limit
+    // admits the 3.5 MiB value budget (64 MiB interpreter reserve plus 12 × 3.5 MiB).
+    // On Linux it also excludes either walk's former per-element stack when combined
+    // with the input and interpreter. Darwin exercises the round trip without RLIMIT_AS.
+    const width = 1_600_000
+    const { runtime } = await setup({ maxValueBytes: 3.5 * 1024 * 1024, addressSpaceMb: 112, maxWallMs: 60_000 })
+    const result = await runtime.run(runtime.resolve({ program: `return [0] * ${width}`, bindings: [] }))
     expect(result.error).toBeUndefined()
     expect(Array.isArray(result.value)).toBe(true)
-    expect((result.value as number[]).length).toBe(6_000_000)
+    expect(result.value).toHaveLength(width)
   }, 90_000)
 
   it('validates wide binding arguments in O(depth), not O(width)', async () => {

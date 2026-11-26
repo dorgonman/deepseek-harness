@@ -904,6 +904,22 @@ describe('LlmRuntime', () => {
     },
   )
 
+  it('rejects a nonpositive adapter-owned transport maxTokens', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new class extends ScriptedAdapter {
+      override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({ provider, id: model, name: model, transportMaxTokens: 0 })
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+
+    await expect(ctx.llm.resolveModelInfo('route', 'model')).rejects.toMatchObject({
+      code: 'INVALID_MODEL_MAX_TOKENS',
+      message: 'adapter returned invalid transport maxTokens for provider "route" model "model"',
+    })
+  })
+
   it.each([
     [{ efforts: [] }, 'empty effort list'],
     [{ efforts: [{ id: '', name: 'Empty' }] }, 'empty id'],

@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest'
-import { inspectPresetCompactionPolicy, restorePresetCompactionPolicy, updatePresetCompactionPolicy } from '../src/policy-control.ts'
+import { runInNewContext } from 'node:vm'
+import { Context } from '@deepseek-ai/cordis'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import * as configuration from '../src/config.ts'
+import {
+  CompactionPolicyControl, inspectPresetCompactionPolicy, restorePresetCompactionPolicy, updatePresetCompactionPolicy,
+} from '../src/policy-control.ts'
 
 function declaration(): Record<string, unknown> {
   return {
@@ -24,6 +29,14 @@ function declaration(): Record<string, unknown> {
 }
 
 const target = { provider: 'local', model: 'new-summary', maxTokens: 1024 }
+
+const minimal = {
+  id: 'minimal', plugins: [{
+    id: 'compaction', name: 'cordis:group', group: true, config: [
+      { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic' },
+    ],
+  }],
+}
 
 function basicConfig(current: Record<string, unknown>): Record<string, unknown> {
   const group = (current.plugins as Record<string, unknown>[])[1]!
@@ -57,11 +70,7 @@ describe('preset summary-policy updates', () => {
   })
 
   it('preserves absent inherited values and makes same-value retries explicit', () => {
-    const current = { id: 'minimal', plugins: [{
-      id: 'compaction', name: 'cordis:group', group: true, config: [
-        { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic' },
-      ],
-    }] }
+    const current = structuredClone(minimal)
     const snapshot = inspectPresetCompactionPolicy('preset-minimal', current)
     expect(snapshot.policy).toEqual({})
     const first = updatePresetCompactionPolicy(current, {
@@ -130,9 +139,157 @@ describe('preset summary-policy updates', () => {
     expect(() => inspectPresetCompactionPolicy('preset-standard', current))
       .toThrow(expect.objectContaining({ code: 'compaction-policy/invalid' }))
   })
+
+  it.each([
+    [{ ...minimal, id: ' ' }, 'The declaration has no preset id'],
+    [{ ...minimal, plugins: {} }, 'The compaction parent must contain plugin rows'],
+    [{ ...minimal, plugins: [{ ...minimal.plugins[0], group: false }] }, 'The compaction row must be a Cordis group'],
+    [{ ...minimal, plugins: [{ ...minimal.plugins[0], config: [
+      { ...minimal.plugins[0]!.config[0], config: ['not a mapping'] },
+    ] }] }, 'compaction-basic config must be a literal object'],
+    [{ ...minimal, plugins: [{ ...minimal.plugins[0], config: [
+      { ...minimal.plugins[0]!.config[0], config: { thresholdRatio: 0 } },
+    ] }] }, 'BasicCompactionConfig.thresholdRatio (0) must be a number in (0, 1]'],
+  ] as const)('reports malformed preset declarations %#', (current, reason) => {
+    expect(() => inspectPresetCompactionPolicy('preset-minimal', current)).toThrow(expect.objectContaining({
+      code: 'compaction-policy/invalid',
+      details: { entryId: 'preset-minimal', reason },
+    }))
+  })
+
+  it('refuses a requested override when the declaration never configured model policies', () => {
+    const entryId = 'preset-minimal'
+    const current = structuredClone(minimal)
+    const snapshot = inspectPresetCompactionPolicy(entryId, current)
+    const requested = { expectedRevision: snapshot.revision, modelPolicyRoutes: [{ provider: 'conversation', model: 'missing' }] }
+    expect(() => updatePresetCompactionPolicy(current, { ...requested, entryId, target })).toThrow(expect.objectContaining({
+      code: 'compaction-policy/invalid', message: 'Requested model-policy route is absent or ambiguous',
+    }))
+    expect(() => restorePresetCompactionPolicy(current, { ...requested, snapshot })).toThrow(expect.objectContaining({
+      code: 'compaction-policy/invalid',
+      message: 'Requested model-policy route is absent or ambiguous in the current policy or captured snapshot',
+    }))
+    expect(current).toEqual(minimal)
+  })
+})
+
+async function controlFixture(metadataAvailable = true) {
+  const ctx = new Context()
+  const entryId = 'preset-standard'
+  const entry = { options: { id: entryId, name: '@deepseek-ai/dsh-agent-preset', config: declaration() } }
+  const entries = vi.fn(() => [entry])
+  const edit = vi.fn<Context['configEditor']['edit']>()
+  const verifyActivation = vi.fn<ConstructorParameters<typeof CompactionPolicyControl>[1]['verifyActivation']>()
+  const resolveModelInfo = vi.fn<Context['llm']['resolveModelInfo']>().mockResolvedValue({
+    provider: target.provider, id: target.model, name: 'Summary', context: { contextWindow: 8192 },
+  })
+  if (metadataAvailable) ctx.provide('llm', { resolveModelInfo })
+  ctx.provide('configEditor', { entries, edit })
+  onTestFinished(async () => { await ctx.fiber.dispose() })
+  await ctx.plugin(CompactionPolicyControl, { verifyActivation })
+  const control = ctx.compactionPolicyControl
+  const request = { entryId, expectedRevision: control.read(entryId).revision, target, modelPolicyRoutes: [] }
+  return { ctx, control, entry, entries, edit, request, verifyActivation, resolveModelInfo }
+}
+
+describe('verified summary-policy writes', () => {
+  it('requires the LLM metadata service and text input support before editing', async () => {
+    const { ctx, control, edit, request, resolveModelInfo } = await controlFixture(false)
+    await expect(control.setSummaryTarget(request)).rejects.toMatchObject({
+      code: 'compaction-policy/unverified',
+      cause: { message: 'The LLM service is not available' },
+    })
+
+    resolveModelInfo.mockResolvedValueOnce({
+      provider: target.provider, id: target.model, name: 'Images only',
+      context: { contextWindow: 8192 }, inputModalities: ['image'],
+    })
+    ctx.provide('llm', { resolveModelInfo })
+    await expect(control.setSummaryTarget(request)).rejects.toMatchObject({
+      code: 'compaction-policy/unverified',
+      cause: { message: 'The summary target must be ordinary Chat with context remaining after its output budget' },
+    })
+    expect(resolveModelInfo).toHaveBeenCalledWith(target.provider, target.model, undefined)
+    expect(edit).not.toHaveBeenCalled()
+  })
+
+  it('refuses a replaced declaration when the editor acquires the write', async () => {
+    const { control, entry, entries, edit, request, verifyActivation } = await controlFixture()
+    const replacement = structuredClone(entry)
+    edit.mockImplementationOnce(async (_entry, change) => {
+      entries.mockReturnValue([replacement])
+      change(structuredClone(replacement.options.config), {})
+    })
+
+    await expect(control.setSummaryTarget(request)).rejects.toMatchObject({
+      code: 'compaction-policy/rejected', cause: { message: 'Preset declaration changed before the policy edit' },
+    })
+    expect(replacement.options.config).toEqual(entry.options.config)
+    expect(verifyActivation).not.toHaveBeenCalled()
+  })
+
+  it('refuses success when the activated engine and effective declaration disagree', async () => {
+    const { control, entry, edit, request, verifyActivation } = await controlFixture()
+    edit.mockImplementationOnce(async (_entry, change, verify) => {
+      const proposed = change(structuredClone(entry.options.config), {})
+      verifyActivation.mockImplementationOnce(async (_presetId, inspect) => { inspect(configuration.resolveConfig(basicConfig(proposed))) })
+      await verify?.()
+    })
+
+    await expect(control.setSummaryTarget(request)).rejects.toMatchObject({
+      code: 'compaction-policy/rejected', cause: { message: 'Activated summary policy differs from the persisted request' },
+    })
+    expect(control.read(request.entryId).revision).toBe(request.expectedRevision)
+  })
+
+  it('refuses an editor that verifies before deriving the policy', async () => {
+    const { control, edit, request, verifyActivation } = await controlFixture()
+    edit.mockImplementationOnce(async (_entry, _change, verify) => { await verify?.() })
+
+    await expect(control.setSummaryTarget(request)).rejects.toMatchObject({
+      code: 'compaction-policy/rejected', cause: { message: 'Preset summary policy was not derived' },
+    })
+    expect(verifyActivation).not.toHaveBeenCalled()
+    expect(control.read(request.entryId).revision).toBe(request.expectedRevision)
+  })
+
+  it('refuses a completed editor call without a derived policy', async () => {
+    const { control, edit, request, verifyActivation } = await controlFixture()
+    edit.mockResolvedValueOnce(undefined)
+
+    await expect(control.setSummaryTarget(request)).rejects.toThrow('Preset summary policy result is unavailable')
+    expect(verifyActivation).not.toHaveBeenCalled()
+    expect(control.read(request.entryId).revision).toBe(request.expectedRevision)
+  })
 })
 
 describe('preset summary-policy restores', () => {
+  it('retains cross-realm validation diagnostics without changing the declaration', () => {
+    const current = declaration()
+    const snapshot = inspectPresetCompactionPolicy('preset-standard', current)
+    const updated = updatePresetCompactionPolicy(current, {
+      entryId: snapshot.entryId, expectedRevision: snapshot.revision, target, modelPolicyRoutes: [],
+    })
+    const before = structuredClone(current)
+    const original = configuration.resolveConfig
+    const validator = vi.spyOn(configuration, 'resolveConfig')
+    onTestFinished(() => { validator.mockRestore() })
+    const failure = runInNewContext('new Error("Config validation failed")') as Error
+    const failValidation = (): never => { throw failure }
+    const details = { entryId: snapshot.entryId, reason: 'Error: Config validation failed' }
+
+    validator.mockImplementationOnce(failValidation)
+    expect(() => inspectPresetCompactionPolicy(snapshot.entryId, current)).toThrow(expect.objectContaining({
+      code: 'compaction-policy/invalid', details,
+    }))
+
+    validator.mockImplementationOnce(original).mockImplementationOnce(original).mockImplementationOnce(failValidation)
+    expect(() => restorePresetCompactionPolicy(current, {
+      expectedRevision: updated.revision, snapshot, modelPolicyRoutes: [],
+    })).toThrow(expect.objectContaining({ code: 'compaction-policy/invalid', details }))
+    expect(current).toEqual(before)
+  })
+
   it('deletes previously absent default leaves while preserving fresh pressure settings', () => {
     const current = declaration()
     const config = basicConfig(current)

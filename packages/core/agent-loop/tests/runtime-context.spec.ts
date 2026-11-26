@@ -87,6 +87,18 @@ describe('RuntimeContextProjection', () => {
     expect(projection.project(sections('next'))?.content).toEqual(next.content)
   })
 
+  it('prices a replacement of the retained reminder without advancing the live projection', async () => {
+    const { ctx, session } = await harness()
+    const projection = new RuntimeContextProjection(ctx, session)
+    const { seq } = session.append('user/message', contextMessage(INITIAL, sections('retained')), { surfaceOp: 'append' })
+
+    expect(projection.project(sections('retained'), [seq])?.content).toEqual([{
+      type: 'text', text: UPDATED.replace('\n\nnext\n', '\n\nretained\n'),
+    }])
+    expect(projection.project(sections('retained'))).toBeUndefined()
+    expect(session.surface.nodes).toContain(seq)
+  })
+
   it.each([false, true])('overrides context retained in summaries after compaction (resume: %s)', async (resume) => {
     const { ctx, session } = await harness()
     const projection = new RuntimeContextProjection(ctx, session)

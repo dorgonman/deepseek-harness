@@ -6,7 +6,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, { createUserMessage, LlmError, ReasoningEffortId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { toPiContext } from '@deepseek-ai/dsh-llm-pi-ai/src/context.ts'
-import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -330,6 +330,91 @@ describe('prepared-route prompt admission', () => {
     expect(events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')).toHaveLength(3)
     expect(events.filter(event => event.type === 'request/header').map(event => event.data.reason)).toEqual(['initial', 'series'])
     expect(events.filter(event => event.type === 'system/message').filter(event => event.data.turn === 3).at(-1)?.surfaceOp).not.toBe('append')
+  })
+
+  it.each([
+    ['stale log', 'Session changed before request admission could be priced'],
+    ['wrong replacement span', 'proposed replacement does not match the current Surface'],
+    ['changed live Surface', 'the priced request no longer matches the Session Surface'],
+  ] as const)('refuses a route switch with %s and keeps the claimed input queued', async (scenario, reason) => {
+    const h = await harness()
+    await send(h.agent, 'first')
+    h.agent.model.select({ provider: 'plain', model: 'model' })
+    h.ctx.on('agent/request-admission', ({ agent, request }) => {
+      const { session } = agent
+      const events = session.snapshotEvents()
+      if (scenario === 'stale log') {
+        request.preview(events.slice(0, -1))
+        return
+      }
+      const message = createUserMessage({
+        content: [{ type: 'text', text: 'changed history' }], source: { kind: 'test-compaction' },
+      })
+      if (scenario === 'wrong replacement span') {
+        const [, start, last] = session.surface.nodes
+        expect(start).toBeDefined()
+        expect(last).toBeDefined()
+        request.preview(events, {
+          start: start!, end: start!, shadowedSeqs: [start!, last!], replacementSeq: SessionSeq(session.seq), message,
+        })
+        return
+      }
+      request.preview(events)
+      session.append('user/message', message, { surfaceOp: 'append' })
+    })
+
+    await send(h.agent, 'pending switch')
+    expect(h.plain.requests).toHaveLength(0)
+    expect(h.agent.session.requestHeader()?.config.provider).toBe('capable')
+    expect(h.agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.data.reason)
+      .toEqual({ kind: 'error', error: { code: 'UNKNOWN', message: `agent: ${reason}` } })
+    expect(h.agent.inbox.nextStep.filter(message => message.source.kind === 'user').map(message => message.content))
+      .toEqual([[{ type: 'text', text: 'pending switch' }]])
+  })
+
+  it('prices a middleware-owned route without prepared adapter metadata', async () => {
+    const h = await harness()
+    await send(h.agent, 'first')
+    const middleware = { provider: 'listener', model: 'virtual' }
+    h.ctx.on('llm/stream', (request, next) => request.provider === middleware.provider
+      ? (async function* () { yield* textResponse('listener-owned reply') })()
+      : next())
+    const admissions = vi.fn()
+    h.ctx.on('agent/request-admission', ({ agent, request }) => {
+      admissions(request.completionSource, request.contextWindow, request.projectRequest)
+      const projected = request.preview(agent.session.snapshotEvents())
+      expect(projected.requestHeader()?.config).toEqual(middleware)
+      expect(projected.deriveMessages().filter(message => message.source?.kind === 'user').at(-1)?.content)
+        .toEqual([{ type: 'text', text: 'switch to middleware' }])
+    })
+    h.agent.model.select(middleware)
+    await send(h.agent, 'switch to middleware')
+
+    expect(admissions.mock.calls).toEqual([['unknown', undefined, undefined]])
+    expect(h.agent.session.requestHeader()?.config).toEqual(middleware)
+    expect(h.agent.session.deriveMessages().at(-1)?.content).toEqual([{ type: 'text', text: 'listener-owned reply' }])
+  })
+
+  it('keeps committed input out of the queue when a retry is refused at admission', async () => {
+    const adapter = new MockAdapter([
+      () => { throw new LlmError('transient failure', 'SERVER') },
+      textResponse('must not be dispatched'),
+    ])
+    const h = await harness(adapter)
+    h.ctx.on('agent/request-error', async () => ({ kind: 'retry' as const }))
+    let previews = 0
+    h.ctx.on('agent/request-envelope', ({ phase }) => {
+      if (phase === 'preview' && ++previews === 2) throw new LlmError('retry exceeds its budget', 'CONTEXT_ADMISSION_REFUSED')
+    })
+
+    await send(h.agent, 'committed before retry')
+    expect(previews).toBe(2)
+    expect(adapter.requests).toHaveLength(1)
+    const events = h.agent.session.snapshotEvents()
+    expect(events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')).toHaveLength(1)
+    expect(events.findLast(event => event.type === 'turn/end')?.data.reason)
+      .toMatchObject({ kind: 'error', error: { code: 'CONTEXT_ADMISSION_REFUSED' } })
+    expect(h.agent.inbox.nextStep).toEqual([])
   })
 
   it.each([false, true])('normalizes capable history on a plain route, changed=%s', async (changed) => {

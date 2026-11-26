@@ -38,7 +38,7 @@ import type { ResidentObservationRequest, ResidentObservationSource } from '../p
 import {
   RESIDENT_ONLY_V1, type Candidate, type ResidentPrecondition,
 } from '../packages/compaction/compaction-basic/src/resident-selector.ts'
-import { MockAdapter, textResponse, toolCallResponse } from '../packages/core/agent-loop/tests/mock-adapter.ts'
+import { maxTokensResponse, MockAdapter, textResponse, toolCallResponse } from '../packages/core/agent-loop/tests/mock-adapter.ts'
 import { closeMockServers, mockServer } from '../packages/llm/llm-pi-ai/tests/mock-server.ts'
 
 class WindowAdapter extends MockAdapter {
@@ -824,7 +824,7 @@ it('dispatches no summarizer call when committed coverage reaches the last RAW e
       chunkCalls: [],
       incremental: coverage,
     })
-    owned.agent.session.append('user/message', createUserMessage({
+    const checkpoint = owned.agent.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'Precommitted checkpoint.' }],
       source: compactCheckpointSource(id),
     }), {
@@ -834,7 +834,22 @@ it('dispatches no summarizer call when committed coverage reaches the last RAW e
     owned.agent.session.append('compaction/end', { compactionId: id, turn: null })
 
     const callsBefore = summary.requests.length
+    expect(await ctx.compaction.compactIfNeeded(owned.agent, 'pressure', signal)).toBeNull()
     expect(await ctx.compaction.compactNow(owned.agent, signal)).toBeNull()
+    owned.agent.session.append('turn/start', { turn: 2 })
+    try {
+      await expect(ctx.compaction.compactRegion(checkpoint.seq, checkpoint.seq, owned.agent, signal))
+        .rejects.toThrow('no unprocessed RAW events remain for compaction')
+    } finally {
+      owned.agent.session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    }
+    owned.agent.model.select({ provider: wide.provider, model: 'narrow' })
+    await send(owned.agent, 'OVER_WINDOW_PENDING '.repeat(1_000))
+    const reason = owned.agent.session.ownEvents().findLast(event => event.type === 'turn/end')?.data.reason
+    expect(reason?.kind === 'error' && reason.error.code).toBe('MODEL_SWITCH_COMPACTION_FAILED')
+    expect(reason?.kind === 'error' && reason.error.message)
+      .toContain('no unprocessed RAW events remain for compaction')
+    expectPendingInput(owned.agent, 'OVER_WINDOW_PENDING ')
     expect(summary.requests).toHaveLength(callsBefore)
     await owned.dispose()
   }, {
@@ -1817,6 +1832,7 @@ it('restores a fact-ledger checkpoint in a fresh Basic context (rollback compati
 
 it('compacts for an over-budget envelope that stays under the pressure threshold', async () => {
   await withContext(async (ctx, root) => {
+    await ctx.plugin(ToolResultPruner)
     const chat = new WindowAdapter([textResponse('First reply.'), textResponse('Second reply.')])
     chat.windows.set('roomy', 16_384)
     ctx.llm.registerAdapter(['synthetic-chat'], chat)
@@ -2057,6 +2073,315 @@ it('admits a request whose transport fallback equals the whole window', async ()
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.95 })
 }, 60_000)
+
+
+it.each([
+  ['an incomplete reply', maxTokensResponse('Truncated text.'), 'did not return a complete text checkpoint'],
+  ['a tool call', toolCallResponse('unexpected-summary-call', 'unused', {}), 'did not return a complete text checkpoint'],
+  ['an output budget violation', textResponse('x'.repeat(65)), 'did not return a complete text checkpoint'],
+  ['a blank reply', textResponse('   '), 'returned no text'],
+] as const)('keeps the original Surface after %s', async (_condition, response, diagnostic) => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Reply.')])
+    const summary = new WindowAdapter([response])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-invalid-summary')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'Original history before the invalid summary. '.repeat(100))
+      const nodes = [...owned.agent.session.surface.nodes]
+      await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toThrow()
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      expect(summary.requests).toHaveLength(1)
+      expect(events.findLast(event => event.type === 'compaction/end')?.data.error).toContain(diagnostic)
+      expect(events.some(event => event.type === 'compaction/summary')).toBe(false)
+      expect(owned.agent.session.surface.nodes).toEqual(nodes)
+    } finally {
+      await owned.dispose()
+    }
+  }, { maxTokens: 64 })
+})
+
+it('records raw reasoning separately from the Hybrid checkpoint and allows unmetered text', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Reply.')])
+    const summary = new WindowAdapter([[
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'Private deliberation.' } },
+      { type: 'block-start', index: 1, blockType: 'text' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: 'Approved checkpoint.' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-reasoning-summary')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'Original context retained by the short checkpoint. '.repeat(100))
+      expect(await ctx.compaction.compactNow(owned.agent, signal)).not.toBeNull()
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      const receipt = events.findLast(event => event.type === 'compaction/summary')
+      const chunk = receipt?.data.chunkCalls?.[0]
+      expect(chunk?.rawOutput).toEqual([
+        { type: 'reasoning', text: 'Private deliberation.' },
+        { type: 'text', text: 'Approved checkpoint.' },
+      ])
+      expect(chunk).not.toHaveProperty('usage')
+      expect(JSON.stringify(receipt?.data.summary)).toContain('Approved checkpoint.')
+      expect(JSON.stringify(receipt?.data.summary)).not.toContain('Private deliberation.')
+    } finally {
+      await owned.dispose()
+    }
+  })
+})
+
+it('refuses a later Hybrid chunk when the prepared summarizer window changes', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Reply.')))
+    const summary = new WindowAdapter([
+      () => {
+        summary.windows.set('narrow', 4_095)
+        return textResponse('First chunk only.')
+      },
+      textResponse('Must not dispatch.'),
+    ])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-changed-summary-window')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      for (const marker of ['FIRST', 'SECOND', 'THIRD']) {
+        await send(owned.agent, marker + 'x'.repeat(10_000))
+      }
+      const nodes = [...owned.agent.session.surface.nodes]
+      await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toThrow()
+      expect(summary.requests).toHaveLength(1)
+      expect(requestText(summary.requests[0]!)).toContain('FIRST')
+      expect(requestText(summary.requests[0]!)).not.toContain('SECOND')
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      expect(events.findLast(event => event.type === 'compaction/end')?.data.error)
+        .toContain('summarizer capacity changed')
+      expect(checkpoints(events)).toHaveLength(0)
+      expect(owned.agent.session.surface.nodes).toEqual(nodes)
+    } finally {
+      await owned.dispose()
+    }
+  }, { summarizationModel: 'narrow', maxTokens: 64 })
+})
+
+it('refuses an indivisible group that exceeds the summarizer window before dispatch', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Reply.')])
+    const summary = new WindowAdapter([])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-oversized-non-tool-group')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'x'.repeat(18_000))
+      await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toThrow()
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      expect(summary.requests).toHaveLength(0)
+      expect(checkpoints(events)).toHaveLength(0)
+      expect(events.findLast(event => event.type === 'compaction/end')?.data.error)
+        .toContain('one balanced history group exceeds the summarizer window')
+    } finally {
+      await owned.dispose()
+    }
+  }, { summarizationModel: 'narrow', maxTokens: 64 })
+})
+
+it('refuses automatic pressure while an existing compaction still owns the Session', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Reply.')])
+    const summary = new WindowAdapter([])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-active-compaction-conflict')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'History before another compaction started. '.repeat(100))
+      const compactionId = CompactionId('existing-compaction')
+      owned.agent.session.append('compaction/start', { compactionId, turn: null })
+      const events = owned.agent.session.ownEvents()
+      await expect(ctx.compaction.compactIfNeeded(owned.agent, 'pressure', signal))
+        .rejects.toThrow('compaction already in progress')
+      expect(owned.agent.session.ownEvents()).toEqual(events)
+      expect(summary.requests).toHaveLength(0)
+      owned.agent.session.append('compaction/end', { compactionId, turn: null })
+    } finally {
+      await owned.dispose()
+    }
+  })
+})
+
+it.each(['manual compaction', 'route switch'] as const)(
+  'refuses %s when the observed Session is a detached cut',
+  async (operation) => {
+    await withContext(async (ctx, root) => {
+      const chat = new WindowAdapter([textResponse('Reply.')])
+      const summary = new WindowAdapter([])
+      ctx.llm.registerAdapter([wide.provider], chat)
+      ctx.llm.registerAdapter(['synthetic-summary'], summary)
+      const sessionId = SessionId('hybrid-detached-observation')
+      const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+      const observe = ctx.sessionQuery.observeSession.bind(ctx.sessionQuery)
+      try {
+        await send(owned.agent, 'Live history before an observation mismatch. '.repeat(150))
+        const nodes = [...owned.agent.session.surface.nodes]
+        const spy = vi.spyOn(ctx.sessionQuery, 'observeSession').mockImplementation(async (...args) => ({
+          ...await observe(...args), source: 'prepared',
+        }))
+        try {
+          if (operation === 'manual compaction') {
+            await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toThrow()
+          } else {
+            owned.agent.model.select({ provider: wide.provider, model: 'narrow' })
+            await send(owned.agent, 'Pending switch input.')
+          }
+          expect(spy).toHaveBeenCalledOnce()
+        } finally {
+          spy.mockRestore()
+        }
+        const { events } = await ctx.sessionQuery.readSession(sessionId)
+        if (operation === 'manual compaction') {
+          expect(events.findLast(event => event.type === 'compaction/end')?.data.error)
+            .toContain('the source Session must be live')
+        } else {
+          const reason = events.findLast(event => event.type === 'turn/end')?.data.reason
+          expect(reason?.kind === 'error' && reason.error.code).toBe('MODEL_SWITCH_COMPACTION_FAILED')
+          expect(reason?.kind === 'error' && reason.error.message).toContain('the source Session must be live')
+          expectPendingInput(owned.agent, 'Pending switch input.')
+        }
+        expect(checkpoints(events)).toHaveLength(0)
+        expect(summary.requests).toHaveLength(0)
+        expect(chat.requests).toHaveLength(1)
+        expect(owned.agent.session.surface.nodes).toEqual(nodes)
+      } finally {
+        await owned.dispose()
+      }
+    }, { auto: true, thresholdRatio: 0.99 })
+  },
+)
+
+it('keeps the committed route when the destination adapter has no known context window', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Reply.')])
+    const destination = new MockAdapter([])
+    const summary = new WindowAdapter([])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['unknown-context'], destination)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-switch-unknown-window')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'Original request on a verified route.')
+      owned.agent.model.select({ provider: 'unknown-context', model: 'destination' })
+      await send(owned.agent, 'Keep this pending until a destination is available.')
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      const reason = events.findLast(event => event.type === 'turn/end')?.data.reason
+      expect(reason?.kind === 'error' && reason.error.code).toBe('MODEL_SWITCH_COMPACTION_FAILED')
+      expect(reason?.kind === 'error' && reason.error.message)
+        .toContain('destination context and completion reserve must be known')
+      expect(owned.agent.session.requestHeader()?.config).toMatchObject(wide)
+      expectPendingInput(owned.agent, 'Keep this pending')
+      expect(destination.requests).toHaveLength(0)
+      expect(summary.requests).toHaveLength(0)
+      expect(checkpoints(events)).toHaveLength(0)
+    } finally {
+      await owned.dispose()
+    }
+  }, { auto: true })
+})
+
+it('refuses explicit compaction of the protected system head', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Reply.')])
+    const summary = new WindowAdapter([])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-protected-system-head')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'Original history under a protected system prompt.')
+      const { session } = owned.agent
+      const nodes = [...session.surface.nodes]
+      const head = session.ownEvents().find(event => event.seq === nodes[0])
+      expect(head?.type).toBe('system/message')
+      session.append('turn/start', { turn: 2 })
+      try {
+        await expect(ctx.compaction.compactRegion(nodes[0]!, nodes.at(-1)!, owned.agent, signal))
+          .rejects.toThrow('cannot replace the protected system head')
+      } finally {
+        session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+      }
+      expect(session.surface.nodes).toEqual(nodes)
+      expect(summary.requests).toHaveLength(0)
+      expect(checkpoints(session.ownEvents())).toHaveLength(0)
+    } finally {
+      await owned.dispose()
+    }
+  })
+})
+
+it('quotes the durable original of a pruned tool result when building a Hybrid checkpoint', async () => {
+  await withContext(async (ctx, root) => {
+    await ctx.plugin(ToolResultPruner)
+    const body = 'EXACT_ORIGINAL_TOOL_BODY '.repeat(1_600)
+    ctx.tools.register(defineContentToolFixture({
+      name: 'fixture_original', description: 'Return a synthetic tool body.', parameters: {},
+      async execute() { return [{ type: 'text', text: body }] },
+    }))
+    const chat = new WindowAdapter([toolCallResponse('original-call', 'fixture_original', {}), textResponse('Read.')])
+    const summary = new WindowAdapter([textResponse('Retain the tool evidence.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-pruned-original')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'Read the original body.')
+      const { session } = owned.agent
+      const original = session.ownEvents().find(event => event.type === 'tool/result')
+      expect(original?.data.message.content).toEqual([{ type: 'text', text: body }])
+      ctx.toolResultPruner.pruneSession(session)
+      const pruned = session.ownEvents().findLast(event => event.type === 'tool/result')
+      expect(pruned?.seq).not.toBe(original?.seq)
+      expect(pruned?.data.message.content).not.toEqual(original?.data.message.content)
+      expect(await ctx.compaction.compactNow(owned.agent, signal)).not.toBeNull()
+      expect(summary.requests).toHaveLength(1)
+      const request = requestText(summary.requests[0]!)
+      expect(request).toContain(body)
+      expect(request).toContain('original-call')
+      expect(request).not.toContain('tool result middle pruned')
+    } finally {
+      await owned.dispose()
+    }
+  })
+})
+
+it('refuses an unconfigured fixed summarizer without quoting history to the conversation adapter', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Reply.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const sessionId = SessionId('hybrid-unconfigured-fixed-summary')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'Original context that is not authorized for fallback summarization. '.repeat(40))
+      await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toThrow()
+      const events = owned.agent.session.ownEvents()
+      expect(events.findLast(event => event.type === 'compaction/end')?.data.error)
+        .toContain('Hybrid requires a configured summarizer')
+      expect(chat.requests).toHaveLength(1)
+      expect(checkpoints(events)).toHaveLength(0)
+    } finally {
+      await owned.dispose()
+    }
+  }, { summarizationProvider: '', summarizationModel: '', summarizationFallback: 'error' })
+})
+
+
+
 
 it.each([
   { name: 'full-window input with a positive transport fallback', window: 4_096, input: 4_096, output: undefined },
@@ -2394,3 +2719,242 @@ it('refuses a checked request after its Session surface changes during the recei
     }
   }, { auto: true, thresholdRatio: 0.95 })
 }, 60_000)
+
+it('rebuilds the overflowing preview from a pruned tool result before attempting a summary', async () => {
+  await withContext(async (ctx, root) => {
+    await ctx.plugin(ToolResultPruner)
+    ctx.tools.register(defineContentToolFixture({
+      name: 'fixture_prunable', description: 'Return an earlier result.', parameters: {},
+      async execute() { return [{ type: 'text', text: 'PRUNABLE_OUTPUT '.repeat(1_900) }] },
+    }))
+    const chat = new WindowAdapter([
+      toolCallResponse('rebuild-original', 'fixture_prunable', {}),
+      textResponse('Read.'),
+      textResponse('Finished.'),
+    ])
+    chat.windows.set('roomy', 16_384)
+    const summary = new WindowAdapter([])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-pruner-rebuilds-preview')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, model: 'roomy', maxTokens: 1_024 }, meta: { cwd: root },
+    })
+    try {
+      await send(owned.agent, 'Read the earlier tool result.')
+      expect(chat.requests).toHaveLength(2)
+      expect(requestText(chat.requests[1]!)).not.toContain('tool result middle pruned')
+      await send(owned.agent, 'PENDING '.repeat(5_000))
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      expectCompletedTurn(events)
+      expect(events.filter(event => event.type === 'compaction/prune')).toHaveLength(1)
+      expect(summary.requests).toHaveLength(0)
+      expect(checkpoints(events)).toHaveLength(0)
+      expect(chat.requests).toHaveLength(3)
+      expect(requestText(chat.requests[2]!)).toContain('tool result middle pruned')
+      expect(requestText(chat.requests[2]!)).toContain('PENDING PENDING')
+    } finally {
+      await owned.dispose()
+    }
+  }, { auto: true, thresholdRatio: 0.99 })
+})
+
+it.each(['unlinked checkpoint', 'non-checkpoint replacement'] as const)(
+  'refuses malformed history with %s before quoting',
+  async (kind) => {
+    await withContext(async (ctx, root) => {
+      const chat = new WindowAdapter([textResponse('Reply.')])
+      const summary = new WindowAdapter([])
+      ctx.llm.registerAdapter([wide.provider], chat)
+      ctx.llm.registerAdapter(['synthetic-summary'], summary)
+      const sessionId = SessionId('hybrid-unsupported-replacement')
+      const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+      try {
+        await send(owned.agent, 'Original history that must remain recoverable.')
+        const { session } = owned.agent
+        const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
+        const unsupported = kind === 'unlinked checkpoint'
+          ? session.append('user/message', createUserMessage({
+            source: compactCheckpointSource(CompactionId('unlinked')),
+            content: [{ type: 'text', text: 'Unlinked checkpoint.' }],
+          }), { surfaceOp: 'append' })
+          : session.append('user/message', createUserMessage({
+            source: { kind: 'user' }, content: [{ type: 'text', text: 'Unsupported replacement.' }],
+          }), {
+            surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq },
+            sourceEventSeqs: [original.seq],
+          })
+        const nodes = [...session.surface.nodes]
+        session.append('turn/start', { turn: 2 })
+        try {
+          await expect(ctx.compaction.compactRegion(unsupported.seq, unsupported.seq, owned.agent, signal))
+            .rejects.toThrow('unsupported Surface replacement event')
+        } finally {
+          session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+        }
+        expect(session.surface.nodes).toEqual(nodes)
+        expect(summary.requests).toHaveLength(0)
+        expect(session.ownEvents()).toContainEqual(original)
+        expect(session.ownEvents().some(event => event.type === 'compaction/summary')).toBe(false)
+      } finally {
+        await owned.dispose()
+      }
+    })
+  },
+)
+
+it('refuses the pending switch when its only raw message cannot be compacted safely', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([[...fault]])
+    const summary = new WindowAdapter([])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-no-safe-switch-span')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'Only retained input from the failed request.')
+      const nodes = [...owned.agent.session.surface.nodes]
+      owned.agent.model.select({ provider: wide.provider, model: 'narrow' })
+      await send(owned.agent, 'PENDING_WITHOUT_SAFE_SPAN '.repeat(900))
+      const events = owned.agent.session.ownEvents()
+      const reason = events.findLast(event => event.type === 'turn/end')?.data.reason
+      expect(reason?.kind === 'error' && reason.error.code).toBe('MODEL_SWITCH_COMPACTION_FAILED')
+      expect(reason?.kind === 'error' && reason.error.message)
+        .toContain('no safe compaction span can reduce the pending request')
+      expectPendingInput(owned.agent, 'PENDING_WITHOUT_SAFE_SPAN')
+      expect(checkpoints(events)).toHaveLength(0)
+      expect(summary.requests).toHaveLength(0)
+      expect(chat.requests).toHaveLength(1)
+      expect(owned.agent.session.surface.nodes).toEqual(nodes)
+    } finally {
+      await owned.dispose()
+    }
+  }, { auto: true })
+})
+
+it('refuses to commit extracted facts when none fit the proposed request budget', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse('Reply.')])
+    const summary = factLedgerAdapter('retained-fact', 'Keep the original source.')
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-no-facts-fit')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await send(owned.agent, 'Original context with a sourced fact. '.repeat(80))
+      const { session } = owned.agent
+      const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
+      const header = session.requestHeader()!
+      const destination = { ...header, config: { ...header.config, maxTokens: chat.windows.get('wide')! - 1 } }
+      const hybrid = ctx.compaction
+      if (!(hybrid instanceof HybridCompactionEngine)) throw new Error('Expected the Hybrid compaction backend')
+      const nodes = [...session.surface.nodes]
+      session.append('turn/start', { turn: 2 })
+      try {
+        await expect(hybrid.compactRegion(original.seq, nodes.at(-1)!, owned.agent, signal, destination))
+          .rejects.toThrow('no fact fits the destination budget')
+      } finally {
+        session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+      }
+      expect(summary.requests).toHaveLength(1)
+      expect(checkpoints(session.ownEvents())).toHaveLength(0)
+      expect(session.surface.nodes).toEqual(nodes)
+    } finally {
+      await owned.dispose()
+    }
+  }, { incremental: true, factLedger: true })
+})
+
+it('binds the Hybrid summary to the mapped source node with no compaction allowlist', async () => {
+  await withResidentComposition(['observe', 'summary'], [], async (ctx, root, qwen, flash) => {
+    const conversations = new WindowAdapter([
+      toolCallResponse('resident-original', 'fixture_resident', {}),
+      textResponse('Read.'),
+      textResponse('Next turn.'),
+    ])
+    const model = 'wide@qwen'
+    conversations.windows.set(model, 2_000_000)
+    ctx.llm.registerAdapter([wide.provider], conversations)
+    ctx.tools.register(defineContentToolFixture({
+      name: 'fixture_resident', description: 'Return local synthetic evidence.', parameters: {},
+      async execute() { return [{ type: 'text', text: 'TOOL_EVIDENCE '.repeat(600) }] },
+    }))
+    const sessionId = SessionId('hybrid-pins-mapped-source-node')
+    const owned = await ctx.agents.create({
+      sessionId, agentOptions: { ...wide, model }, meta: { cwd: root },
+    })
+    try {
+      await send(owned.agent, residentHistory)
+      await send(owned.agent, 'Small subsequent group.')
+      const { session } = owned.agent
+      const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
+      const end = session.surface.nodes.at(-1)!
+      session.append('turn/start', { turn: 3 })
+      try {
+        await ctx.compaction.compactRegion(original.seq, end, owned.agent)
+      } finally {
+        session.append('turn/end', { turn: 3, reason: { kind: 'completed' } })
+      }
+      expectResidentRequests(qwen, local27b, [1])
+      expect(flash.server.paths).toEqual([])
+      const summary = session.ownEvents().findLast(event => event.type === 'compaction/summary')
+      expect(summary?.data.residentSelection?.nodeName).toBe('qwen')
+      expect(summary?.data.chunkCalls?.flatMap(chunk => chunk.groups).length).toBeGreaterThan(1)
+    } finally {
+      await owned.dispose()
+    }
+  }, { residentAllowedNodeIds: undefined, residentPreferredVariantIds: undefined, residentPinnedNodeId: localFlash.id })
+})
+
+it.each(['returns a checkpoint', 'rejects with non-Error data'] as const)(
+  'handles pressure that first qualifies at exact-envelope admission and %s',
+  async (outcome) => {
+    await withContext(async (ctx, root) => {
+      const chat = new WindowAdapter([textResponse('Reply.'), textResponse('Continued.')])
+      const summary = new WindowAdapter([textResponse('Short checkpoint.')])
+      ctx.llm.registerAdapter([wide.provider], chat)
+      ctx.llm.registerAdapter(['synthetic-summary'], summary)
+      const sessionId = SessionId('hybrid-envelope-new-pressure')
+      const owned = await ctx.agents.create({
+        sessionId, agentOptions: { ...wide, model: 'roomy' }, meta: { cwd: root },
+      })
+      chat.windows.set('roomy', 16_384)
+      try {
+        await send(owned.agent, 'PRIOR_HISTORY '.repeat(1_600))
+        // The route's reported capacity changes after the pre-step pressure
+        // measurement, before the adapter prepares the same model's call.
+        const error = outcome === 'rejects with non-Error data'
+        const compact = vi.spyOn(ctx.compaction, 'compactIfNeeded')
+        const remove = owned.agent.ctx.on('agent/request', (_event, next) => {
+          chat.windows.set('roomy', 4_096)
+          if (error) compact.mockRejectedValueOnce('synthetic pressure handler refusal')
+          return next()
+        })
+        try {
+          await send(owned.agent, 'Continue under the current capacity.')
+        } finally {
+          remove()
+          compact.mockRestore()
+        }
+        const { events } = await ctx.sessionQuery.readSession(sessionId)
+        if (error) {
+          expectAdmissionRefusal(events)
+          const reason = events.findLast(event => event.type === 'turn/end')?.data.reason
+          expect(reason?.kind === 'error' && reason.error.message).toContain('synthetic pressure handler refusal')
+          expect(summary.requests).toHaveLength(0)
+          expect(chat.requests).toHaveLength(1)
+          expect(checkpoints(events)).toHaveLength(0)
+          expectPendingInput(owned.agent, 'Continue under the current capacity.')
+        } else {
+          expectCompletedTurn(events)
+          expect(summary.requests).toHaveLength(1)
+          expect(chat.requests).toHaveLength(2)
+          expect(checkpoints(events)).toHaveLength(1)
+          expect(requestText(chat.requests[1]!)).toContain('Short checkpoint.')
+        }
+      } finally {
+        await owned.dispose()
+      }
+    }, { auto: true, thresholdRatio: 0.95, maxTokens: 64 })
+  },
+)
