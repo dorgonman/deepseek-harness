@@ -2073,15 +2073,25 @@ it.each([
       agentOptions: { provider: 'synthetic-chat', model: 'roomy', ...output === undefined ? {} : { maxTokens: output } },
       meta: { cwd: root },
     })
-    const estimate = vi.spyOn(ctx.tokenMeter, 'estimateRequest').mockReturnValue(input)
+    // The live request meter estimates one ASCII text block at four code units
+    // per token plus eight framing tokens and 16 fixed envelope tokens.
+    // These are heuristic input counts.
+    // The resolved route window and prepared cap are authoritative for this
+    // fixture. Normal admission applies no extra margin at the window boundary.
+    const reserve = output ?? 1
+    const body = 'x'.repeat((input - 24) * 4)
     try {
-      await send(owned.agent, 'FULL_WINDOW_INPUT')
+      await send(owned.agent, body)
       const { events } = await ctx.sessionQuery.readSession(sessionId)
       expectAdmissionRefusal(events)
+      expect(events.findLast(event => event.type === 'turn/end')?.data.reason).toMatchObject({
+        error: { message: expect.stringContaining(
+          `~${input + reserve} tokens (${input} request + ${reserve} reserved, ${output === undefined ? 'transport-fallback' : 'explicit'}) exceed the ${window}-token window`,
+        ) },
+      })
       expect(chat.requests).toHaveLength(0)
       expect(events.find(event => event.type === 'request/admission')).toBeUndefined()
     } finally {
-      estimate.mockRestore()
       await owned.dispose()
     }
   }, { auto: true, thresholdRatio: 0.95 })

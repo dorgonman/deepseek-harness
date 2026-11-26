@@ -950,7 +950,7 @@ interface PreparedLlmCall {
    * preparation. The request's call-config fields must match {@link config};
    * reuse or mismatch fails with `INVALID_PREPARED_CALL`.
    * @param options - fully assembled request carrying the prepared config.
-   * @param beforeDispatch - optional final gate on the frozen adapter request, returning a synchronous freshness check.
+   * @param beforeDispatch - optional freshness check and verification of the frozen adapter request.
    * @returns the chunk stream, including the `llm/stream` waterfall.
    */
   stream(options: GenerateOptions, beforeDispatch?: RequestDispatchGate): AsyncIterable<StreamChunk>
