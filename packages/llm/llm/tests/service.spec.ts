@@ -1031,6 +1031,22 @@ describe('LlmRuntime', () => {
     expect(second.lastOptions).toBeUndefined()
   })
 
+  it('refuses a stale prepared call even without envelope verification', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new RecordingAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+    const prepared = await ctx.llm.prepareCall({ provider: 'route', model: 'model' })
+    expect(prepared.context).toBeUndefined()
+
+    const stale = new Error('stale session')
+    const stream = prepared.stream({ ...prepared.config, messages: [] }, {
+      assertCurrent: () => { throw stale },
+    })
+    await expect(collect(stream)).rejects.toBe(stale)
+    expect(adapter.lastOptions).toBeUndefined()
+  })
+
   it('prepares a one-shot registration-bound call and rejects config drift', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)

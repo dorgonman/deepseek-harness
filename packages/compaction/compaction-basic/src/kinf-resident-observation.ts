@@ -129,7 +129,8 @@ async function observationBody(response: Response): Promise<unknown> {
       chunks.push(decoder.decode(next.value, { stream: true }))
     }
     chunks.push(decoder.decode())
-    return JSON.parse(chunks.join('')) as unknown
+    const observation: unknown = JSON.parse(chunks.join(''))
+    return observation
   } finally {
     await reader.cancel()
     reader.releaseLock()

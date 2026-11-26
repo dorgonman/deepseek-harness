@@ -5127,7 +5127,7 @@ export const EVENT_API: readonly EventApiEntry[] = [
     mode: 'serial',
     signature: '\'agent/request-envelope\'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader contextWindow?: number completionMaxTokens?: number completionSource: LlmCompletionReservation[\'source\'] imagePricing?: LlmImageRequestPricing signal: AbortSignal } & ({ phase: \'preview\' view: () => Session projectRequest?: PreparedLlmCall[\'projectRequest\'] } | { phase: \'verify\' request: GenerateOptions flushReceipt: () => Promise<void> turn: number step: number })): Promise<void> | void',
     summary: 'Price the request envelope before it is committed or dispatched.',
-    description: 'Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen adapter-facing request after projection. A refusal prevents provider dispatch.',
+    description: 'Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen adapter-facing request after projection when the context window is known. A refusal prevents provider dispatch.',
     parameters: [{ name: 'payload', description: '.signal - the current turn\'s cancellation signal.' }],
   },
   {

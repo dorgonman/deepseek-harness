@@ -255,14 +255,17 @@ export interface PreparedLlmCall {
    * preparation. The request's call-config fields must match {@link config};
    * reuse or mismatch fails with `INVALID_PREPARED_CALL`.
    * @param options - fully assembled request carrying the prepared config.
-   * @param beforeDispatch - optional final gate on the frozen adapter request, returning a synchronous freshness check.
+   * @param beforeDispatch - optional freshness check and verification of the frozen adapter request.
    * @returns the chunk stream, including the `llm/stream` waterfall.
    */
   stream(options: GenerateOptions, beforeDispatch?: RequestDispatchGate): AsyncIterable<StreamChunk>
 }
 
-/** Await admission, then assert freshness synchronously at provider dispatch. */
-type RequestDispatchGate = (request: GenerateOptions) => Promise<() => void>
+/** Check freshness at provider dispatch and after any asynchronous envelope verification. */
+interface RequestDispatchGate {
+  assertCurrent(): void
+  verify?(request: GenerateOptions): Promise<void>
+}
 
 /** One adapter-owned model-resolution generation bound to its eventual stream call. */
 export interface PreparedAdapterCall {
@@ -1283,10 +1286,15 @@ export class LlmRuntime extends TypertRemoteService {
 
     // Admission and persistence failures belong to the loop, outside adapter
     // normalization and retry. Dispatch consumes the verified object directly.
-    if (prepared?.beforeDispatch !== undefined) {
-      const assertCurrent = await prepared.beforeDispatch(deepFreeze(request))
+    const gate = prepared?.beforeDispatch
+    if (gate !== undefined) {
       request.signal?.throwIfAborted()
-      assertCurrent()
+      gate.assertCurrent()
+      if (gate.verify !== undefined) {
+        await gate.verify(deepFreeze(request))
+        request.signal?.throwIfAborted()
+        gate.assertCurrent()
+      }
     }
 
     let iterator: AsyncIterator<StreamChunk>

@@ -1076,7 +1076,7 @@ Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/s
 
 #### `agent/request-envelope` — serial
 
-Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen adapter-facing request after projection. A refusal prevents provider dispatch.
+Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen adapter-facing request after projection when the context window is known. A refusal prevents provider dispatch.
 
 ```ts cordis-catalog
 /**
@@ -1084,7 +1084,7 @@ Price the request envelope before it is committed or dispatched. The `preview` p
  * `preview` phase runs before the step commits its admission, so a listener
  * may commit a checkpoint (the loop then rebuilds the preview and re-admits);
  * the `verify` phase runs on the frozen adapter-facing request after
- * projection. A refusal prevents provider dispatch.
+ * projection when the context window is known. A refusal prevents provider dispatch.
  * @param payload.agent - the agent whose request is being admitted.
  * @param payload.header - the resolved envelope logged for this attempt.
  * @param payload.contextWindow - the destination model's window when known.

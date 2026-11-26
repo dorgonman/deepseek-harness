@@ -541,14 +541,12 @@ export class ReactLoopAgent implements Agent {
         ? new StreamRepetition() : undefined
       let started = false
       try {
-        const stream = preparedCall?.stream(
-          request,
-          async (projected) => {
-            assertCurrent()
-            await this.verifyEnvelope(header, preparedCall, projected, position, signal)
-            return assertCurrent
+        const stream = preparedCall?.stream(request, {
+          assertCurrent,
+          ...preparedCall.context === undefined ? {} : {
+            verify: projected => this.verifyEnvelope(header, preparedCall, projected, position, signal),
           },
-        ) ?? this.loopCtx.llm.stream(request)
+        }) ?? this.loopCtx.llm.stream(request)
         signal.throwIfAborted()
         live.start()
         started = true

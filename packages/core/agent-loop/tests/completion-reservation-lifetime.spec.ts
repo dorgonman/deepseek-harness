@@ -14,6 +14,12 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 
+class ContextWindowAdapter extends MockAdapter {
+  override async resolveModel(provider: string, model: string) {
+    return { ...await super.resolveModel(provider, model), context: { contextWindow: 32_768 } }
+  }
+}
+
 const route = { provider: 'mock', model: 'mock' }
 const sessionId = SessionId('completion-reservation')
 
@@ -61,6 +67,7 @@ async function expectTurn(
   const admissions: { maxTokens: number | undefined; source: string; calls: number }[] = []
   const disposeAdmission = ctx.on('agent/request-envelope', (event) => {
     if (event.agent === agent && event.phase === 'verify') {
+      expect(event.contextWindow).toBe(32_768)
       admissions.push({
         maxTokens: event.completionMaxTokens,
         source: event.completionSource,
@@ -94,7 +101,7 @@ it.each([
 ] as const)('resolves $scenario through cold JSONL resume', async ({ priorCap, resumeCap, expectedCap, source }) => {
   const fixture = await newFixture()
   const first = await mountProfile(fixture)
-  const firstAdapter = new MockAdapter([textResponse('stored')])
+  const firstAdapter = new ContextWindowAdapter([textResponse('stored')])
   first.llm.registerAdapter([route.provider], firstAdapter)
   await first.plugin(AgentLoop, { agents: [] })
   const handle = await first.agents.create({
@@ -107,7 +114,7 @@ it.each([
   fixture.contexts.pop()
 
   const resumed = await mountProfile(fixture)
-  const resumedAdapter = new MockAdapter([textResponse('resumed')], undefined, 2_048)
+  const resumedAdapter = new ContextWindowAdapter([textResponse('resumed')], undefined, 2_048)
   resumed.llm.registerAdapter([route.provider], resumedAdapter)
   await resumed.plugin(AgentLoop, { agents: [] })
   const { agent } = await resumed.agents.resume({
@@ -125,7 +132,7 @@ it.each([
   { scenario: 'new explicit configured cap', priorCap: 512, reloadedCap: 768, before: 512, after: 768, source: 'explicit' },
 ] as const)('resolves $scenario through configured AgentLoop reload', async ({ priorCap, reloadedCap, before, after, source }) => {
   const ctx = await mountProfile(await newFixture())
-  const firstAdapter = new MockAdapter([textResponse('stored')], undefined, 1_024)
+  const firstAdapter = new ContextWindowAdapter([textResponse('stored')], undefined, 1_024)
   const disposeAdapter = ctx.llm.registerAdapter([route.provider], firstAdapter)
   const configured = { id: 'main', sessionId, ...route }
   const firstLoop = await ctx.plugin(AgentLoop, {
@@ -136,7 +143,7 @@ it.each([
   await firstLoop.dispose()
   disposeAdapter()
 
-  const nextAdapter = new MockAdapter([textResponse('reloaded')], undefined, 2_048)
+  const nextAdapter = new ContextWindowAdapter([textResponse('reloaded')], undefined, 2_048)
   ctx.llm.registerAdapter([route.provider], nextAdapter)
   await ctx.plugin(AgentLoop, {
     agents: [{ ...configured, ...reloadedCap === undefined ? {} : { maxTokens: reloadedCap } }],

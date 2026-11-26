@@ -170,6 +170,15 @@ function expectAdmissionRefusal(events: readonly SessionEvent[]) {
   })
 }
 
+function watchRequestErrors(agent: Agent) {
+  const errors = vi.fn()
+  const dispose = agent.ctx.on('agent/request-error', (_event, next) => {
+    errors()
+    return next()
+  })
+  return { errors, dispose }
+}
+
 function expectPendingInput(agent: Agent, marker: string) {
   expect(agent.inbox.nextStep.some(message => message.content.some(block => block.type === 'text'
     && block.text.includes(marker)))).toBe(true)
@@ -313,6 +322,23 @@ it('references an oversized result while preserving its tool pair and exact orig
   }, { summarizationModel: 'narrow', maxTokens: 64 })
 })
 
+async function expectFittingSwitch(
+  ctx: Context,
+  sessionId: SessionId,
+  adapters: { chat: WindowAdapter; summary: WindowAdapter },
+  destination: string,
+  retainedText: string,
+) {
+  const request = adapters.chat.requests.at(-1)
+  expect(request?.model).toBe(destination)
+  if (request === undefined) throw new Error('The destination did not receive a request')
+  expect(requestText(request)).toContain(retainedText)
+  expect(adapters.summary.requests).toHaveLength(0)
+  const { events } = await ctx.sessionQuery.readSession(sessionId)
+  expect(events.some(event => event.type === 'compaction/start')).toBe(false)
+  expectCompletedTurn(events)
+}
+
 it.each([
   ['destination pressure', 'wide', 'small'],
   ['source pressure', 'small', 'wide'],
@@ -345,14 +371,7 @@ it.each([
     owned.agent.model.select({ provider: wide.provider, model: destination })
     await send(owned.agent, 'Continue on the destination route.')
 
-    const request = chat.requests.at(-1)
-    expect(request?.model).toBe(destination)
-    if (request === undefined) throw new Error('The destination did not receive a request')
-    expect(requestText(request)).toContain('ORIGINAL_HISTORY')
-    expect(summary.requests).toHaveLength(0)
-    const { events } = await ctx.sessionQuery.readSession(sessionId)
-    expect(events.some(event => event.type === 'compaction/start')).toBe(false)
-    expectCompletedTurn(events)
+    await expectFittingSwitch(ctx, sessionId, { chat, summary }, destination, 'ORIGINAL_HISTORY')
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.5 })
 })
@@ -381,14 +400,7 @@ it('switches without compacting when the text-only destination projects the imag
     owned.agent.model.select({ provider: wide.provider, model: 'narrow' })
     await send(owned.agent, 'Continue on the text-only route.')
 
-    const request = chat.requests.at(-1)
-    expect(request?.model).toBe('narrow')
-    if (request === undefined) throw new Error('The destination did not receive a request')
-    expect(requestText(request)).toContain(textOnlyImageText(admissionImage))
-    expect(summary.requests).toHaveLength(0)
-    const { events } = await ctx.sessionQuery.readSession(sessionId)
-    expect(events.some(event => event.type === 'compaction/start')).toBe(false)
-    expectCompletedTurn(events)
+    await expectFittingSwitch(ctx, sessionId, { chat, summary }, 'narrow', textOnlyImageText(admissionImage))
     await owned.dispose()
   }, { auto: true, thresholdRatio: 0.5 })
 })
@@ -2253,11 +2265,7 @@ it('withholds the adapter request when the accepted admission receipt cannot flu
     const owned = await ctx.agents.create({ sessionId, agentOptions: { ...wide, model: 'narrow' }, meta: { cwd: root } })
     const flush = ctx.sessions.flush.bind(ctx.sessions)
     let receiptFlushRefused = false
-    let providerErrors = 0
-    const remove = owned.agent.ctx.on('agent/request-error', (_event, next) => {
-      providerErrors += 1
-      return next()
-    })
+    const requestErrors = watchRequestErrors(owned.agent)
     const spy = vi.spyOn(ctx.sessions, 'flush').mockImplementation(async (session) => {
       if (!receiptFlushRefused && session.ownEvents().some(event => event.type === 'request/admission')) {
         receiptFlushRefused = true
@@ -2274,9 +2282,9 @@ it('withholds the adapter request when the accepted admission receipt cannot flu
       expect(reason?.kind === 'error' ? reason.error.message : undefined)
         .toContain('synthetic admission receipt flush failure')
       expect(chat.requests).toHaveLength(0)
-      expect(providerErrors).toBe(0)
+      expect(requestErrors.errors).not.toHaveBeenCalled()
     } finally {
-      remove()
+      requestErrors.dispose()
       spy.mockRestore()
       await owned.dispose()
     }
@@ -2348,11 +2356,7 @@ it('refuses a checked request after its Session surface changes during the recei
     })
     const flush = ctx.sessions.flush.bind(ctx.sessions)
     let changeInjected = false
-    let providerErrors = 0
-    const remove = owned.agent.ctx.on('agent/request-error', (_event, next) => {
-      providerErrors += 1
-      return next()
-    })
+    const requestErrors = watchRequestErrors(owned.agent)
     const spy = vi.spyOn(ctx.sessions, 'flush').mockImplementation(async (session) => {
       if (!changeInjected && session.ownEvents().some(event => event.type === 'request/admission')) {
         changeInjected = true
@@ -2368,13 +2372,13 @@ it('refuses a checked request after its Session surface changes during the recei
       expect(changeInjected).toBe(true)
       expectAdmissionRefusal(events)
       expect(chat.requests).toHaveLength(0)
-      expect(providerErrors).toBe(0)
+      expect(requestErrors.errors).not.toHaveBeenCalled()
       const inputIds = events.flatMap(event => event.type === 'user/message' ? [event.data.id] : [])
       expect(inputIds.filter(id => id === pending.id)).toHaveLength(1)
       expect(inputIds).toContain(concurrent.id)
       expect(owned.agent.inbox.nextStep).toHaveLength(0)
     } finally {
-      remove()
+      requestErrors.dispose()
       spy.mockRestore()
       await owned.dispose()
     }

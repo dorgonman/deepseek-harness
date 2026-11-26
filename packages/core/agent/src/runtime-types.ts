@@ -406,7 +406,7 @@ declare module '@deepseek-ai/cordis' {
      * `preview` phase runs before the step commits its admission, so a listener
      * may commit a checkpoint (the loop then rebuilds the preview and re-admits);
      * the `verify` phase runs on the frozen adapter-facing request after
-     * projection. A refusal prevents provider dispatch.
+     * projection when the context window is known. A refusal prevents provider dispatch.
      * @param payload.agent - the agent whose request is being admitted.
      * @param payload.header - the resolved envelope logged for this attempt.
      * @param payload.contextWindow - the destination model's window when known.

@@ -30,7 +30,7 @@ function snapshot() {
     host: {
       node_id: null as string | null,
       boot_generation: null as string | null,
-      route: null as unknown,
+      route: null as { route_id: string } | null,
       instance: route.instance,
       logical_model: route.logicalModel,
       mode: 'mservice',
