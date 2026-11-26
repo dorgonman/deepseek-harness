@@ -206,10 +206,8 @@ describe('web e2e: generic file upload through the real assembly', () => {
   beforeAll(async () => {
     scaffold = await launchWebScaffold({
       compareReplaySession: true,
-      ...WINDOWS ? {} : {
-        pinAdmissionSourceRoot: true,
-        workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
-      },
+      pinAdmissionSourceRoot: true,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
       // The override rescripts the recorded read arguments with a
       // `{{fromRequest:…}}` placeholder: the saved-copy path differs per run,
       // and the live handle line in the request carries the current one.

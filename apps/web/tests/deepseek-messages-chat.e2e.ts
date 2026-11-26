@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { chromium, type Browser, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, selectedSessionFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -25,6 +26,7 @@ describe.skipIf(MODE === 'record')('web e2e: DeepSeek Messages conversation', ()
     replayFixture = await selectedSessionFixture(FIXTURE, false)
     scaffold = await launchWebScaffold({
       replayFixture,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH, pinAdmissionSourceRoot: true,
       paceMs: 5,
       replayProviders: [{
         id: 'deepseek-messages', name: 'DeepSeek',
@@ -37,7 +39,9 @@ describe.skipIf(MODE === 'record')('web e2e: DeepSeek Messages conversation', ()
     })
     await scaffold.ctx.agentDefaultModel.saveSelection({ provider: 'deepseek-messages', model: 'deepseek-v4-flash' })
     browser = await chromium.launch()
-    page = await browser.newPage({ viewport: { width: 1680, height: 1000 }, locale: ZH_BROWSER_LOCALE })
+    page = await browser.newPage({
+      viewport: { width: 1680, height: 1000 }, locale: ZH_BROWSER_LOCALE, timezoneId: 'Asia/Shanghai',
+    })
     tripwire = watchConsole(page)
     await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)

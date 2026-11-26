@@ -32,8 +32,10 @@ describe.skipIf(MODE === 'record')('web e2e: default Workspace', () => {
       // Windows owns its recording. The shared POSIX recording remains read-only.
       compareReplaySession: WINDOWS || MODE === 'replay',
       // The borrowed recording uses the scaffold root followed by `workspace`.
-      ...WINDOWS ? {} : { workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH + 'workspace'.length - DEFAULT_WORKSPACE_PATH.length },
-      pinAdmissionSourceRoot: !WINDOWS,
+      workspacePathLength: WINDOWS
+        ? ADMISSION_WORKSPACE_PATH_LENGTH
+        : ADMISSION_WORKSPACE_PATH_LENGTH + 'workspace'.length - DEFAULT_WORKSPACE_PATH.length,
+      pinAdmissionSourceRoot: true,
       paceMs: 5,
     })
     onTestFinished(() => scaffold.close())
