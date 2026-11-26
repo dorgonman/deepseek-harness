@@ -3089,7 +3089,7 @@ def normalize_session_format_comparison(
     value: object,
     source_session_version: int | None = None,
 ) -> object:
-    """Canonicalize only generation metadata that differs across immutable Session files."""
+    """Canonicalize generation metadata and validate host-dependent admission estimates."""
     if isinstance(value, list):
         return [
             normalize_session_format_comparison(expanded, source_session_version)
@@ -3118,6 +3118,21 @@ def normalize_session_format_comparison(
     if isinstance(normalized.get("type"), str) and "data" in normalized:
         normalized.pop("seq", None)
         normalized.pop("time", None)
+    if normalized.get("type") == "request/admission":
+        data = normalized.get("data")
+        if not isinstance(data, dict):
+            raise AssertionError("request admission snapshot has no payload")
+        input_tokens = data.get("inputTokens")
+        completion_tokens = data.get("completionMaxTokens")
+        context_window = data.get("contextWindow")
+        if (
+            type(input_tokens) is not int or input_tokens < 0
+            or type(completion_tokens) is not int or completion_tokens < 0
+            or type(context_window) is not int or context_window <= 0
+            or input_tokens + completion_tokens > context_window
+        ):
+            raise AssertionError("request admission snapshot has invalid token counts")
+        normalized["data"] = {**data, "inputTokens": "{{estimatedInputTokens}}"}
     if source_session_version == 1 and normalized.get("type") == "assistant/message":
         normalized.pop("sourceEventSeqs", None)
     return normalized
@@ -3148,7 +3163,7 @@ def normalize_snapshot_comparison_text(
     content: str,
     native_writer_version: int | None = None,
 ) -> str:
-    """Normalize Session generation metadata only while comparing committed expected outputs."""
+    """Normalize Session metadata and host-dependent estimates for comparison."""
     if name.startswith("session") and name.endswith(".jsonl"):
         parsed = [json.loads(line) for line in content.splitlines() if line]
         header = parsed[0] if parsed else None

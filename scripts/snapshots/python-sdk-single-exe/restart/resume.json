@@ -9,6 +9,7 @@
     "user/message",
     "request/header",
     "request/context",
+    "request/admission",
     "session-log-deepseek/delivery-accepted",
     "assistant/message",
     "step/end",

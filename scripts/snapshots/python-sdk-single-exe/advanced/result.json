@@ -313,18 +313,34 @@
       }
     },
     {
-      "type": "session-log-deepseek/delivery-accepted",
+      "type": "request/admission",
       "seq": 20,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 1,
+        "provider": "deepseek-official",
+        "model": "smoke-model",
+        "contextWindow": 1000000,
+        "inputTokens": 2668,
+        "completionMaxTokens": 256000,
+        "completionSource": "adapter-default"
+      },
+      "ignorable": true
+    },
+    {
+      "type": "session-log-deepseek/delivery-accepted",
+      "seq": 21,
       "time": 0,
       "data": {
         "sessionId": "{{parent}}",
         "sessionFormatVersion": 4,
-        "throughSeq": 19
+        "throughSeq": 20
       }
     },
     {
       "type": "assistant/message",
-      "seq": 21,
+      "seq": 22,
       "time": 0,
       "data": {
         "turn": 1,
@@ -448,7 +464,7 @@
     },
     {
       "type": "tool/call",
-      "seq": 22,
+      "seq": 23,
       "time": 0,
       "data": {
         "turn": 1,
@@ -460,7 +476,7 @@
     },
     {
       "type": "job/registered",
-      "seq": 23,
+      "seq": 24,
       "time": 0,
       "data": {
         "jobId": "{{id:1}}",
@@ -476,7 +492,7 @@
     },
     {
       "type": "job/settled",
-      "seq": 24,
+      "seq": 25,
       "time": 0,
       "data": {
         "jobId": "{{id:1}}",
@@ -496,7 +512,7 @@
     },
     {
       "type": "tool/result",
-      "seq": 25,
+      "seq": 26,
       "time": 0,
       "data": {
         "turn": 1,
@@ -519,13 +535,13 @@
         }
       },
       "sourceEventSeqs": [
-        22
+        23
       ],
       "surfaceOp": "append"
     },
     {
       "type": "step/end",
-      "seq": 26,
+      "seq": 27,
       "time": 0,
       "data": {
         "turn": 1,
@@ -534,7 +550,7 @@
     },
     {
       "type": "step/start",
-      "seq": 27,
+      "seq": 28,
       "time": 0,
       "data": {
         "turn": 1,
@@ -542,18 +558,34 @@
       }
     },
     {
+      "type": "request/admission",
+      "seq": 29,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 2,
+        "provider": "deepseek-official",
+        "model": "smoke-model",
+        "contextWindow": 1000000,
+        "inputTokens": 2693,
+        "completionMaxTokens": 256000,
+        "completionSource": "adapter-default"
+      },
+      "ignorable": true
+    },
+    {
       "type": "session-log-deepseek/delivery-accepted",
-      "seq": 28,
+      "seq": 30,
       "time": 0,
       "data": {
         "sessionId": "{{parent}}",
         "sessionFormatVersion": 4,
-        "throughSeq": 27
+        "throughSeq": 29
       }
     },
     {
       "type": "assistant/message",
-      "seq": 29,
+      "seq": 31,
       "time": 0,
       "data": {
         "turn": 1,
@@ -677,7 +709,7 @@
     },
     {
       "type": "tool/call",
-      "seq": 30,
+      "seq": 32,
       "time": 0,
       "data": {
         "turn": 1,
@@ -689,7 +721,7 @@
     },
     {
       "type": "tool/result",
-      "seq": 31,
+      "seq": 33,
       "time": 0,
       "data": {
         "turn": 1,
@@ -717,13 +749,13 @@
         }
       },
       "sourceEventSeqs": [
-        30
+        32
       ],
       "surfaceOp": "append"
     },
     {
       "type": "step/end",
-      "seq": 32,
+      "seq": 34,
       "time": 0,
       "data": {
         "turn": 1,
@@ -732,7 +764,7 @@
     },
     {
       "type": "step/start",
-      "seq": 33,
+      "seq": 35,
       "time": 0,
       "data": {
         "turn": 1,
@@ -740,18 +772,34 @@
       }
     },
     {
+      "type": "request/admission",
+      "seq": 36,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 3,
+        "provider": "deepseek-official",
+        "model": "smoke-model",
+        "contextWindow": 1000000,
+        "inputTokens": 2737,
+        "completionMaxTokens": 256000,
+        "completionSource": "adapter-default"
+      },
+      "ignorable": true
+    },
+    {
       "type": "session-log-deepseek/delivery-accepted",
-      "seq": 34,
+      "seq": 37,
       "time": 0,
       "data": {
         "sessionId": "{{parent}}",
         "sessionFormatVersion": 4,
-        "throughSeq": 33
+        "throughSeq": 36
       }
     },
     {
       "type": "assistant/message",
-      "seq": 35,
+      "seq": 38,
       "time": 0,
       "data": {
         "turn": 1,
@@ -875,7 +923,7 @@
     },
     {
       "type": "tool/call",
-      "seq": 36,
+      "seq": 39,
       "time": 0,
       "data": {
         "turn": 1,
@@ -887,7 +935,7 @@
     },
     {
       "type": "subagent/catalog",
-      "seq": 37,
+      "seq": 40,
       "time": 0,
       "data": {
         "version": 3,
@@ -900,7 +948,7 @@
     },
     {
       "type": "tool/result",
-      "seq": 38,
+      "seq": 41,
       "time": 0,
       "data": {
         "turn": 1,
@@ -927,13 +975,13 @@
         }
       },
       "sourceEventSeqs": [
-        36
+        39
       ],
       "surfaceOp": "append"
     },
     {
       "type": "step/end",
-      "seq": 39,
+      "seq": 42,
       "time": 0,
       "data": {
         "turn": 1,
@@ -942,7 +990,7 @@
     },
     {
       "type": "step/start",
-      "seq": 40,
+      "seq": 43,
       "time": 0,
       "data": {
         "turn": 1,
@@ -950,18 +998,34 @@
       }
     },
     {
+      "type": "request/admission",
+      "seq": 44,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 4,
+        "provider": "deepseek-official",
+        "model": "smoke-model",
+        "contextWindow": 1000000,
+        "inputTokens": 2787,
+        "completionMaxTokens": 256000,
+        "completionSource": "adapter-default"
+      },
+      "ignorable": true
+    },
+    {
       "type": "session-log-deepseek/delivery-accepted",
-      "seq": 41,
+      "seq": 45,
       "time": 0,
       "data": {
         "sessionId": "{{parent}}",
         "sessionFormatVersion": 4,
-        "throughSeq": 40
+        "throughSeq": 44
       }
     },
     {
       "type": "agent/inbox/spliced",
-      "seq": 42,
+      "seq": 46,
       "time": 0,
       "data": {
         "target": "next-step",
@@ -997,7 +1061,7 @@
     },
     {
       "type": "assistant/message",
-      "seq": 43,
+      "seq": 47,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1121,7 +1185,7 @@
     },
     {
       "type": "tool/call",
-      "seq": 44,
+      "seq": 48,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1133,7 +1197,7 @@
     },
     {
       "type": "tool-workflow/run-start",
-      "seq": 45,
+      "seq": 49,
       "time": 0,
       "data": {
         "runId": "{{workflow-run}}",
@@ -1142,7 +1206,7 @@
     },
     {
       "type": "subagent/catalog",
-      "seq": 46,
+      "seq": 50,
       "time": 0,
       "data": {
         "version": 3,
@@ -1155,7 +1219,7 @@
     },
     {
       "type": "tool-workflow/agent-start",
-      "seq": 47,
+      "seq": 51,
       "time": 0,
       "data": {
         "runId": "{{workflow-run}}",
@@ -1167,7 +1231,7 @@
     },
     {
       "type": "tool-workflow/agent-end",
-      "seq": 48,
+      "seq": 52,
       "time": 0,
       "data": {
         "runId": "{{workflow-run}}",
@@ -1177,7 +1241,7 @@
     },
     {
       "type": "tool-workflow/run-end",
-      "seq": 49,
+      "seq": 53,
       "time": 0,
       "data": {
         "runId": "{{workflow-run}}",
@@ -1186,7 +1250,7 @@
     },
     {
       "type": "tool/result",
-      "seq": 50,
+      "seq": 54,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1209,13 +1273,13 @@
         }
       },
       "sourceEventSeqs": [
-        44
+        48
       ],
       "surfaceOp": "append"
     },
     {
       "type": "step/end",
-      "seq": 51,
+      "seq": 55,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1224,7 +1288,7 @@
     },
     {
       "type": "agent/inbox/spliced",
-      "seq": 52,
+      "seq": 56,
       "time": 0,
       "data": {
         "target": "next-step",
@@ -1235,7 +1299,7 @@
     },
     {
       "type": "step/start",
-      "seq": 53,
+      "seq": 57,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1244,7 +1308,7 @@
     },
     {
       "type": "user/message",
-      "seq": 54,
+      "seq": 58,
       "time": 0,
       "data": {
         "content": [
@@ -1274,18 +1338,34 @@
       "surfaceOp": "append"
     },
     {
+      "type": "request/admission",
+      "seq": 59,
+      "time": 0,
+      "data": {
+        "turn": 1,
+        "step": 5,
+        "provider": "deepseek-official",
+        "model": "smoke-model",
+        "contextWindow": 1000000,
+        "inputTokens": 2945,
+        "completionMaxTokens": 256000,
+        "completionSource": "adapter-default"
+      },
+      "ignorable": true
+    },
+    {
       "type": "session-log-deepseek/delivery-accepted",
-      "seq": 55,
+      "seq": 60,
       "time": 0,
       "data": {
         "sessionId": "{{parent}}",
         "sessionFormatVersion": 4,
-        "throughSeq": 54
+        "throughSeq": 59
       }
     },
     {
       "type": "assistant/message",
-      "seq": 56,
+      "seq": 61,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1393,7 +1473,7 @@
     },
     {
       "type": "step/end",
-      "seq": 57,
+      "seq": 62,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1402,7 +1482,7 @@
     },
     {
       "type": "command/run",
-      "seq": 58,
+      "seq": 63,
       "time": 0,
       "data": {
         "commandId": "{{command:1}}",
@@ -1414,7 +1494,7 @@
     },
     {
       "type": "feedback/record",
-      "seq": 59,
+      "seq": 64,
       "time": 0,
       "data": {
         "text": "The session needs a clearer explanation."
@@ -1422,7 +1502,7 @@
     },
     {
       "type": "command/done",
-      "seq": 60,
+      "seq": 65,
       "time": 0,
       "data": {
         "commandId": "{{command:1}}",
@@ -1432,7 +1512,7 @@
     },
     {
       "type": "feedback/record",
-      "seq": 61,
+      "seq": 66,
       "time": 0,
       "data": {
         "category": "other"
@@ -1440,7 +1520,7 @@
     },
     {
       "type": "feedback/message-put",
-      "seq": 62,
+      "seq": 67,
       "time": 0,
       "data": {
         "sessionId": "{{parent}}",
@@ -1457,7 +1537,7 @@
     },
     {
       "type": "feedback/message-put",
-      "seq": 63,
+      "seq": 68,
       "time": 0,
       "data": {
         "sessionId": "{{parent}}",
@@ -1473,7 +1553,7 @@
     },
     {
       "type": "feedback/message-delete",
-      "seq": 64,
+      "seq": 69,
       "time": 0,
       "data": {
         "sessionId": "{{parent}}",
@@ -1482,7 +1562,7 @@
     },
     {
       "type": "turn/end",
-      "seq": 65,
+      "seq": 70,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1911,13 +1991,35 @@
       "payload": {
         "sessionId": "{{parent}}",
         "event": {
-          "type": "session-log-deepseek/delivery-accepted",
+          "type": "request/admission",
           "seq": 20,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 1,
+            "provider": "deepseek-official",
+            "model": "smoke-model",
+            "contextWindow": 1000000,
+            "inputTokens": 2668,
+            "completionMaxTokens": 256000,
+            "completionSource": "adapter-default"
+          },
+          "ignorable": true
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "session-log-deepseek/delivery-accepted",
+          "seq": 21,
           "time": 0,
           "data": {
             "sessionId": "{{parent}}",
             "sessionFormatVersion": 4,
-            "throughSeq": 19
+            "throughSeq": 20
           }
         }
       }
@@ -1928,7 +2030,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/message",
-          "seq": 21,
+          "seq": 22,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2058,7 +2160,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/call",
-          "seq": 22,
+          "seq": 23,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2076,7 +2178,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "job/registered",
-          "seq": 23,
+          "seq": 24,
           "time": 0,
           "data": {
             "jobId": "{{id:1}}",
@@ -2098,7 +2200,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "job/settled",
-          "seq": 24,
+          "seq": 25,
           "time": 0,
           "data": {
             "jobId": "{{id:1}}",
@@ -2124,7 +2226,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/result",
-          "seq": 25,
+          "seq": 26,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2147,7 +2249,7 @@
             }
           },
           "sourceEventSeqs": [
-            22
+            23
           ],
           "surfaceOp": "append"
         }
@@ -2159,7 +2261,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/end",
-          "seq": 26,
+          "seq": 27,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2174,7 +2276,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/start",
-          "seq": 27,
+          "seq": 28,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2188,13 +2290,35 @@
       "payload": {
         "sessionId": "{{parent}}",
         "event": {
+          "type": "request/admission",
+          "seq": 29,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 2,
+            "provider": "deepseek-official",
+            "model": "smoke-model",
+            "contextWindow": 1000000,
+            "inputTokens": 2693,
+            "completionMaxTokens": 256000,
+            "completionSource": "adapter-default"
+          },
+          "ignorable": true
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
           "type": "session-log-deepseek/delivery-accepted",
-          "seq": 28,
+          "seq": 30,
           "time": 0,
           "data": {
             "sessionId": "{{parent}}",
             "sessionFormatVersion": 4,
-            "throughSeq": 27
+            "throughSeq": 29
           }
         }
       }
@@ -2205,7 +2329,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/message",
-          "seq": 29,
+          "seq": 31,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2335,7 +2459,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/call",
-          "seq": 30,
+          "seq": 32,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2353,7 +2477,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/result",
-          "seq": 31,
+          "seq": 33,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2381,7 +2505,7 @@
             }
           },
           "sourceEventSeqs": [
-            30
+            32
           ],
           "surfaceOp": "append"
         }
@@ -2393,7 +2517,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/end",
-          "seq": 32,
+          "seq": 34,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2408,7 +2532,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/start",
-          "seq": 33,
+          "seq": 35,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2422,13 +2546,35 @@
       "payload": {
         "sessionId": "{{parent}}",
         "event": {
+          "type": "request/admission",
+          "seq": 36,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 3,
+            "provider": "deepseek-official",
+            "model": "smoke-model",
+            "contextWindow": 1000000,
+            "inputTokens": 2737,
+            "completionMaxTokens": 256000,
+            "completionSource": "adapter-default"
+          },
+          "ignorable": true
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
           "type": "session-log-deepseek/delivery-accepted",
-          "seq": 34,
+          "seq": 37,
           "time": 0,
           "data": {
             "sessionId": "{{parent}}",
             "sessionFormatVersion": 4,
-            "throughSeq": 33
+            "throughSeq": 36
           }
         }
       }
@@ -2439,7 +2585,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/message",
-          "seq": 35,
+          "seq": 38,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2569,7 +2715,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/call",
-          "seq": 36,
+          "seq": 39,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2777,7 +2923,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "subagent/catalog",
-          "seq": 37,
+          "seq": 40,
           "time": 0,
           "data": {
             "version": 3,
@@ -2796,7 +2942,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/result",
-          "seq": 38,
+          "seq": 41,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2823,7 +2969,7 @@
             }
           },
           "sourceEventSeqs": [
-            36
+            39
           ],
           "surfaceOp": "append"
         }
@@ -2835,7 +2981,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/end",
-          "seq": 39,
+          "seq": 42,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2850,7 +2996,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/start",
-          "seq": 40,
+          "seq": 43,
           "time": 0,
           "data": {
             "turn": 1,
@@ -2864,13 +3010,35 @@
       "payload": {
         "sessionId": "{{parent}}",
         "event": {
+          "type": "request/admission",
+          "seq": 44,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 4,
+            "provider": "deepseek-official",
+            "model": "smoke-model",
+            "contextWindow": 1000000,
+            "inputTokens": 2787,
+            "completionMaxTokens": 256000,
+            "completionSource": "adapter-default"
+          },
+          "ignorable": true
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
           "type": "session-log-deepseek/delivery-accepted",
-          "seq": 41,
+          "seq": 45,
           "time": 0,
           "data": {
             "sessionId": "{{parent}}",
             "sessionFormatVersion": 4,
-            "throughSeq": 40
+            "throughSeq": 44
           }
         }
       }
@@ -3292,13 +3460,35 @@
       "payload": {
         "sessionId": "{{child-1}}",
         "event": {
-          "type": "session-log-deepseek/delivery-accepted",
+          "type": "request/admission",
           "seq": 25,
+          "time": 0,
+          "data": {
+            "turn": 2,
+            "step": 1,
+            "provider": "deepseek-official",
+            "model": "smoke-model",
+            "contextWindow": 1000000,
+            "inputTokens": 2837,
+            "completionMaxTokens": 256000,
+            "completionSource": "adapter-default"
+          },
+          "ignorable": true
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{child-1}}",
+        "event": {
+          "type": "session-log-deepseek/delivery-accepted",
+          "seq": 26,
           "time": 0,
           "data": {
             "sessionId": "{{child-1}}",
             "sessionFormatVersion": 4,
-            "throughSeq": 24
+            "throughSeq": 25
           }
         }
       }
@@ -3309,7 +3499,7 @@
         "sessionId": "{{child-1}}",
         "event": {
           "type": "assistant/message",
-          "seq": 26,
+          "seq": 27,
           "time": 0,
           "data": {
             "turn": 2,
@@ -3423,7 +3613,7 @@
         "sessionId": "{{child-1}}",
         "event": {
           "type": "step/end",
-          "seq": 27,
+          "seq": 28,
           "time": 0,
           "data": {
             "turn": 2,
@@ -3438,7 +3628,7 @@
         "sessionId": "{{child-1}}",
         "event": {
           "type": "turn/end",
-          "seq": 28,
+          "seq": 29,
           "time": 0,
           "data": {
             "turn": 2,
@@ -3462,7 +3652,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "agent/inbox/spliced",
-          "seq": 42,
+          "seq": 46,
           "time": 0,
           "data": {
             "target": "next-step",
@@ -3521,7 +3711,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/message",
-          "seq": 43,
+          "seq": 47,
           "time": 0,
           "data": {
             "turn": 1,
@@ -3651,7 +3841,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/call",
-          "seq": 44,
+          "seq": 48,
           "time": 0,
           "data": {
             "turn": 1,
@@ -3669,7 +3859,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool-workflow/run-start",
-          "seq": 45,
+          "seq": 49,
           "time": 0,
           "data": {
             "runId": "{{workflow-run}}",
@@ -3870,7 +4060,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "subagent/catalog",
-          "seq": 46,
+          "seq": 50,
           "time": 0,
           "data": {
             "version": 3,
@@ -3889,7 +4079,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool-workflow/agent-start",
-          "seq": 47,
+          "seq": 51,
           "time": 0,
           "data": {
             "runId": "{{workflow-run}}",
@@ -4310,13 +4500,35 @@
       "payload": {
         "sessionId": "{{child-2}}",
         "event": {
-          "type": "session-log-deepseek/delivery-accepted",
+          "type": "request/admission",
           "seq": 25,
+          "time": 0,
+          "data": {
+            "turn": 2,
+            "step": 1,
+            "provider": "deepseek-official",
+            "model": "smoke-model",
+            "contextWindow": 1000000,
+            "inputTokens": 2743,
+            "completionMaxTokens": 256000,
+            "completionSource": "adapter-default"
+          },
+          "ignorable": true
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{child-2}}",
+        "event": {
+          "type": "session-log-deepseek/delivery-accepted",
+          "seq": 26,
           "time": 0,
           "data": {
             "sessionId": "{{child-2}}",
             "sessionFormatVersion": 4,
-            "throughSeq": 24
+            "throughSeq": 25
           }
         }
       }
@@ -4327,7 +4539,7 @@
         "sessionId": "{{child-2}}",
         "event": {
           "type": "assistant/message",
-          "seq": 26,
+          "seq": 27,
           "time": 0,
           "data": {
             "turn": 2,
@@ -4441,7 +4653,7 @@
         "sessionId": "{{child-2}}",
         "event": {
           "type": "step/end",
-          "seq": 27,
+          "seq": 28,
           "time": 0,
           "data": {
             "turn": 2,
@@ -4456,7 +4668,7 @@
         "sessionId": "{{child-2}}",
         "event": {
           "type": "turn/end",
-          "seq": 28,
+          "seq": 29,
           "time": 0,
           "data": {
             "turn": 2,
@@ -4497,7 +4709,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool-workflow/agent-end",
-          "seq": 48,
+          "seq": 52,
           "time": 0,
           "data": {
             "runId": "{{workflow-run}}",
@@ -4513,7 +4725,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool-workflow/run-end",
-          "seq": 49,
+          "seq": 53,
           "time": 0,
           "data": {
             "runId": "{{workflow-run}}",
@@ -4528,7 +4740,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/result",
-          "seq": 50,
+          "seq": 54,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4551,7 +4763,7 @@
             }
           },
           "sourceEventSeqs": [
-            44
+            48
           ],
           "surfaceOp": "append"
         }
@@ -4563,7 +4775,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/end",
-          "seq": 51,
+          "seq": 55,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4578,7 +4790,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "agent/inbox/spliced",
-          "seq": 52,
+          "seq": 56,
           "time": 0,
           "data": {
             "target": "next-step",
@@ -4595,7 +4807,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/start",
-          "seq": 53,
+          "seq": 57,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4610,7 +4822,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "user/message",
-          "seq": 54,
+          "seq": 58,
           "time": 0,
           "data": {
             "content": [
@@ -4646,13 +4858,35 @@
       "payload": {
         "sessionId": "{{parent}}",
         "event": {
+          "type": "request/admission",
+          "seq": 59,
+          "time": 0,
+          "data": {
+            "turn": 1,
+            "step": 5,
+            "provider": "deepseek-official",
+            "model": "smoke-model",
+            "contextWindow": 1000000,
+            "inputTokens": 2945,
+            "completionMaxTokens": 256000,
+            "completionSource": "adapter-default"
+          },
+          "ignorable": true
+        }
+      }
+    },
+    {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
           "type": "session-log-deepseek/delivery-accepted",
-          "seq": 55,
+          "seq": 60,
           "time": 0,
           "data": {
             "sessionId": "{{parent}}",
             "sessionFormatVersion": 4,
-            "throughSeq": 54
+            "throughSeq": 59
           }
         }
       }
@@ -4663,7 +4897,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/message",
-          "seq": 56,
+          "seq": 61,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4777,7 +5011,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/end",
-          "seq": 57,
+          "seq": 62,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4792,7 +5026,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "command/run",
-          "seq": 58,
+          "seq": 63,
           "time": 0,
           "data": {
             "commandId": "{{command:1}}",
@@ -4810,7 +5044,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "feedback/record",
-          "seq": 59,
+          "seq": 64,
           "time": 0,
           "data": {
             "text": "The session needs a clearer explanation."
@@ -4824,7 +5058,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "command/done",
-          "seq": 60,
+          "seq": 65,
           "time": 0,
           "data": {
             "commandId": "{{command:1}}",
@@ -4840,7 +5074,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "feedback/record",
-          "seq": 61,
+          "seq": 66,
           "time": 0,
           "data": {
             "category": "other"
@@ -4854,7 +5088,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "feedback/message-put",
-          "seq": 62,
+          "seq": 67,
           "time": 0,
           "data": {
             "sessionId": "{{parent}}",
@@ -4877,7 +5111,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "feedback/message-put",
-          "seq": 63,
+          "seq": 68,
           "time": 0,
           "data": {
             "sessionId": "{{parent}}",
@@ -4899,7 +5133,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "feedback/message-delete",
-          "seq": 64,
+          "seq": 69,
           "time": 0,
           "data": {
             "sessionId": "{{parent}}",
@@ -4914,7 +5148,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "turn/end",
-          "seq": 65,
+          "seq": 70,
           "time": 0,
           "data": {
             "turn": 1,
