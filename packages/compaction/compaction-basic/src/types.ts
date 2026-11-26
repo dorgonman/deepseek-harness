@@ -117,20 +117,24 @@ interface ResolvedPolicyFields {
   readonly maxOverflowRetries: number
 }
 
+/** Summary routing validated during config resolution. Resident mode binds a gateway and provider. */
+export type ResolvedSummaryRouting = {
+  readonly residentPinnedNodeId?: string
+  readonly residentAllowedNodeIds?: readonly string[]
+  readonly residentPreferredVariantIds?: readonly string[]
+} & (
+  | { readonly summarizationMode: 'fixed'; readonly residentGatewayId?: string; readonly residentProvider?: string }
+  | { readonly summarizationMode: 'resident-preferred'; readonly residentGatewayId: string; readonly residentProvider: string }
+)
+
 /** Validated immutable config whose target-specific defaults remain unresolved. */
-export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & {
+export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & ResolvedSummaryRouting & {
   readonly modelPolicies: readonly Readonly<ModelCompactPolicyConfig>[]
   readonly auto: boolean
   readonly incremental: boolean
   readonly factLedger: boolean
   readonly factMaxClaims: number
   readonly factMaxClaimChars: number
-  readonly summarizationMode: 'fixed' | 'resident-preferred'
-  readonly residentGatewayId?: string
-  readonly residentPinnedNodeId?: string
-  readonly residentAllowedNodeIds?: readonly string[]
-  readonly residentPreferredVariantIds?: readonly string[]
-  readonly residentProvider?: string
   readonly residentMaxAgeMs: number
   readonly residentObservationRoutes?: readonly KinfResidentObservationRoute[]
 }

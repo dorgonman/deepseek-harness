@@ -52,6 +52,13 @@ async function fixture(config: BasicCompactionConfig = {}, metadata: RouteMetada
 }
 
 describe('standalone Basic summarization', () => {
+  it('retains supplied resident routing values in the resolved fixed config', async () => {
+    const resident = { residentGatewayId: 'gateway-test', residentProvider: provider }
+    const { engine } = await fixture(resident)
+
+    expect(engine.config).toMatchObject({ summarizationMode: 'fixed', ...resident })
+  })
+
   it('requires the Hybrid backend for resident-preferred summaries before dispatch', async () => {
     const { engine, agent, adapter } = await fixture({
       summarizationMode: 'resident-preferred', residentProvider: provider,

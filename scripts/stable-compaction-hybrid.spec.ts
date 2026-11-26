@@ -19,19 +19,22 @@ import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import HybridCompactionEngine from '@deepseek-ai/dsh-compaction-basic/hybrid'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import {
-  CONTEXT_WINDOW_EXCEEDED_CODE, createMessage, createToolResultMessage, createUserMessage, textOnlyImageText, ReasoningEffortId, ToolCallId,
+  BlockAssembler, CONTEXT_WINDOW_EXCEEDED_CODE, createMessage, createSystemMessage, createToolResultMessage,
+  createUserMessage, textOnlyImageText, ReasoningEffortId, ToolCallId,
   type GenerateOptions, type LlmImageRequestPricing, type ModelModality, type RequestMessage, type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { deriveReplayScript } from '@deepseek-ai/dsh-llm-replay'
-import { SessionId, type SessionEvent, type SessionSeq } from '@deepseek-ai/dsh-session'
+import { deriveEventMessage, foldSurface, isAppendSurfaceEvent, SessionId, type SessionEvent, type SessionSeq } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { expect, it, onTestFinished, vi } from 'vitest'
-import { advanceCoverage, deriveCommittedCoverage, digestCanonical } from '../packages/compaction/compaction-basic/src/incremental.ts'
+import { advanceCoverage, deriveCommittedCoverage, digestCanonical, digestPolicy, digestRange } from '../packages/compaction/compaction-basic/src/incremental.ts'
+import { projectSummaryTranscript } from '../packages/compaction/compaction-basic/src/request-projection.ts'
+import { frameSummary, prepareSummaryCall } from '../packages/compaction/compaction-basic/src/summarizer.ts'
 import { validateLedger } from '../packages/compaction/compaction-basic/src/fact-ledger.ts'
 import { createKinfResidentObservationSource } from '../packages/compaction/compaction-basic/src/kinf-resident-observation.ts'
 import type { ResidentObservationRequest, ResidentObservationSource } from '../packages/compaction/compaction-basic/src/resident-observation.ts'
@@ -3406,5 +3409,135 @@ it('preserves the uncovered RAW gap between two disjoint committed coverage rang
     } finally {
       await owned.dispose()
     }
+  }, { incremental: true })
+})
+
+it('carries imported coverage for RAW history that remains visible after a partial replacement', async () => {
+  await withContext(async (ctx, root) => {
+    const olderText = 'COVERED_BUT_VISIBLE: the launch key is violet.'
+    const shadowedText = 'IMPORTED_REPLACEMENT: the confirmation phrase is maple.'
+    const laterText = 'NEW_RAW: the next delivery is on Thursday.'
+    const importedText = 'The user chose a violet launch key and maple confirmation phrase.'
+    const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Acknowledged.')))
+    const summary = new WindowAdapter([textResponse(importedText), textResponse('The next delivery is on Thursday.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-imported-covered-visible-raw')
+    const original = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    const { session } = original.agent
+    let imported: readonly SessionEvent[]
+    let summarySeq: SessionSeq
+    let coveredLeaf: SessionEvent
+    let freshLeaf: SessionEvent
+    try {
+      for (const text of [olderText, shadowedText, laterText]) await send(original.agent, text.repeat(12))
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      const users = events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')
+      const replies = events.filter(event => event.type === 'assistant/message')
+      const [earlier, second, fresh] = users
+      const [earlierReply, secondReply] = replies
+      if (earlier === undefined || second === undefined || fresh === undefined
+        || earlierReply === undefined || secondReply === undefined) {
+        throw new Error('Expected three complete source turns')
+      }
+      coveredLeaf = earlier
+      freshLeaf = fresh
+      const end = secondReply.seq
+      const shadowedSeqs = session.surface.nodes.filter(seq => seq >= second.seq && seq <= end)
+      const shadowedTokenCount = ctx.tokenMeter.measure(session).nodes
+        .filter(node => shadowedSeqs.includes(node.seq)).reduce((total, node) => total + node.tokens, 0)
+      // An imported producer can quote two complete groups while replacing one
+      // current span. Coverage binds quoted RAW and the replacement binds its span.
+      const groups = [{ start: earlier.seq, end: earlierReply.seq }, { start: second.seq, end }].map((range) => {
+        const originals = events.filter(event => range.start <= event.seq && event.seq <= range.end
+          && isAppendSurfaceEvent(event))
+        const messages = originals.map((event) => {
+          const message = deriveEventMessage(event)
+          if (message === null) throw new Error('Expected a message for every imported RAW event')
+          return message
+        })
+        return {
+          receipt: { eventSeqs: originals.map(event => event.seq), toolBodiesOmitted: false },
+          transcript: projectSummaryTranscript(messages, ref => ctx.llm.fileRequestText(ref)),
+        }
+      })
+      const messages = [createSystemMessage('Summarize the supplied conversation facts.'),
+        ...groups.flatMap(group => group.transcript)]
+      const policy = { provider: 'synthetic-summary', model: 'summary', maxTokens: 1_024 }
+      const { call, window } = await prepareSummaryCall(ctx, policy, signal)
+      const lifecycle = { compactionId: CompactionId('imported-partial-replacement'), turn: null }
+      const start = session.append('compaction/start', lifecycle)
+      const assembler = new BlockAssembler()
+      for await (const chunk of call.stream({ ...call.config, messages, purpose: 'compaction', sessionId, signal })) {
+        assembler.push(chunk)
+      }
+      expect(assembler.finish.kind).toBe('stop')
+      const rawOutput = assembler.blocks().filter(block => block.type === 'text' || block.type === 'reasoning')
+      const summaryContent = rawOutput.filter(block => block.type === 'text')
+      const increment = advanceCoverage(undefined, events, earlier.seq, end, {
+        policyDigest: digestPolicy({ ...policy, projection: 'text-transcript-v1', retainFirstGroup: true }),
+        summarizer: policy,
+      })
+      const record = session.append('compaction/summary', {
+        compactionId: lifecycle.compactionId,
+        ...policy, summary: summaryContent,
+        shadowedRange: { start: second.seq, end }, shadowedSeqs, shadowedTokenCount,
+        incremental: increment,
+        chunkCalls: [{
+          groups: groups.map(group => group.receipt),
+          contextWindow: window,
+          estimatedInputTokens: messages.reduce((total, message) => total + ctx.tokenMeter.estimateMessage(message), 0),
+          rawOutput,
+          ...assembler.usage === undefined ? {} : { usage: assembler.usage },
+        }],
+      })
+      summarySeq = record.seq
+      session.append('user/message', createUserMessage({
+        content: frameSummary(summaryContent),
+        source: compactCheckpointSource(lifecycle.compactionId),
+      }), {
+        surfaceOp: { op: 'replace', startSeq: second.seq, endSeq: end },
+        sourceEventSeqs: [start.seq, record.seq, ...shadowedSeqs],
+      })
+      session.append('compaction/end', lifecycle)
+      await ctx.sessions.flush(session)
+      imported = (await ctx.sessionQuery.readSession(sessionId)).events
+      expect(requestText(summary.requests[0]!)).toContain(olderText)
+      expect(requestText(summary.requests[0]!)).toContain(shadowedText)
+      expect(deriveCommittedCoverage(imported)).toEqual(increment)
+    } finally {
+      await original.dispose()
+    }
+
+    expect(ctx.sessions.get(sessionId)).toBeUndefined()
+    const { events: cold } = await ctx.sessionQuery.readSession(sessionId)
+    expect(cold).toEqual(imported)
+    expect(foldSurface(cold).nodes).toEqual(expect.arrayContaining([coveredLeaf.seq, freshLeaf.seq]))
+    const resumed = await ctx.agents.resume({ resumeSessionId: sessionId, agentOptions: wide })
+    let after: readonly SessionEvent[]
+    try {
+      const result = await ctx.compaction.compactNow(resumed.agent, signal)
+      expect(result?.shadowedSeqs).toEqual(expect.arrayContaining([coveredLeaf.seq, freshLeaf.seq]))
+      expect(summary.requests).toHaveLength(2)
+      const requested = requestText(summary.requests[1]!)
+      expect(requested).toContain(laterText)
+      expect(requested).not.toContain(olderText)
+      expect(requested).not.toContain(shadowedText)
+      expect(requested).not.toContain(importedText)
+      expect(citedSeqs(requested)).toContain(freshLeaf.seq)
+      expect(citedSeqs(requested)).not.toContain(coveredLeaf.seq)
+      after = (await ctx.sessionQuery.readSession(sessionId)).events
+      expect(after.slice(0, imported.length)).toEqual(imported)
+      expect(deriveCommittedCoverage(after)).toMatchObject({
+        revision: 2,
+        carried: { summarySeq, digest: digestRange(imported, summarySeq, summarySeq) },
+      })
+      expect(result?.summary).toContainEqual({ type: 'text', text: importedText })
+    } finally {
+      await resumed.dispose()
+    }
+    expect(ctx.sessions.get(sessionId)).toBeUndefined()
+    expect((await ctx.sessionQuery.readSession(sessionId)).events).toEqual(after)
+    expect((await ctx.sessionQuery.readEvent({ sessionId, seq: coveredLeaf.seq })).target).toEqual(coveredLeaf)
   }, { incremental: true })
 })

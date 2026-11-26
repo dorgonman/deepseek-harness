@@ -13,6 +13,7 @@ import type {
   ResolvedCompactSpec,
   ResolvedConfig,
   ResolvedRetention,
+  ResolvedSummaryRouting,
   ResolvedTargetPolicy,
 } from './types.ts'
 
@@ -100,6 +101,45 @@ function validateResidentList(name: string, value: readonly unknown[] | undefine
 }
 
 /**
+ * Resolve the selected summary mode and its validated resident route fields.
+ * @param config - load-time compaction configuration.
+ * @returns fixed-mode options or the required gateway and provider for resident mode.
+ */
+function resolveSummaryRouting(config: BasicCompactionConfig): ResolvedSummaryRouting {
+  const { summarizationMode = 'fixed', residentGatewayId, residentPinnedNodeId,
+    residentAllowedNodeIds, residentPreferredVariantIds, residentProvider } = config
+  const nodePreferences = {
+    ...residentPinnedNodeId === undefined ? {} : { residentPinnedNodeId },
+    ...residentAllowedNodeIds === undefined ? {} : { residentAllowedNodeIds },
+    ...residentPreferredVariantIds === undefined ? {} : { residentPreferredVariantIds },
+  }
+  if (summarizationMode === 'fixed') {
+    return {
+      summarizationMode,
+      ...residentGatewayId === undefined ? {} : { residentGatewayId },
+      ...nodePreferences,
+      ...residentProvider === undefined ? {} : { residentProvider },
+    }
+  }
+  if (typeof residentGatewayId !== 'string' || residentGatewayId.trim() === '') {
+    throw new Error('BasicCompactionConfig: residentGatewayId is required for resident-preferred mode')
+  }
+  if (typeof residentProvider !== 'string' || residentProvider.trim() === '') {
+    throw new Error('BasicCompactionConfig: residentProvider is required for resident-preferred mode')
+  }
+  if (residentPinnedNodeId !== undefined
+    && (typeof residentPinnedNodeId !== 'string' || residentPinnedNodeId.trim() === '')) {
+    throw new Error('BasicCompactionConfig: residentPinnedNodeId must be a non-empty string')
+  }
+  if (residentPinnedNodeId === undefined && residentAllowedNodeIds === undefined) {
+    throw new Error('BasicCompactionConfig: resident-preferred mode requires residentPinnedNodeId or residentAllowedNodeIds')
+  }
+  validateResidentList('residentAllowedNodeIds', residentAllowedNodeIds)
+  validateResidentList('residentPreferredVariantIds', residentPreferredVariantIds)
+  return { summarizationMode, residentGatewayId, ...nodePreferences, residentProvider }
+}
+
+/**
  * Resolve and validate service defaults plus exact-target partial overrides.
  * @param config - untrusted plugin configuration after Loader normalization.
  * @returns detached immutable defaults and validated exact-target overrides.
@@ -128,23 +168,7 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     && (!Number.isSafeInteger(config.residentMaxAgeMs) || config.residentMaxAgeMs < 1 || config.residentMaxAgeMs > 60_000)) {
     throw new Error('BasicCompactionConfig: residentMaxAgeMs must be an integer between 1 and 60000')
   }
-  if (config.summarizationMode === 'resident-preferred') {
-    if (typeof config.residentGatewayId !== 'string' || config.residentGatewayId.trim() === '') {
-      throw new Error('BasicCompactionConfig: residentGatewayId is required for resident-preferred mode')
-    }
-    if (typeof config.residentProvider !== 'string' || config.residentProvider.trim() === '') {
-      throw new Error('BasicCompactionConfig: residentProvider is required for resident-preferred mode')
-    }
-    if (config.residentPinnedNodeId !== undefined
-      && (typeof config.residentPinnedNodeId !== 'string' || config.residentPinnedNodeId.trim() === '')) {
-      throw new Error('BasicCompactionConfig: residentPinnedNodeId must be a non-empty string')
-    }
-    if (config.residentPinnedNodeId === undefined && config.residentAllowedNodeIds === undefined) {
-      throw new Error('BasicCompactionConfig: resident-preferred mode requires residentPinnedNodeId or residentAllowedNodeIds')
-    }
-    validateResidentList('residentAllowedNodeIds', config.residentAllowedNodeIds)
-    validateResidentList('residentPreferredVariantIds', config.residentPreferredVariantIds)
-  }
+  const summaryRouting = resolveSummaryRouting(config)
 
   const headroomTokens = config.headroomTokens ?? 65_536
   const maxTokens = config.maxTokens ?? headroomTokens
@@ -188,12 +212,7 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     factLedger: config.factLedger ?? false,
     factMaxClaims: config.factMaxClaims ?? 64,
     factMaxClaimChars: config.factMaxClaimChars ?? 2_000,
-    summarizationMode: config.summarizationMode ?? 'fixed',
-    ...config.residentGatewayId === undefined ? {} : { residentGatewayId: config.residentGatewayId },
-    ...config.residentPinnedNodeId === undefined ? {} : { residentPinnedNodeId: config.residentPinnedNodeId },
-    ...config.residentAllowedNodeIds === undefined ? {} : { residentAllowedNodeIds: config.residentAllowedNodeIds },
-    ...config.residentPreferredVariantIds === undefined ? {} : { residentPreferredVariantIds: config.residentPreferredVariantIds },
-    ...config.residentProvider === undefined ? {} : { residentProvider: config.residentProvider },
+    ...summaryRouting,
     residentMaxAgeMs: config.residentMaxAgeMs ?? 60_000,
     ...config.residentObservationRoutes === undefined ? {} : {
       residentObservationRoutes: config.residentObservationRoutes.map(route => ({ ...route })),

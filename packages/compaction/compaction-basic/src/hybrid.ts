@@ -10,12 +10,12 @@ import {
   type RequestMessage, type ResidentCallBinding,
 } from '@deepseek-ai/dsh-llm'
 import {
-  deriveEventMessage, foldSurface, isAppendSurfaceEvent, SessionSeq, type EpochHeader, type Session, type SessionEvent,
+  deriveEventMessage, foldSurface, SessionSeq, type EpochHeader, type Session, type SessionEvent,
 } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-query'
 import { resolveCompactSpec, resolveSummaryMaxTokens, resolveTargetPolicy } from './config.ts'
-import { parseFactExtraction } from './fact-extraction.ts'
-import { composeCompactView, createFacts, deriveCommittedLedger, mergeFacts } from './fact-ledger.ts'
+import { mergeExtractedFacts } from './fact-extraction.ts'
+import { composeCompactView, deriveCommittedLedger } from './fact-ledger.ts'
 import { createKinfResidentObservationSource } from './kinf-resident-observation.ts'
 import type { ResidentObservationSource } from './resident-observation.ts'
 import { ResidentResolutionError, residentProjectionId, resolveResidentSummary } from './resident-resolution.ts'
@@ -28,6 +28,7 @@ import { selectCompactableRange } from './region.ts'
 import type { CompactionChunkCall, RegionSummary, SurfaceSelection } from './region.ts'
 import { frameSummary, prepareSummaryCall, unframeSummary } from './summarizer.ts'
 import type { SummarizationInput } from './summarizer.ts'
+import type { ResolvedConfig } from './types.ts'
 
 interface OriginalMessage {
   readonly event: SessionEvent
@@ -55,7 +56,11 @@ interface RawExpansion {
   readonly carried?: { readonly compactionId: CompactionId; readonly content: readonly ContentBlock[] }
 }
 
-/** Expand only canonical replacement edges reachable from the selected Surface. */
+/**
+ * Expand the selected Surface through the canonical fold's replacement forest.
+ * The fold removes each shadowed node from the current Surface and introduces
+ * every leaf with an append. Expansion still checks each resolved event index.
+ */
 function rawGroups(
   events: readonly SessionEvent[],
   folded: ReturnType<typeof foldSurface>,
@@ -69,7 +74,6 @@ function rawGroups(
     throw new Error('compaction: cannot replace the protected system head')
   }
   const edges = new Map(folded.replacements.map(edge => [edge.seq, edge.shadowedSeqs]))
-  const visited = new Set<SessionSeq>()
   const leaves = new Set<SessionSeq>()
   const pending = [...selection.shadowedSeqs]
   let carried: RawExpansion['carried']
@@ -77,8 +81,7 @@ function rawGroups(
     const seq = pending.pop()
     if (seq === undefined) break
     const event = events[seq]
-    if (event?.seq !== seq || visited.has(seq)) throw new Error('compaction: invalid source coverage')
-    visited.add(seq)
+    if (event?.seq !== seq) throw new Error('compaction: invalid source coverage')
     const shadowed = edges.get(seq)
     if (event.type === 'user/message' && isCompactCheckpointSource(event.data.source)) {
       if (shadowed === undefined) throw new Error('compaction: unsupported Surface replacement event')
@@ -97,7 +100,6 @@ function rawGroups(
       for (const original of shadowed) pending.push(original)
       continue
     }
-    if (!isAppendSurfaceEvent(event)) throw new Error('compaction: expected an original Surface event')
     if (coverage !== undefined && event.seq <= coverage.highWatermark) {
       // A watermark orders revisions. Only a committed range proves that
       // skipping a still-selected original will not lose it from the view.
@@ -158,10 +160,9 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
 
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
     super(ctx, config)
-    const { residentGatewayId, residentObservationRoutes } = this.config
-    if (this.config.summarizationMode === 'resident-preferred'
-      && residentGatewayId !== undefined && residentObservationRoutes !== undefined) {
-      this.residentSource = createKinfResidentObservationSource(residentGatewayId, residentObservationRoutes, {
+    const resolved = this.config
+    if (resolved.summarizationMode === 'resident-preferred' && resolved.residentObservationRoutes !== undefined) {
+      this.residentSource = createKinfResidentObservationSource(resolved.residentGatewayId, resolved.residentObservationRoutes, {
         measure: messages => messages.reduce((total, message) => total + ctx.tokenMeter.estimateMessage(message), 0),
       })
     }
@@ -317,8 +318,9 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       carriedMeta = { summarySeq, digest: digestRange(events, summarySeq, summarySeq) }
     }
 
-    const policy = resolveTargetPolicy(this.config, sourceRoute)
-    const resident = this.config.summarizationMode === 'resident-preferred'
+    const config = this.config
+    const policy = resolveTargetPolicy(config, sourceRoute)
+    const resident = config.summarizationMode === 'resident-preferred'
     if (!resident && policy.summarizationProvider === '' && policy.summarizationFallback === 'error') {
       throw new LlmError('compaction: Hybrid requires a configured summarizer', 'SUMMARY_TARGET_UNCONFIGURED')
     }
@@ -344,7 +346,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     }
 
     const resolved = resident ? await this.selectResident(
-      sourceRoute.model, groups, project, instruction, policy.maxTokens, signal,
+      config, sourceRoute.model, groups, project, instruction, policy.maxTokens, signal,
     ) : undefined
     const target = resolved === undefined
       ? policy.summarizationProvider === ''
@@ -403,7 +405,8 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     const summary: ContentBlock[] = factLedger ? [] : [...carriedContent]
     const chunkCalls: CompactionChunkCall[] = []
     const projectionIds: string[] = []
-    let ledger: readonly CompactionFact[] | undefined = priorLedger
+    /** Each successful extraction merges at least one validated claim before view construction. */
+    let ledger = priorLedger ?? []
     for (const [index, chunk] of chunks.entries()) {
       const prepared = index === 0 || resident ? first : await prepare()
       const { call } = prepared
@@ -464,11 +467,10 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       })
       if (factLedger) {
         const allowed = chunk.groups.flatMap(group => group.eventSeqs)
-        const extracted = parseFactExtraction(text, allowed, {
+        ledger = mergeExtractedFacts(ledger, text, allowed, events, {
           maxFacts: this.config.factMaxClaims,
           maxClaimChars: this.config.factMaxClaimChars,
         })
-        ledger = mergeFacts(ledger ?? [], createFacts(extracted, events))
       } else {
         const source = chunk.groups.flatMap(group => group.eventSeqs).join(', ')
         summary.push({
@@ -480,9 +482,6 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       }
     }
     if (factLedger) {
-      if (ledger === undefined || ledger.length === 0) {
-        throw new Error('compaction: fact extraction produced no ledger facts')
-      }
       // Reserve the non-view part of the destination envelope: the retained
       // tail, any pending request, and the checkpoint framing. The final
       // combined envelope is still checked by validateCommit.
@@ -560,7 +559,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       maxTokens,
       summary,
       ...nextCoverage === undefined ? {} : { incremental: nextCoverage },
-      ...factLedger && ledger !== undefined ? { ledger } : {},
+      ...factLedger ? { ledger } : {},
       chunkCalls,
       ...residentSelection === undefined ? {} : { residentSelection },
       validateCommit: (checkpoint) => {
@@ -598,8 +597,19 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     }
   }
 
-  /** Select against the largest indivisible group after permissible omission. */
+  /**
+   * Select a resident that can summarize the largest indivisible group after permissible omission.
+   * @param config - validated resident-mode route and scope.
+   * @param sourceModel - source model id, optionally qualified with the session node name.
+   * @param groups - chronological message groups selected for summarization.
+   * @param project - quote one group, optionally omitting tool-result bodies.
+   * @param instruction - system message included in each summary call.
+   * @param maxTokens - output cap for each summary call.
+   * @param signal - cancellation forwarded to the observation source.
+   * @returns the selected resident route and its observation receipt.
+   */
   private async selectResident(
+    config: Extract<ResolvedConfig, { summarizationMode: 'resident-preferred' }>,
     sourceModel: string,
     groups: readonly OriginalMessage[][],
     project: (group: readonly OriginalMessage[], omitToolContent: boolean) => RequestMessage,
@@ -607,7 +617,6 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     maxTokens: number,
     signal?: AbortSignal,
   ) {
-    const config = this.config
     const routes = config.residentObservationRoutes
     const suffixIndex = sourceModel.lastIndexOf('@')
     let pinnedNodeId = config.residentPinnedNodeId
@@ -637,11 +646,11 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
       this.residentSource ?? this.ctx.get('residentSummarySource'),
       {
         mode: 'resident-preferred',
-        ...config.residentGatewayId === undefined ? {} : { gatewayId: config.residentGatewayId },
+        gatewayId: config.residentGatewayId,
         ...pinnedNodeId === undefined ? {} : { pinnedNodeId },
         ...config.residentAllowedNodeIds === undefined ? {} : { allowedNodeIds: config.residentAllowedNodeIds },
         ...config.residentPreferredVariantIds === undefined ? {} : { preferredVariantIds: config.residentPreferredVariantIds },
-        ...config.residentProvider === undefined ? {} : { provider: config.residentProvider },
+        provider: config.residentProvider,
         maxAgeMs: config.residentMaxAgeMs,
       },
       { messages: [instruction, largest], maxTokens, reserveTokens: 0 },
