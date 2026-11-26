@@ -86,6 +86,7 @@ describe('web e2e: mid-turn steering lands durably and visibly', () => {
     // Trajectory previews truncate before path normalization; pin the input length across hosts.
     scaffold = await launchWebScaffold({
       workspacePathLength: 112,
+      pinAdmissionSourceRoot: true,
       ...(MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: REPLAY_PACE_MS, compareReplaySession: true }),
     })
     scaffold.ctx.on('session/event', (_session, event) => { sessionEvents.push(event) })

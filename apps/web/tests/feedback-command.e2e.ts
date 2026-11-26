@@ -11,6 +11,7 @@ import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFixtureInventory, captureExpandedTurnProcessAria, captureStableAria,
   compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
@@ -34,6 +35,7 @@ describe('web e2e: /feedback command acknowledgement', () => {
   beforeAll(async () => {
     scaffold = await launchWebScaffold({
       compareReplaySession: true,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH, pinAdmissionSourceRoot: true,
       ...(MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 5 }),
     })
     browser = await chromium.launch()

@@ -14,6 +14,8 @@ pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps 
 
 普通场景以没有已登记 Workspace 或 Session、但持久化标记记录默认 Workspace 已被删除的状态启动，使显式文件夹选择场景自行决定 cwd。`launchWebScaffold({ firstUse: true })` 保留初始化资格，供启动场景使用。
 
+要精确比较 `request/admission`，请用 `workspacePathLength` 固定 JSON 引号内外的工作区路径总长度。如果场景包含检出目录的上下文，请设置 `pinAdmissionSourceRoot: true`，为实际的检出目录提供固定长度的别名。回执比较使用根据这些请求输入记录的估算值。
+
 当天消息的 golden 使用共享的 `WEB_FIXTURE_TIME`：预置会话将它传为 `createdAt`，并通过 `pinBrowserClock` 固定浏览器日期；提交实时消息的场景还使用 `pinHostClock`，在清理后恢复。固定后的时钟随真实耗时前进，保留原生定时器，因此跨午夜不会改变场景的日期标签。
 
 每个场景都要求整个客户端组合全部激活。产品启动只对必需名单外的未激活 entry 告警，但 `watchConsole` 绊线、[真实 Host 冒烟](smoke-real.e2e.ts)与[组装 jsdom 启动](assembled-boot.ts)把 `web boot: warning` 视为失败。没有任何场景选项放宽这一点：产品组合中出现未激活插件就是需要修复的缺陷。

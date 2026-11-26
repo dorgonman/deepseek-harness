@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { chromium, webkit } from 'playwright'
 import { describe, expect, it, onTestFailed, onTestFinished } from 'vitest'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   acknowledgeReloadConnectionLoss, captureExpandedTurnProcessAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, selectedSessionFixture, watchConsole, webSnapshotMode,
 } from './scaffold.ts'
@@ -15,7 +16,10 @@ const UI_EXPECTED = fileURLToPath(new URL('../../../snapshots/web/fresh-round-tr
 describe.skipIf(webSnapshotMode() === 'record')('web session replay', () => {
   it.each([{ name: 'Chromium', engine: chromium }, { name: 'WebKit', engine: webkit }])(
     '$name restores an active stream, a completed turn, and a reopened session', async ({ engine }) => {
-      const scaffold = await launchWebScaffold({ replayFixture: FIXTURE, compareReplaySession: 'read-only' })
+      const scaffold = await launchWebScaffold({
+        replayFixture: FIXTURE, compareReplaySession: 'read-only', workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+        pinAdmissionSourceRoot: true,
+      })
       onTestFinished(() => scaffold.close())
       const release = Promise.withResolvers<undefined>()
       const reached = Promise.withResolvers<string>()

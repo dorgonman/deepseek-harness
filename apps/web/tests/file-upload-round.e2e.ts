@@ -15,6 +15,7 @@ import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   acknowledgeReloadConnectionLoss, assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -205,6 +206,10 @@ describe('web e2e: generic file upload through the real assembly', () => {
   beforeAll(async () => {
     scaffold = await launchWebScaffold({
       compareReplaySession: true,
+      ...WINDOWS ? {} : {
+        pinAdmissionSourceRoot: true,
+        workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+      },
       // The override rescripts the recorded read arguments with a
       // `{{fromRequest:…}}` placeholder: the saved-copy path differs per run,
       // and the live handle line in the request carries the current one.

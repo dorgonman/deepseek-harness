@@ -14,6 +14,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { WEB_SEARCH_MAX_RESULTS } from '@deepseek-ai/dsh-tool-web'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -156,6 +157,7 @@ describe('web e2e: default Search API web search', () => {
     scaffold = await launchWebScaffold({
       extraOverlayPath: fileURLToPath(new URL('./pin-browse-picker.overlay.yml', import.meta.url)),
       compareReplaySession: true,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH, pinAdmissionSourceRoot: true,
       // Own YAML endpoint settings pin Search to the local endpoint and a dedicated key.
       deepSeekWebApi: {
         baseURL: `${search.baseURL}/api/v1/tools`,

@@ -81,9 +81,10 @@ import {
   type SessionHeader,
 } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-// Empty type imports carry the webServer/agents/sessionPersistence Context merges.
+// Empty type imports carry the webServer, agent, and prompt Context merges.
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { startPrefixProxy, type PrefixProxy } from './prefix-proxy.ts'
 import { REPO_ROOT, requireBuilt, requireDist } from './support.ts'
@@ -304,7 +305,7 @@ export interface WebScaffold {
   close(): Promise<void>
 }
 
-/** Quoted workspace root length shared by fixtures that compare admission token estimates. */
+/** Quoted path length shared by fixtures that compare admission token estimates. */
 export const ADMISSION_WORKSPACE_PATH_LENGTH = 192
 
 /** Options for {@link launchWebScaffold}. */
@@ -317,6 +318,8 @@ export interface LaunchOptions {
   compareReplaySession?: boolean | 'read-only'
   /** Fixed JSON-quoted workspace path length for token estimates; omitted values use the ordinary prefix. */
   workspacePathLength?: number
+  /** Give the real checkout a fixed-length alias in replayed Web runtime context. */
+  pinAdmissionSourceRoot?: boolean
   /**
    * Optional product overlay applied after the shipped Web surface and before
    * the scaffold's hermetic test patches, matching the launcher's `--patch`
@@ -755,6 +758,30 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
   let publicProxy: PrefixProxy | undefined
   let replayHandle: ReplayHandle | undefined
   try {
+    if (options.workspacePathLength !== undefined && JSON.stringify(workspaceCwd).length !== options.workspacePathLength) {
+      throw new Error('Web replay workspace path does not have the expected JSON-quoted length')
+    }
+    if (mode !== 'record' && options.pinAdmissionSourceRoot === true && surfaceContext) {
+      const aliasPrefix = join(await realpath(persistenceRoot), 'checkout-')
+      const padding = ADMISSION_WORKSPACE_PATH_LENGTH - JSON.stringify(aliasPrefix).length
+      if (padding < 0) throw new Error('Web replay checkout alias exceeds its fixed path length')
+      const alias = aliasPrefix + '-'.repeat(padding)
+      await symlink(REPO_ROOT, alias, 'junction')
+      if (JSON.stringify(alias).length !== ADMISSION_WORKSPACE_PATH_LENGTH
+        || await realpath(alias) !== await realpath(REPO_ROOT)) {
+        throw new Error('Web replay checkout alias does not identify the checkout at the expected path length')
+      }
+      // Agent scope shadows the global checkout context before the agent can use it.
+      ctx.on('agent/created', ({ agent }) => {
+        const prompt = agent.ctx.systemPrompt
+        prompt.context({
+          name: 'harness:source',
+          order: prompt.getContextOrder('HARNESS_SOURCE'),
+          interpolate: false,
+          text: `Current DeepSeek Harness implementation checkout: ${JSON.stringify(alias)}.`,
+        })
+      })
+    }
     // The proxy takes its browser-facing port before the boot so the mount URL
     // is final by the time any row reads it; its target follows the listener.
     if (publicHost !== undefined && publicPrefix !== undefined) {

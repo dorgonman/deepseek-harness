@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { chromium, webkit } from 'playwright'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFinalWorkspaceSnapshot, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts, launchWebScaffold,
   selectedSessionFixture, watchConsole, webSnapshotMode,
 } from './scaffold.ts'
@@ -20,6 +21,7 @@ const FIXTURE = WINDOWS
 const EXPECTED = join(SNAPSHOT, 'ui.expected.md')
 const FAILURE_EXPECTED = fileURLToPath(new URL('./expected/default-workspace/failure.expected.md', import.meta.url))
 const MODE = webSnapshotMode()
+const DEFAULT_WORKSPACE_PATH = join('Documents', 'deepseek-harness', 'default-workspace')
 
 describe.skipIf(MODE === 'record')('web e2e: default Workspace', () => {
   it('prepares a blank Session on startup, reuses it after reload, and sends through the ordinary composer', async () => {
@@ -29,6 +31,9 @@ describe.skipIf(MODE === 'record')('web e2e: default Workspace', () => {
       replayFixture: fixture,
       // Windows owns its recording. The shared POSIX recording remains read-only.
       compareReplaySession: WINDOWS || MODE === 'replay',
+      // The borrowed recording uses the scaffold root followed by `workspace`.
+      ...WINDOWS ? {} : { workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH + 'workspace'.length - DEFAULT_WORKSPACE_PATH.length },
+      pinAdmissionSourceRoot: !WINDOWS,
       paceMs: 5,
     })
     onTestFinished(() => scaffold.close())
@@ -58,7 +63,7 @@ describe.skipIf(MODE === 'record')('web e2e: default Workspace', () => {
         const sessionId = await settled
         const workspace = scaffold.ctx.workspaceRegistry.list()[0]!
         expect(workspace.title).toBe('default-workspace')
-        expect(workspace.path).toBe(join(scaffold.workspaceCwd, 'Documents', 'deepseek-harness', 'default-workspace'))
+        expect(workspace.path).toBe(join(scaffold.workspaceCwd, DEFAULT_WORKSPACE_PATH))
         expect((await stat(workspace.path)).isDirectory()).toBe(true)
         expect(workspace.sessionIds).toContain(sessionId)
         const session = scaffold.ctx.sessions.get(sessionId)

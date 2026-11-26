@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { chromium, webkit, type Browser } from 'playwright'
 import { expect, it, onTestFinished } from 'vitest'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts, launchWebScaffold,
   seedSession, selectedSessionFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -28,6 +29,8 @@ it.skipIf(webSnapshotMode() === 'record').each([
   expect(prompts).toHaveLength(1)
   const scaffold = await launchWebScaffold({
     profile: { packages: [{ dir: bundle, enabled: true }], hmr: false },
+    workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+    pinAdmissionSourceRoot: true,
     extraOverlayPath: picker, replayFixture, compareReplaySession: 'read-only', paceMs: 5,
   })
   resources.scaffold = scaffold

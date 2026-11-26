@@ -4,13 +4,17 @@ import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
 import { chromium } from 'playwright'
 import { expect, it } from 'vitest'
-import { assertFixtureInventory, fixtureUserPrompts, launchWebScaffold } from './scaffold.ts'
+import { ADMISSION_WORKSPACE_PATH_LENGTH, assertFixtureInventory, fixtureUserPrompts, launchWebScaffold } from './scaffold.ts'
 import { connectFreshWorkspace, newEnglishPage } from './support.ts'
 
 const FIXTURE = fileURLToPath(new URL('../../../snapshots/web/standard-dsh-doc/session.v4.jsonl', import.meta.url))
 
 it('lists dsh-doc once without loading instructions or calling tools for an ordinary task', async () => {
-  const scaffold = await launchWebScaffold({ replayFixture: FIXTURE, compareReplaySession: true, paceMs: 10 })
+  const scaffold = await launchWebScaffold({
+    replayFixture: FIXTURE, compareReplaySession: true, paceMs: 10,
+    workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+    pinAdmissionSourceRoot: true,
+  })
   try {
     const browser = await chromium.launch()
     try {

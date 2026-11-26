@@ -15,6 +15,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { WebTerminalId } from '@deepseek-ai/dsh-api-terminal-controller/types'
 import type {} from '@deepseek-ai/dsh-api-terminal-controller'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFinalWorkspaceSnapshot, assertFixtureInventory, fixtureUserPrompts, launchWebScaffold, recordFixture,
   watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -73,6 +74,8 @@ describe('web e2e: current sandbox policy reaches the model before tools', () =>
 
   beforeAll(async () => {
     scaffold = await launchWebScaffold({
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+      pinAdmissionSourceRoot: true,
       ...MODE === 'record' ? {} : { replayFixture: FIXTURE, compareReplaySession: true },
       ...process.platform === 'win32' ? {} : {
         extraOverlayPath: fileURLToPath(new URL('./fixtures/sidebar-terminal.patch.yml', import.meta.url)),

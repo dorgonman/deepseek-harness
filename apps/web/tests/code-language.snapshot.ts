@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { chromium, type Browser } from 'playwright'
 import { expect, it } from 'vitest'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   captureStableAria, compareOrRefreshGolden, fixtureUserPrompts, launchWebScaffold,
   recordFixture, watchConsole, webSnapshotMode,
 } from './scaffold.ts'
@@ -26,6 +27,8 @@ it('replays highlighted Python stubs, PowerShell and CSV reads with their docume
   const scaffold = await launchWebScaffold({
     ...(MODE === 'record' ? {} : { replayFixture: FIXTURE }),
     compareReplaySession: true,
+    workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+    pinAdmissionSourceRoot: true,
   })
   let browser: Browser | undefined
   try {

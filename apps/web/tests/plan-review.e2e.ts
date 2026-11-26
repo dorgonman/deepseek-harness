@@ -18,6 +18,7 @@ import { deriveReplayScript, parseSessionLog } from '@deepseek-ai/dsh-llm-replay
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   acknowledgeReloadConnectionLoss, assertFixtureInventory, captureExpandedTurnProcessAria, captureStableAria,
   compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, seedSession, watchConsole, webSnapshotMode, type WebScaffold,
@@ -54,7 +55,11 @@ describe('web e2e: plan review takeover round trip', () => {
   let reviewedSession: SessionId
 
   beforeAll(async () => {
-    scaffold = await launchWebScaffold(MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 15, compareReplaySession: true })
+    scaffold = await launchWebScaffold({
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+      pinAdmissionSourceRoot: true,
+      ...MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 15, compareReplaySession: true },
+    })
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })
     browser = await chromium.launch()
     // English page: the decision copy is the surface under test, and the
