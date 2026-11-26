@@ -9,6 +9,7 @@ import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
 import type { Nodes } from 'mdast'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { COVERAGE_TEST_TIMEOUT_ENV, parseCoverageTestTimeout } from './coverage-partitions.ts'
 import { cleanDocSiteOutput, docSiteBuildOptions } from '../website/build.ts'
 import { docsPages, landingLink, routeLink, sectionSpec, type DocsPage } from '../website/docs.ts'
 import {
@@ -725,6 +726,20 @@ describe('emitRawMarkdownPages', () => {
     expect(fromMarkdown(bytes.toString('utf8')).children[0]?.type).toBe('heading')
   })
 
+  it('reports every link to a missing emitted target and accepts restoration', () => {
+    const { root, pages } = fixture()
+    writeFileSync(join(root, 'docs/a.md'), '[B](b.md) [Another B](b.md)\n')
+    const out = mirrorDir()
+    emitRawMarkdownPages(out, { pages, repoRoot: root, repositoryRef: 'abc123' })
+
+    const target = join(out, 'reference-root/b.md')
+    const content = readFileSync(target)
+    unlinkSync(target)
+    expect(brokenRelativeLinks(out)).toEqual(['a.md: ./reference-root/b.md', 'a.md: ./reference-root/b.md'])
+    writeFileSync(target, content)
+    expect(brokenRelativeLinks(out)).toEqual([])
+  })
+
   it('refuses to overwrite a file the build already carries', () => {
     // The twin pass writes into a populated build directory, and VitePress has
     // already copied `website/public/` there; a page image sharing one of
@@ -755,18 +770,19 @@ describe('rawMarkdownFiles', () => {
 })
 
 describe('raw Markdown projection of the published manifest', () => {
-  let mirror: string
+  let mirror = ''
+  // Emitting and reparsing the full document tree each need the coverage lane's
+  // budget. Local runs without a lane budget keep the bounded 60-second fallback.
+  const mirrorBudget = parseCoverageTestTimeout(process.env[COVERAGE_TEST_TIMEOUT_ENV]) ?? 60_000
 
-  // Coverage instrumentation on a loaded CI runner stretches the full-manifest
-  // emission and the 181-file link walk past vitest's 5s default.
   beforeAll(() => {
     mirror = mkdtempSync(join(tmpdir(), 'dsh-doc-mirror-real-'))
     emitRawMarkdownPages(mirror, { pages: docsPages, repoRoot: repositoryRoot, repositoryRef: 'master' })
-  }, 60_000)
+  }, mirrorBudget)
 
   afterAll(() => {
-    rmSync(mirror, { recursive: true, force: true })
-  })
+    if (mirror !== '') rmSync(mirror, { recursive: true, force: true })
+  }, mirrorBudget)
 
   it('emits every published route and every index alias', () => {
     for (const file of rawMarkdownFiles()) {
@@ -782,18 +798,26 @@ describe('raw Markdown projection of the published manifest', () => {
     }
   })
 
-  it('resolves every relative link inside the emitted tree', { timeout: 60_000 }, () => {
+  it('resolves every relative link inside the emitted tree', { timeout: mirrorBudget }, () => {
     // Raw pages are read outside the site, so a relative target that only the
     // rendered site serves would strand every agent following it.
-    const broken: string[] = []
-    for (const file of globSync('**/*.md', { cwd: mirror }).sort()) {
-      for (const target of relativeTargets(readFileSync(join(mirror, file), 'utf8'))) {
-        if (!existsSync(resolve(mirror, dirname(file), target))) broken.push(`${file}: ${target}`)
-      }
-    }
-    expect(broken).toEqual([])
+    expect(brokenRelativeLinks(mirror)).toEqual([])
   })
 })
+
+function brokenRelativeLinks(mirror: string): string[] {
+  const broken: string[] = []
+  const verifiedTargets = new Set<string>()
+  for (const file of globSync('**/*.md', { cwd: mirror }).sort()) {
+    for (const target of relativeTargets(readFileSync(join(mirror, file), 'utf8'))) {
+      const path = resolve(mirror, dirname(file), target)
+      if (verifiedTargets.has(path)) continue
+      if (existsSync(path)) verifiedTargets.add(path)
+      else broken.push(`${file}: ${target}`)
+    }
+  }
+  return broken
+}
 
 function relativeTargets(markdown: string): string[] {
   const tree = fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
