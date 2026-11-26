@@ -20,7 +20,7 @@ import HybridCompactionEngine from '@deepseek-ai/dsh-compaction-basic/hybrid'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE, createMessage, createToolResultMessage, createUserMessage, textOnlyImageText, ReasoningEffortId, ToolCallId,
-  type GenerateOptions, type LlmImageRequestPricing, type ModelModality, type StreamChunk,
+  type GenerateOptions, type LlmImageRequestPricing, type ModelModality, type RequestMessage, type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { deriveReplayScript } from '@deepseek-ai/dsh-llm-replay'
@@ -60,12 +60,12 @@ const fault = [{
 type CompactionOverrides = { [Key in keyof BasicCompactionConfig]?: BasicCompactionConfig[Key] | undefined }
 
 async function mountCompactionHarness(
-  ctx: Context, root: string, extraBuiltins: Record<string, unknown> = {},
+  ctx: Context, root: string, extraBuiltins: Record<string, unknown> = {}, meter: typeof TokenMeter = TokenMeter,
 ) {
   await mountAgentLoopTestDependencies(ctx)
   const persistence = await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'zstd' })
   await ctx.plugin(SqliteSessionQueryEngine, { path: ':memory:', openAt: 'never' })
-  await ctx.plugin(TokenMeter)
+  await ctx.plugin(meter)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(Commands)
   await ctx.plugin(Loader)
@@ -117,17 +117,61 @@ async function mountStandardPreset(ctx: Context, config: CompactionOverrides = {
 async function withContext(
   run: (ctx: Context, root: string, disposePersistence: () => Promise<void>) => Promise<void>,
   config: CompactionOverrides = {},
+  meter: typeof TokenMeter = TokenMeter,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-hybrid-compaction-'))
   const ctx = new Context()
   try {
-    const disposePersistence = await mountCompactionHarness(ctx, root)
+    const disposePersistence = await mountCompactionHarness(ctx, root, {}, meter)
     await loadCompactionComposition(ctx, root, 'cordis.yml', 'hybrid', config)
     expect(ctx.compaction).toBeInstanceOf(HybridCompactionEngine)
     await run(ctx, root, disposePersistence)
   } finally {
     await ctx.fiber.dispose()
     await rm(root, { recursive: true, force: true })
+  }
+}
+
+interface WideCompactionFixture {
+  readonly ctx: Context
+  readonly agent: Agent
+  readonly sessionId: SessionId
+  readonly chat: WindowAdapter
+  readonly summary: WindowAdapter
+}
+
+async function withWideCompaction(
+  sessionName: string,
+  run: (fixture: WideCompactionFixture) => Promise<void>,
+  { warmReply = 'Reply.', ...config }: CompactionOverrides & { warmReply?: string } = {},
+) {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter([textResponse(warmReply)])
+    const summary = new WindowAdapter([])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId(sessionName)
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      await run({ ctx, agent: owned.agent, sessionId, chat, summary })
+    } finally {
+      await owned.dispose()
+    }
+  }, config)
+}
+
+function requireHybrid(ctx: Context): HybridCompactionEngine {
+  const engine = ctx.compaction
+  if (!(engine instanceof HybridCompactionEngine)) throw new Error('Expected the Hybrid compaction backend')
+  return engine
+}
+
+async function inFixtureTurn<T>(session: Agent['session'], turn: number, run: () => Promise<T>) {
+  session.append('turn/start', { turn })
+  try {
+    return await run()
+  } finally {
+    session.append('turn/end', { turn, reason: { kind: 'completed' } })
   }
 }
 
@@ -140,6 +184,18 @@ async function send(agent: Agent, text: string) {
 
 function checkpoints(events: readonly SessionEvent[]) {
   return events.filter(event => event.type === 'user/message' && isCompactCheckpointSource(event.data.source))
+}
+
+function expectCheckpointPreserved(
+  session: Agent['session'],
+  before: readonly SessionEvent[],
+  after: readonly SessionEvent[],
+  nodes: readonly SessionSeq[],
+) {
+  expect(after.slice(0, before.length)).toEqual(before)
+  expect(checkpoints(after)).toEqual(checkpoints(before))
+  expect(deriveCommittedCoverage(after)).toEqual(deriveCommittedCoverage(before))
+  expect(session.surface.nodes).toEqual(nodes)
 }
 
 function requestText(request: GenerateOptions): string {
@@ -773,12 +829,9 @@ it('preserves earlier uncovered RAW when a later span already advanced the incre
         resolve.mockRestore()
       }
       const { events: after } = await ctx.sessionQuery.readSession(sessionId)
-      expect(after.slice(0, before.length)).toEqual(before)
+      expectCheckpointPreserved(session, before, after, nodes)
       expect(after.slice(before.length).map(event => event.type)).toEqual(['compaction/start', 'compaction/end'])
       expect(after.findLast(event => event.type === 'compaction/end')?.data.error).toContain(expected)
-      expect(checkpoints(after)).toEqual(checkpoints(before))
-      expect(deriveCommittedCoverage(after)).toEqual(coverage)
-      expect(session.surface.nodes).toEqual(nodes)
       await owned.dispose()
       const { events: reopened } = await ctx.sessionQuery.readSession(sessionId)
       expect(reopened).toEqual(after)
@@ -2227,157 +2280,104 @@ it('refuses a later Hybrid chunk when the prepared summarizer window changes', a
 })
 
 it('refuses an indivisible group that exceeds the summarizer window before dispatch', async () => {
-  await withContext(async (ctx, root) => {
-    const chat = new WindowAdapter([textResponse('Reply.')])
-    const summary = new WindowAdapter([])
-    ctx.llm.registerAdapter([wide.provider], chat)
-    ctx.llm.registerAdapter(['synthetic-summary'], summary)
-    const sessionId = SessionId('hybrid-oversized-non-tool-group')
-    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
-    try {
-      await send(owned.agent, 'x'.repeat(18_000))
-      await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toThrow()
-      const { events } = await ctx.sessionQuery.readSession(sessionId)
-      expect(summary.requests).toHaveLength(0)
-      expect(checkpoints(events)).toHaveLength(0)
-      expect(events.findLast(event => event.type === 'compaction/end')?.data.error)
-        .toContain('one balanced history group exceeds the summarizer window')
-    } finally {
-      await owned.dispose()
-    }
+  await withWideCompaction('hybrid-oversized-non-tool-group', async ({ ctx, agent, sessionId, summary }) => {
+    await send(agent, 'x'.repeat(18_000))
+    await expect(ctx.compaction.compactNow(agent, signal)).rejects.toThrow()
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    expect(summary.requests).toHaveLength(0)
+    expect(checkpoints(events)).toHaveLength(0)
+    expect(events.findLast(event => event.type === 'compaction/end')?.data.error)
+      .toContain('one balanced history group exceeds the summarizer window')
   }, { summarizationModel: 'narrow', maxTokens: 64 })
 })
 
 it('refuses automatic pressure while an existing compaction still owns the Session', async () => {
-  await withContext(async (ctx, root) => {
-    const chat = new WindowAdapter([textResponse('Reply.')])
-    const summary = new WindowAdapter([])
-    ctx.llm.registerAdapter([wide.provider], chat)
-    ctx.llm.registerAdapter(['synthetic-summary'], summary)
-    const sessionId = SessionId('hybrid-active-compaction-conflict')
-    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
-    try {
-      await send(owned.agent, 'History before another compaction started. '.repeat(100))
-      const compactionId = CompactionId('existing-compaction')
-      owned.agent.session.append('compaction/start', { compactionId, turn: null })
-      const events = owned.agent.session.ownEvents()
-      await expect(ctx.compaction.compactIfNeeded(owned.agent, 'pressure', signal))
-        .rejects.toThrow('compaction already in progress')
-      expect(owned.agent.session.ownEvents()).toEqual(events)
-      expect(summary.requests).toHaveLength(0)
-      owned.agent.session.append('compaction/end', { compactionId, turn: null })
-    } finally {
-      await owned.dispose()
-    }
+  await withWideCompaction('hybrid-active-compaction-conflict', async ({ ctx, agent, summary }) => {
+    await send(agent, 'History before another compaction started. '.repeat(100))
+    const compactionId = CompactionId('existing-compaction')
+    agent.session.append('compaction/start', { compactionId, turn: null })
+    const events = agent.session.ownEvents()
+    await expect(ctx.compaction.compactIfNeeded(agent, 'pressure', signal))
+      .rejects.toThrow('compaction already in progress')
+    expect(agent.session.ownEvents()).toEqual(events)
+    expect(summary.requests).toHaveLength(0)
+    agent.session.append('compaction/end', { compactionId, turn: null })
   })
 })
 
 it.each(['manual compaction', 'route switch'] as const)(
   'refuses %s when the observed Session is a detached cut',
   async (operation) => {
-    await withContext(async (ctx, root) => {
-      const chat = new WindowAdapter([textResponse('Reply.')])
-      const summary = new WindowAdapter([])
-      ctx.llm.registerAdapter([wide.provider], chat)
-      ctx.llm.registerAdapter(['synthetic-summary'], summary)
-      const sessionId = SessionId('hybrid-detached-observation')
-      const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    await withWideCompaction('hybrid-detached-observation', async ({ ctx, agent, sessionId, chat, summary }) => {
       const observe = ctx.sessionQuery.observeSession.bind(ctx.sessionQuery)
+      await send(agent, 'Live history before an observation mismatch. '.repeat(150))
+      const nodes = [...agent.session.surface.nodes]
+      const spy = vi.spyOn(ctx.sessionQuery, 'observeSession').mockImplementation(async (...args) => ({
+        ...await observe(...args), source: 'prepared',
+      }))
       try {
-        await send(owned.agent, 'Live history before an observation mismatch. '.repeat(150))
-        const nodes = [...owned.agent.session.surface.nodes]
-        const spy = vi.spyOn(ctx.sessionQuery, 'observeSession').mockImplementation(async (...args) => ({
-          ...await observe(...args), source: 'prepared',
-        }))
-        try {
-          if (operation === 'manual compaction') {
-            await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toThrow()
-          } else {
-            owned.agent.model.select({ provider: wide.provider, model: 'narrow' })
-            await send(owned.agent, 'Pending switch input.')
-          }
-          expect(spy).toHaveBeenCalledOnce()
-        } finally {
-          spy.mockRestore()
-        }
-        const { events } = await ctx.sessionQuery.readSession(sessionId)
         if (operation === 'manual compaction') {
-          expect(events.findLast(event => event.type === 'compaction/end')?.data.error)
-            .toContain('the source Session must be live')
+          await expect(ctx.compaction.compactNow(agent, signal)).rejects.toThrow()
         } else {
-          const reason = events.findLast(event => event.type === 'turn/end')?.data.reason
-          expect(reason?.kind === 'error' && reason.error.code).toBe('MODEL_SWITCH_COMPACTION_FAILED')
-          expect(reason?.kind === 'error' && reason.error.message).toContain('the source Session must be live')
-          expectPendingInput(owned.agent, 'Pending switch input.')
+          agent.model.select({ provider: wide.provider, model: 'narrow' })
+          await send(agent, 'Pending switch input.')
         }
-        expect(checkpoints(events)).toHaveLength(0)
-        expect(summary.requests).toHaveLength(0)
-        expect(chat.requests).toHaveLength(1)
-        expect(owned.agent.session.surface.nodes).toEqual(nodes)
+        expect(spy).toHaveBeenCalledOnce()
       } finally {
-        await owned.dispose()
+        spy.mockRestore()
       }
+      const { events } = await ctx.sessionQuery.readSession(sessionId)
+      if (operation === 'manual compaction') {
+        expect(events.findLast(event => event.type === 'compaction/end')?.data.error)
+          .toContain('the source Session must be live')
+      } else {
+        const reason = events.findLast(event => event.type === 'turn/end')?.data.reason
+        expect(reason?.kind === 'error' && reason.error.code).toBe('MODEL_SWITCH_COMPACTION_FAILED')
+        expect(reason?.kind === 'error' && reason.error.message).toContain('the source Session must be live')
+        expectPendingInput(agent, 'Pending switch input.')
+      }
+      expect(checkpoints(events)).toHaveLength(0)
+      expect(summary.requests).toHaveLength(0)
+      expect(chat.requests).toHaveLength(1)
+      expect(agent.session.surface.nodes).toEqual(nodes)
     }, { auto: true, thresholdRatio: 0.99 })
   },
 )
 
 it('keeps the committed route when the destination adapter has no known context window', async () => {
-  await withContext(async (ctx, root) => {
-    const chat = new WindowAdapter([textResponse('Reply.')])
+  await withWideCompaction('hybrid-switch-unknown-window', async ({ ctx, agent, sessionId, summary }) => {
     const destination = new MockAdapter([])
-    const summary = new WindowAdapter([])
-    ctx.llm.registerAdapter([wide.provider], chat)
     ctx.llm.registerAdapter(['unknown-context'], destination)
-    ctx.llm.registerAdapter(['synthetic-summary'], summary)
-    const sessionId = SessionId('hybrid-switch-unknown-window')
-    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
-    try {
-      await send(owned.agent, 'Original request on a verified route.')
-      owned.agent.model.select({ provider: 'unknown-context', model: 'destination' })
-      await send(owned.agent, 'Keep this pending until a destination is available.')
-      const { events } = await ctx.sessionQuery.readSession(sessionId)
-      const reason = events.findLast(event => event.type === 'turn/end')?.data.reason
-      expect(reason?.kind === 'error' && reason.error.code).toBe('MODEL_SWITCH_COMPACTION_FAILED')
-      expect(reason?.kind === 'error' && reason.error.message)
-        .toContain('destination context and completion reserve must be known')
-      expect(owned.agent.session.requestHeader()?.config).toMatchObject(wide)
-      expectPendingInput(owned.agent, 'Keep this pending')
-      expect(destination.requests).toHaveLength(0)
-      expect(summary.requests).toHaveLength(0)
-      expect(checkpoints(events)).toHaveLength(0)
-    } finally {
-      await owned.dispose()
-    }
+    await send(agent, 'Original request on a verified route.')
+    agent.model.select({ provider: 'unknown-context', model: 'destination' })
+    await send(agent, 'Keep this pending until a destination is available.')
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    const reason = events.findLast(event => event.type === 'turn/end')?.data.reason
+    expect(reason?.kind === 'error' && reason.error.code).toBe('MODEL_SWITCH_COMPACTION_FAILED')
+    expect(reason?.kind === 'error' && reason.error.message)
+      .toContain('destination context and completion reserve must be known')
+    expect(agent.session.requestHeader()?.config).toMatchObject(wide)
+    expectPendingInput(agent, 'Keep this pending')
+    expect(destination.requests).toHaveLength(0)
+    expect(summary.requests).toHaveLength(0)
+    expect(checkpoints(events)).toHaveLength(0)
   }, { auto: true })
 })
 
 it('refuses explicit compaction of the protected system head', async () => {
-  await withContext(async (ctx, root) => {
-    const chat = new WindowAdapter([textResponse('Reply.')])
-    const summary = new WindowAdapter([])
-    ctx.llm.registerAdapter([wide.provider], chat)
-    ctx.llm.registerAdapter(['synthetic-summary'], summary)
-    const sessionId = SessionId('hybrid-protected-system-head')
-    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
-    try {
-      await send(owned.agent, 'Original history under a protected system prompt.')
-      const { session } = owned.agent
-      const nodes = [...session.surface.nodes]
-      const head = session.ownEvents().find(event => event.seq === nodes[0])
-      expect(head?.type).toBe('system/message')
-      session.append('turn/start', { turn: 2 })
-      try {
-        await expect(ctx.compaction.compactRegion(nodes[0]!, nodes.at(-1)!, owned.agent, signal))
-          .rejects.toThrow('cannot replace the protected system head')
-      } finally {
-        session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
-      }
-      expect(session.surface.nodes).toEqual(nodes)
-      expect(summary.requests).toHaveLength(0)
-      expect(checkpoints(session.ownEvents())).toHaveLength(0)
-    } finally {
-      await owned.dispose()
-    }
+  await withWideCompaction('hybrid-protected-system-head', async ({ ctx, agent, summary }) => {
+    await send(agent, 'Original history under a protected system prompt.')
+    const { session } = agent
+    const nodes = [...session.surface.nodes]
+    const head = session.ownEvents().find(event => event.seq === nodes[0])
+    expect(head?.type).toBe('system/message')
+    await inFixtureTurn(session, 2, async () => {
+      await expect(ctx.compaction.compactRegion(nodes[0]!, nodes.at(-1)!, agent, signal))
+        .rejects.toThrow('cannot replace the protected system head')
+    })
+    expect(session.surface.nodes).toEqual(nodes)
+    expect(summary.requests).toHaveLength(0)
+    expect(checkpoints(session.ownEvents())).toHaveLength(0)
   })
 })
 
@@ -2818,43 +2818,30 @@ it('rebuilds the overflowing preview from a pruned tool result before attempting
 it.each(['unlinked checkpoint', 'non-checkpoint replacement'] as const)(
   'refuses malformed history with %s before quoting',
   async (kind) => {
-    await withContext(async (ctx, root) => {
-      const chat = new WindowAdapter([textResponse('Reply.')])
-      const summary = new WindowAdapter([])
-      ctx.llm.registerAdapter([wide.provider], chat)
-      ctx.llm.registerAdapter(['synthetic-summary'], summary)
-      const sessionId = SessionId('hybrid-unsupported-replacement')
-      const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
-      try {
-        await send(owned.agent, 'Original history that must remain recoverable.')
-        const { session } = owned.agent
-        const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
-        const unsupported = kind === 'unlinked checkpoint'
-          ? session.append('user/message', createUserMessage({
-            source: compactCheckpointSource(CompactionId('unlinked')),
-            content: [{ type: 'text', text: 'Unlinked checkpoint.' }],
-          }), { surfaceOp: 'append' })
-          : session.append('user/message', createUserMessage({
-            source: { kind: 'user' }, content: [{ type: 'text', text: 'Unsupported replacement.' }],
-          }), {
-            surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq },
-            sourceEventSeqs: [original.seq],
-          })
-        const nodes = [...session.surface.nodes]
-        session.append('turn/start', { turn: 2 })
-        try {
-          await expect(ctx.compaction.compactRegion(unsupported.seq, unsupported.seq, owned.agent, signal))
-            .rejects.toThrow('unsupported Surface replacement event')
-        } finally {
-          session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
-        }
-        expect(session.surface.nodes).toEqual(nodes)
-        expect(summary.requests).toHaveLength(0)
-        expect(session.ownEvents()).toContainEqual(original)
-        expect(session.ownEvents().some(event => event.type === 'compaction/summary')).toBe(false)
-      } finally {
-        await owned.dispose()
-      }
+    await withWideCompaction('hybrid-unsupported-replacement', async ({ ctx, agent, summary }) => {
+      await send(agent, 'Original history that must remain recoverable.')
+      const { session } = agent
+      const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
+      const unsupported = kind === 'unlinked checkpoint'
+        ? session.append('user/message', createUserMessage({
+          source: compactCheckpointSource(CompactionId('unlinked')),
+          content: [{ type: 'text', text: 'Unlinked checkpoint.' }],
+        }), { surfaceOp: 'append' })
+        : session.append('user/message', createUserMessage({
+          source: { kind: 'user' }, content: [{ type: 'text', text: 'Unsupported replacement.' }],
+        }), {
+          surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq },
+          sourceEventSeqs: [original.seq],
+        })
+      const nodes = [...session.surface.nodes]
+      await inFixtureTurn(session, 2, async () => {
+        await expect(ctx.compaction.compactRegion(unsupported.seq, unsupported.seq, agent, signal))
+          .rejects.toThrow('unsupported Surface replacement event')
+      })
+      expect(session.surface.nodes).toEqual(nodes)
+      expect(summary.requests).toHaveLength(0)
+      expect(session.ownEvents()).toContainEqual(original)
+      expect(session.ownEvents().some(event => event.type === 'compaction/summary')).toBe(false)
     })
   },
 )
@@ -2902,16 +2889,12 @@ it('refuses to commit extracted facts when none fit the proposed request budget'
       const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
       const header = session.requestHeader()!
       const destination = { ...header, config: { ...header.config, maxTokens: chat.windows.get('wide')! - 1 } }
-      const hybrid = ctx.compaction
-      if (!(hybrid instanceof HybridCompactionEngine)) throw new Error('Expected the Hybrid compaction backend')
+      const hybrid = requireHybrid(ctx)
       const nodes = [...session.surface.nodes]
-      session.append('turn/start', { turn: 2 })
-      try {
+      await inFixtureTurn(session, 2, async () => {
         await expect(hybrid.compactRegion(original.seq, nodes.at(-1)!, owned.agent, signal, destination))
           .rejects.toThrow('no fact fits the destination budget')
-      } finally {
-        session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
-      }
+      })
       expect(summary.requests).toHaveLength(1)
       expect(checkpoints(session.ownEvents())).toHaveLength(0)
       expect(session.surface.nodes).toEqual(nodes)
@@ -3015,83 +2998,71 @@ it.each(['returns a checkpoint', 'rejects with non-Error data'] as const)(
   },
 )
 
-// DSH-TSK-0021 draft regressions for Hybrid history validation.
-
 it.each([
   ['duplicate calls', 'duplicate tool call in original history'],
   ['a mismatched result', 'result lacks its original tool call'],
   ['an unmatched original behind a checkpoint', 'selected history has unmatched tool calls'],
   ['an empty original assistant message', 'an original event has no recoverable message'],
 ] as const)('refuses malformed raw history carrying %s', async (kind, diagnosis) => {
-  await withContext(async (ctx, root) => {
-    const chat = new WindowAdapter([textResponse('Warm route.')])
-    const summary = new WindowAdapter([])
-    ctx.llm.registerAdapter([wide.provider], chat)
-    ctx.llm.registerAdapter(['synthetic-summary'], summary)
-    const sessionId = SessionId('hybrid-malformed-historical-originals')
-    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
-    try {
-      await send(owned.agent, 'Commit the source route.')
-      const { session } = owned.agent
-      const originalCall = ToolCallId('fixture-call')
-      const mismatchedCall = ToolCallId('mismatched-call')
-      const duplicate = kind === 'duplicate calls'
-      const unmatched = kind === 'an unmatched original behind a checkpoint'
-      const empty = kind === 'an empty original assistant message'
-      session.append('turn/start', { turn: 2 })
-      session.append('step/start', { turn: 2, step: 1 })
-      const toolBlock = { type: 'tool-call', id: originalCall, name: 'fixture_read', arguments: '{}' } as const
-      const assistant = session.append('assistant/message', {
-        turn: 2, step: 1, stream: [],
-        message: createMessage({
-          role: 'assistant', source: { kind: 'model', provider: wide.provider, model: wide.model },
-          content: empty ? [] : duplicate ? [toolBlock, toolBlock] : [toolBlock],
-        }),
-      }, { surfaceOp: 'append' })
-      let last = assistant.seq
-      if (!empty) {
-        const resultIds = duplicate ? [originalCall, originalCall]
-          : [kind === 'a mismatched result' ? mismatchedCall : originalCall]
-        for (const callId of resultIds) {
-          session.append('tool/call', { turn: 2, step: 1, callId, name: toolBlock.name, arguments: toolBlock.arguments })
-          last = session.append('tool/result', {
-            turn: 2, step: 1,
-            message: createToolResultMessage({ callId, isError: false, content: [{ type: 'text', text: 'Historical result.' }] }),
-          }, { surfaceOp: 'append' }).seq
-        }
+  await withWideCompaction('hybrid-malformed-historical-originals', async ({ ctx, agent, summary }) => {
+    await send(agent, 'Commit the source route.')
+    const { session } = agent
+    const originalCall = ToolCallId('fixture-call')
+    const mismatchedCall = ToolCallId('mismatched-call')
+    const duplicate = kind === 'duplicate calls'
+    const unmatched = kind === 'an unmatched original behind a checkpoint'
+    const empty = kind === 'an empty original assistant message'
+    session.append('turn/start', { turn: 2 })
+    session.append('step/start', { turn: 2, step: 1 })
+    const toolBlock = { type: 'tool-call', id: originalCall, name: 'fixture_read', arguments: '{}' } as const
+    const assistant = session.append('assistant/message', {
+      turn: 2, step: 1, stream: [],
+      message: createMessage({
+        role: 'assistant', source: { kind: 'model', provider: wide.provider, model: wide.model },
+        content: empty ? [] : duplicate ? [toolBlock, toolBlock] : [toolBlock],
+      }),
+    }, { surfaceOp: 'append' })
+    let last = assistant.seq
+    if (!empty) {
+      const resultIds = duplicate ? [originalCall, originalCall]
+        : [kind === 'a mismatched result' ? mismatchedCall : originalCall]
+      for (const callId of resultIds) {
+        session.append('tool/call', { turn: 2, step: 1, callId, name: toolBlock.name, arguments: toolBlock.arguments })
+        last = session.append('tool/result', {
+          turn: 2, step: 1,
+          message: createToolResultMessage({ callId, isError: false, content: [{ type: 'text', text: 'Historical result.' }] }),
+        }, { surfaceOp: 'append' }).seq
       }
-      session.append('step/end', { turn: 2, step: 1 })
-      session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
-      let start = assistant.seq
-      let end = last
-      if (unmatched) {
-        // Both visible cuts are balanced, but selecting only the first
-        // checkpoint reveals the unmatched original assistant call.
-        const replace = (seq: SessionSeq) => session.append('user/message', createUserMessage({
-          source: compactCheckpointSource(CompactionId(`inherited-${seq}`)),
-          content: [{ type: 'text', text: 'Inherited partial checkpoint.' }],
-        }), {
-          surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq },
-          sourceEventSeqs: [seq],
-        }).seq
-        start = replace(assistant.seq)
-        replace(last)
-        end = start
-      }
-      const nodes = [...session.surface.nodes]
-      session.append('turn/start', { turn: 3 })
-      try {
-        await expect(ctx.compaction.compactRegion(start, end, owned.agent, signal)).rejects.toThrow(diagnosis)
-      } finally {
-        session.append('turn/end', { turn: 3, reason: { kind: 'completed' } })
-      }
-      expect(summary.requests).toHaveLength(0)
-      expect(session.ownEvents().some(event => event.type === 'compaction/summary')).toBe(false)
-      expect(session.surface.nodes).toEqual(nodes)
-    } finally {
-      await owned.dispose()
     }
-  })
+    session.append('step/end', { turn: 2, step: 1 })
+    session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    let start = assistant.seq
+    let end = last
+    if (unmatched) {
+      // Both visible cuts are balanced, but selecting only the first
+      // checkpoint reveals the unmatched original assistant call.
+      const replace = (seq: SessionSeq) => session.append('user/message', createUserMessage({
+        source: compactCheckpointSource(CompactionId(`inherited-${seq}`)),
+        content: [{ type: 'text', text: 'Inherited partial checkpoint.' }],
+      }), {
+        surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq },
+        sourceEventSeqs: [seq],
+      }).seq
+      start = replace(assistant.seq)
+      replace(last)
+      end = start
+    }
+    const nodes = [...session.surface.nodes]
+    session.append('turn/start', { turn: 3 })
+    try {
+      await expect(ctx.compaction.compactRegion(start, end, agent, signal)).rejects.toThrow(diagnosis)
+    } finally {
+      session.append('turn/end', { turn: 3, reason: { kind: 'completed' } })
+    }
+    expect(summary.requests).toHaveLength(0)
+    expect(session.ownEvents().some(event => event.type === 'compaction/summary')).toBe(false)
+    expect(session.surface.nodes).toEqual(nodes)
+  }, { warmReply: 'Warm route.' })
 })
 
 it('refuses selected raw history without a committed request envelope', async () => {
@@ -3124,82 +3095,57 @@ it('refuses selected raw history without a committed request envelope', async ()
 it.each(['window', 'completion reserve'] as const)(
   'refuses a prepared Hybrid destination missing its %s',
   async (missing) => {
-    await withContext(async (ctx, root) => {
-      const chat = new WindowAdapter([textResponse('Warm route.')])
+    await withWideCompaction('hybrid-destination-unknown-envelope', async ({ ctx, agent, summary }) => {
       const unknownWindow = new MockAdapter([])
-      const summary = new WindowAdapter([])
-      ctx.llm.registerAdapter([wide.provider], chat)
       ctx.llm.registerAdapter(['unknown-window'], unknownWindow)
-      ctx.llm.registerAdapter(['synthetic-summary'], summary)
-      const sessionId = SessionId('hybrid-destination-unknown-envelope')
-      const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
-      try {
-        await send(owned.agent, 'Original history before preparing the destination.')
-        const { session } = owned.agent
-        const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
-        const header = session.requestHeader()!
-        const destination = {
-          ...header,
-          config: missing === 'window' ? { ...wide, provider: 'unknown-window' }
-            : { provider: wide.provider, model: wide.model },
-        }
-        const hybrid = ctx.compaction
-        if (!(hybrid instanceof HybridCompactionEngine)) throw new Error('Expected the Hybrid compaction backend')
-        const nodes = [...session.surface.nodes]
-        session.append('turn/start', { turn: 2 })
-        try {
-          await expect(hybrid.compactRegion(original.seq, nodes.at(-1)!, owned.agent, signal, destination))
-            .rejects.toThrow('destination context and completion reserve must be known')
-        } finally {
-          session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
-        }
-        expect(unknownWindow.requests).toHaveLength(0)
-        expect(summary.requests).toHaveLength(0)
-        expect(checkpoints(session.ownEvents())).toHaveLength(0)
-        expect(session.surface.nodes).toEqual(nodes)
-      } finally {
-        await owned.dispose()
+      await send(agent, 'Original history before preparing the destination.')
+      const { session } = agent
+      const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
+      const header = session.requestHeader()!
+      const destination = {
+        ...header,
+        config: missing === 'window' ? { ...wide, provider: 'unknown-window' }
+          : { provider: wide.provider, model: wide.model },
       }
-    })
+      const hybrid = requireHybrid(ctx)
+      const nodes = [...session.surface.nodes]
+      await inFixtureTurn(session, 2, async () => {
+        await expect(hybrid.compactRegion(original.seq, nodes.at(-1)!, agent, signal, destination))
+          .rejects.toThrow('destination context and completion reserve must be known')
+      })
+      expect(unknownWindow.requests).toHaveLength(0)
+      expect(summary.requests).toHaveLength(0)
+      expect(checkpoints(session.ownEvents())).toHaveLength(0)
+      expect(session.surface.nodes).toEqual(nodes)
+    }, { warmReply: 'Warm route.' })
   },
 )
 
 it.each(['sizes the unprojected preview', 'reports a non-Error extension refusal'] as const)(
   'uses the request-admission contract when the extension %s',
   async (condition) => {
-    await withContext(async (ctx, root) => {
-      const chat = new WindowAdapter([textResponse('Warm route.')])
-      const summary = new WindowAdapter([])
-      ctx.llm.registerAdapter([wide.provider], chat)
-      ctx.llm.registerAdapter(['synthetic-summary'], summary)
-      const sessionId = SessionId('hybrid-pending-contract')
-      const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
-      try {
-        await send(owned.agent, 'History for one tentative request.')
-        const { agent } = owned
-        const header = agent.session.requestHeader()!
-        const fail = condition === 'reports a non-Error extension refusal'
-        const preview = vi.fn(() => agent.session)
-        if (fail) preview.mockImplementationOnce(() => { throw 'synthetic extension refusal' })
-        const operation = agentEvents(ctx, agent).serial('agent/request-admission', {
-          request: { header, contextWindow: 4_096, completionSource: 'explicit', preview },
-          signal,
+    await withWideCompaction('hybrid-pending-contract', async ({ ctx, agent, summary }) => {
+      await send(agent, 'History for one tentative request.')
+      const header = agent.session.requestHeader()!
+      const fail = condition === 'reports a non-Error extension refusal'
+      const preview = vi.fn(() => agent.session)
+      if (fail) preview.mockImplementationOnce(() => { throw 'synthetic extension refusal' })
+      const operation = agentEvents(ctx, agent).serial('agent/request-admission', {
+        request: { header, contextWindow: 4_096, completionSource: 'explicit', preview },
+        signal,
+      })
+      if (fail) {
+        await expect(operation).rejects.toMatchObject({
+          code: 'MODEL_SWITCH_COMPACTION_FAILED',
+          message: 'Cannot switch from synthetic-chat/wide to synthetic-chat/wide: synthetic extension refusal',
         })
-        if (fail) {
-          await expect(operation).rejects.toMatchObject({
-            code: 'MODEL_SWITCH_COMPACTION_FAILED',
-            message: 'Cannot switch from synthetic-chat/wide to synthetic-chat/wide: synthetic extension refusal',
-          })
-        } else {
-          await expect(operation).resolves.toBeUndefined()
-        }
-        expect(preview).toHaveBeenCalledOnce()
-        expect(summary.requests).toHaveLength(0)
-        expect(checkpoints(agent.session.ownEvents())).toHaveLength(0)
-      } finally {
-        await owned.dispose()
+      } else {
+        await expect(operation).resolves.toBeUndefined()
       }
-    }, { auto: true })
+      expect(preview).toHaveBeenCalledOnce()
+      expect(summary.requests).toHaveLength(0)
+      expect(checkpoints(agent.session.ownEvents())).toHaveLength(0)
+    }, { warmReply: 'Warm route.', auto: true })
   },
 )
 
@@ -3316,39 +3262,149 @@ it.each([
 })
 
 it('rejects a live observation whose Surface disagrees with the selected span at the same cursor', async () => {
+  await withWideCompaction('hybrid-inconsistent-observation', async ({ ctx, agent, summary }) => {
+    await send(agent, 'Live original retained after the query disagrees. '.repeat(60))
+    const { session } = agent
+    const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
+    const nodes = [...session.surface.nodes]
+    const observe = ctx.sessionQuery.observeSession.bind(ctx.sessionQuery)
+    const spy = vi.spyOn(ctx.sessionQuery, 'observeSession').mockImplementation(async (...args) => {
+      const observation = await observe(...args)
+      const absent: SessionEvent<'turn/end'> = {
+        type: 'turn/end', seq: original.seq, time: original.time, data: { turn: 1, reason: { kind: 'completed' } },
+      }
+      return { ...observation, events: observation.events.map(event => event.seq === original.seq ? absent : event) }
+    })
+    try {
+      await expect(ctx.compaction.compactNow(agent, signal)).rejects.toMatchObject({
+        cause: { message: 'compaction: observed Surface differs from the selected span' },
+      })
+      expect(spy).toHaveBeenCalledOnce()
+    } finally {
+      spy.mockRestore()
+    }
+    expect(summary.requests).toHaveLength(0)
+    expect(checkpoints(session.ownEvents())).toHaveLength(0)
+    expect(session.surface.nodes).toEqual(nodes)
+  })
+})
+
+it('refuses a resident compaction if the installed pricing service returns no comparable estimate', async () => {
+  let pricingUnavailable = false
+  let rejectedPrices = 0
+  class FaultingTokenMeter extends TokenMeter {
+    override estimateMessage(message: RequestMessage): number {
+      if (pricingUnavailable && message.role === 'user'
+        && message.content.some(block => block.type === 'text' && block.text.startsWith('Session hybrid-invalid-meter source events:'))) {
+        rejectedPrices += 1
+        return Number.NaN
+      }
+      return super.estimateMessage(message)
+    }
+  }
+
   await withContext(async (ctx, root) => {
-    const chat = new WindowAdapter([textResponse('Reply.')])
-    const summary = new WindowAdapter([])
+    const chat = new WindowAdapter([textResponse('Reply.'), textResponse('Second reply.')])
+    const summary = new WindowAdapter([textResponse('Preserve the completed original.')])
+    const alias = 'resident-model@fixture-alpha'
+    summary.windows.set(alias, 262_144)
+    const row = residentRow('resident-model')
+    const observe = vi.fn<ResidentObservationSource['observe']>((request) => {
+      const fresh = {
+        ...row,
+        node: { ...row.node, observedAtMs: Date.now() },
+        route: { ...row.route, verifiedAtMs: Date.now() },
+      }
+      return Promise.resolve([{
+        ...fresh, measurement: { ...row.measurement!, projectionId: request.projection?.id ?? '' },
+      }])
+    })
+    ctx.provide('residentSummarySource', { observe })
     ctx.llm.registerAdapter([wide.provider], chat)
-    ctx.llm.registerAdapter(['synthetic-summary'], summary)
-    const sessionId = SessionId('hybrid-inconsistent-observation')
+    ctx.llm.registerAdapter(['fixture-provider'], summary)
+    const sessionId = SessionId('hybrid-invalid-meter')
     const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
     try {
-      await send(owned.agent, 'Live original retained after the query disagrees. '.repeat(60))
+      await send(owned.agent, 'Already compacted original. '.repeat(80))
+      expect(await ctx.compaction.compactNow(owned.agent, signal)).not.toBeNull()
+      await send(owned.agent, 'Fresh source after the checkpoint. '.repeat(80))
       const { session } = owned.agent
-      const original = session.ownEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')!
+      const { events: before } = await ctx.sessionQuery.readSession(sessionId)
       const nodes = [...session.surface.nodes]
-      const observe = ctx.sessionQuery.observeSession.bind(ctx.sessionQuery)
-      const spy = vi.spyOn(ctx.sessionQuery, 'observeSession').mockImplementation(async (...args) => {
-        const observation = await observe(...args)
-        const absent: SessionEvent<'turn/end'> = {
-          type: 'turn/end', seq: original.seq, time: original.time, data: { turn: 1, reason: { kind: 'completed' } },
-        }
-        return { ...observation, events: observation.events.map(event => event.seq === original.seq ? absent : event) }
+      const coverage = deriveCommittedCoverage(before)
+      expect(coverage?.revision).toBe(1)
+      expect(observe).toHaveBeenCalledOnce()
+      expect(summary.requests).toHaveLength(1)
+      pricingUnavailable = true
+      await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toMatchObject({
+        code: 'summary',
+        cause: { code: 'no-eligible', message: 'compaction: no projected history to summarize' },
       })
-      try {
-        await expect(ctx.compaction.compactNow(owned.agent, signal)).rejects.toMatchObject({
-          cause: { message: 'compaction: observed Surface differs from the selected span' },
-        })
-        expect(spy).toHaveBeenCalledOnce()
-      } finally {
-        spy.mockRestore()
-      }
-      expect(summary.requests).toHaveLength(0)
-      expect(checkpoints(session.ownEvents())).toHaveLength(0)
-      expect(session.surface.nodes).toEqual(nodes)
+      expect(rejectedPrices).toBeGreaterThan(0)
+      expect(observe).toHaveBeenCalledOnce()
+      expect(summary.requests).toHaveLength(1)
+      const { events: after } = await ctx.sessionQuery.readSession(sessionId)
+      expectCheckpointPreserved(session, before, after, nodes)
+      expect(after.slice(before.length).map(event => event.type)).toEqual(['compaction/start', 'compaction/end'])
     } finally {
       await owned.dispose()
     }
-  })
+  }, {
+    incremental: true, summarizationMode: 'resident-preferred', residentGatewayId: 'fixture-gateway',
+    residentPinnedNodeId: 'fixture-local', residentProvider: 'fixture-provider', residentMaxAgeMs: 60_000,
+  }, FaultingTokenMeter)
+})
+
+it('preserves the uncovered RAW gap between two disjoint committed coverage ranges', async () => {
+  await withContext(async (ctx, root) => {
+    const chat = new WindowAdapter(Array.from({ length: 3 }, () => textResponse('Reply.')))
+    const summary = new WindowAdapter([textResponse('First checkpoint.'), textResponse('Third checkpoint.')])
+    ctx.llm.registerAdapter([wide.provider], chat)
+    ctx.llm.registerAdapter(['synthetic-summary'], summary)
+    const sessionId = SessionId('hybrid-between-ranges-gap')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    try {
+      const { session } = owned.agent
+      await send(owned.agent, 'EARLIEST_SELECTED '.repeat(80))
+      await send(owned.agent, 'UNSELECTED_MIDDLE_GAP '.repeat(80))
+      await send(owned.agent, 'LATEST_SELECTED '.repeat(80))
+      const raw = session.ownEvents().filter(event => event.type === 'user/message' && event.data.source.kind === 'user')
+      const replies = session.ownEvents().filter(event => event.type === 'assistant/message')
+      const gap = raw[1]!
+      await inFixtureTurn(session, 4, async () => {
+        await ctx.compaction.compactRegion(raw[0]!.seq, replies[0]!.seq, owned.agent, signal)
+        await ctx.compaction.compactRegion(raw[2]!.seq, replies[2]!.seq, owned.agent, signal)
+      })
+      const { events: before } = await ctx.sessionQuery.readSession(sessionId)
+      const coverage = deriveCommittedCoverage(before)
+      expect(coverage).toMatchObject({ revision: 2, highWatermark: replies[2]!.seq })
+      expect(coverage?.covered.map(range => [range.start, range.end])).toEqual([
+        [raw[0]!.seq, replies[0]!.seq], [raw[2]!.seq, replies[2]!.seq],
+      ])
+      expect(gap.seq).toBeGreaterThan(replies[0]!.seq)
+      expect(gap.seq).toBeLessThan(raw[2]!.seq)
+      const nodes = [...session.surface.nodes]
+      expect(nodes).toContain(gap.seq)
+      const resolve = vi.spyOn(summary, 'resolveModel')
+      session.append('turn/start', { turn: 5 })
+      try {
+        await expect(ctx.compaction.compactRegion(gap.seq, replies[1]!.seq, owned.agent, signal))
+          .rejects.toThrow(`is outside committed coverage at watermark ${replies[2]!.seq}`)
+        expect(resolve).not.toHaveBeenCalled()
+      } finally {
+        resolve.mockRestore()
+        session.append('turn/end', { turn: 5, reason: { kind: 'completed' } })
+      }
+      const { events: after } = await ctx.sessionQuery.readSession(sessionId)
+      expectCheckpointPreserved(session, before, after, nodes)
+      expect(after.slice(before.length).map(event => event.type))
+        .toEqual(['turn/start', 'compaction/start', 'compaction/end', 'turn/end'])
+      expect(summary.requests).toHaveLength(2)
+      await owned.dispose()
+      expect((await ctx.sessionQuery.readSession(sessionId)).events).toEqual(after)
+      expect((await ctx.sessionQuery.readEvent({ sessionId, seq: gap.seq })).target).toEqual(gap)
+    } finally {
+      await owned.dispose()
+    }
+  }, { incremental: true })
 })

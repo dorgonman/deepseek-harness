@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PendingAgentRequest } from '@deepseek-ai/dsh-agent'
 import BasicCompactionEngine, { type BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import {
-  isCompactCheckpointSource, ManualCompactionError, type CompactionFact,
+  isCompactCheckpointSource, ManualCompactionError, type CompactionFact, type CompactionId,
   type CompactionIncrementalCoverage, type CompactionResult,
 } from '@deepseek-ai/dsh-compaction'
 import {
@@ -48,10 +48,11 @@ function renderFact(fact: CompactionFact): string {
   return `- (${fact.kind} ${fact.key})${status} ${fact.claim} [source events ${fact.sourceEventIds.join(', ')}; ${fact.basis}${lineage}]`
 }
 
-/** Original groups plus the checkpoint an incremental compaction carries forward. */
+/** Chronological RAW groups, their nonempty seq range, and any checkpoint validated during expansion. */
 interface RawExpansion {
   readonly groups: OriginalMessage[][]
-  readonly carried?: SessionEvent<'user/message'>
+  readonly rawRange: { readonly start: SessionSeq; readonly end: SessionSeq }
+  readonly carried?: { readonly compactionId: CompactionId; readonly content: readonly ContentBlock[] }
 }
 
 /** Expand only canonical replacement edges reachable from the selected Surface. */
@@ -71,16 +72,15 @@ function rawGroups(
   const visited = new Set<SessionSeq>()
   const leaves = new Set<SessionSeq>()
   const pending = [...selection.shadowedSeqs]
-  let carried: SessionEvent<'user/message'> | undefined
+  let carried: RawExpansion['carried']
   for (;;) {
     const seq = pending.pop()
     if (seq === undefined) break
     const event = events[seq]
     if (event?.seq !== seq || visited.has(seq)) throw new Error('compaction: invalid source coverage')
     visited.add(seq)
-    const checkpoint = event.type === 'user/message' && isCompactCheckpointSource(event.data.source)
     const shadowed = edges.get(seq)
-    if (checkpoint) {
+    if (event.type === 'user/message' && isCompactCheckpointSource(event.data.source)) {
       if (shadowed === undefined) throw new Error('compaction: unsupported Surface replacement event')
       // Incremental mode carries the previous checkpoint locally: its originals
       // are already covered and must not be quoted to a later summarizer.
@@ -89,7 +89,7 @@ function rawGroups(
         continue
       }
       if (carried !== undefined) throw new Error('compaction: selected span has more than one checkpoint')
-      carried = event
+      carried = { compactionId: event.data.source.compactionId, content: event.data.content }
       continue
     }
     if (shadowed !== undefined) {
@@ -110,6 +110,7 @@ function rawGroups(
   }
   const groups: OriginalMessage[][] = []
   let group: OriginalMessage[] = []
+  let rawRange: { start: SessionSeq; end: SessionSeq } | undefined
   for (const event of events) {
     if ((event.type === 'turn/start' || event.type === 'turn/end') && group.length > 0) {
       groups.push(group)
@@ -119,12 +120,12 @@ function rawGroups(
     const message = deriveEventMessage(event)
     if (message === null) throw new Error('compaction: an original event has no recoverable message')
     group.push({ event, message })
+    if (rawRange === undefined) rawRange = { start: event.seq, end: event.seq }
+    else rawRange.end = event.seq
   }
   if (group.length > 0) groups.push(group)
-  if (groups.length === 0 && coverage === undefined && carried === undefined) {
-    throw new Error('compaction: selected span has no original messages')
-  }
-  return { groups, ...carried === undefined ? {} : { carried } }
+  if (rawRange === undefined) throw new Error('compaction: no unprocessed RAW events remain for compaction')
+  return { groups, rawRange, ...carried === undefined ? {} : { carried } }
 }
 
 /** Require full assistant-call/result coverage before dispatching a chunk. */
@@ -302,25 +303,16 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     // A coverage-only checkpoint has no ledger; re-extract the full original
     // history once instead of carrying free-text prose into the ledger view.
     const coverage = factLedger && priorLedger === undefined ? undefined : coverageBase
-    const expansion = rawGroups(events, foldSurface(events, ctx.sessions.messageProjections), selection, coverage)
-    const { groups } = expansion
-    if (groups.length === 0) {
-      throw new Error('compaction: no unprocessed RAW events remain for compaction')
-    }
+    const { groups, rawRange, carried } = rawGroups(
+      events, foldSurface(events, ctx.sessions.messageProjections), selection, coverage,
+    )
     for (const group of groups) verifyPairs(group)
     let carriedContent: ContentBlock[] = []
     let carriedMeta: IncrementalAdvanceMeta['carried']
-    if (expansion.carried !== undefined) {
-      const carried = expansion.carried
-      const source = carried.data.source
-      if (!isCompactCheckpointSource(source)) {
-        throw new Error('compaction: the carried node is not a checkpoint')
-      }
-      const message = deriveEventMessage(carried)
-      if (message === null) throw new Error('compaction: the carried checkpoint has no recoverable message')
-      carriedContent = unframeSummary(message.content)
+    if (carried !== undefined) {
+      carriedContent = unframeSummary(carried.content)
       const summarySeq = events.find(event => event.type === 'compaction/summary'
-        && event.data.compactionId === source.compactionId)?.seq
+        && event.data.compactionId === carried.compactionId)?.seq
       if (summarySeq === undefined) throw new Error('compaction: the carried checkpoint has no summary record')
       carriedMeta = { summarySeq, digest: digestRange(events, summarySeq, summarySeq) }
     }
@@ -557,10 +549,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     }
     let nextCoverage: CompactionIncrementalCoverage | undefined
     if (incremental) {
-      const first = groups[0]?.[0]?.event.seq
-      const last = groups.at(-1)?.at(-1)?.event.seq
-      if (first === undefined || last === undefined) throw new Error('compaction: no RAW range to record')
-      nextCoverage = advanceCoverage(coverage, events, first, last, {
+      nextCoverage = advanceCoverage(coverage, events, rawRange.start, rawRange.end, {
         policyDigest: digestPolicy(policy),
         summarizer: { provider: target.provider, model: target.model, maxTokens },
         ...carriedMeta === undefined ? {} : { carried: carriedMeta },
