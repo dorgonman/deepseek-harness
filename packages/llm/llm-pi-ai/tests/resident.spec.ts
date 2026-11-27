@@ -373,7 +373,7 @@ describe('KINF resident-only transport', () => {
     const fetchMock = vi.fn((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       const signal = init?.signal
       if (signal === undefined || signal === null) throw new Error('expected a resident cancellation signal')
-      signal.addEventListener('abort', () => { reject(signal.reason) }, { once: true })
+      signal.addEventListener('abort', () => { reject(new Error('resident fetch aborted', { cause: signal.reason })) }, { once: true })
       dispatched.resolve('dispatched')
     }))
     vi.stubGlobal('fetch', fetchMock)
