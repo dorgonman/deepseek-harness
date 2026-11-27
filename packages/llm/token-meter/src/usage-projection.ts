@@ -9,7 +9,8 @@ import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type { ContextPressureProjection, TokenUsageProjection } from './projection.ts'
-import { foldSurfaceProjection } from './surface-projection.ts'
+import { checkpointPriceTransition, foldSurfaceProjection, meteredCheckpointSchema,
+  type MeteredCheckpoint, type ShadowPriceClaim } from './surface-projection.ts'
 
 const zeroBuckets = (): TokenUsageProjection => ({
   uncachedInputTokens: 0,
@@ -85,21 +86,29 @@ function usageOf(event: SessionEvent): TokenUsage | undefined {
   return lastAssistantStreamChunk(event.data.stream, 'usage')?.usage
 }
 
-/** The context-pressure state schema and source of its inferred type. */
-const contextPressureStateSchema = z.object({
+/** Host fold state for provider pressure and surface adjustments. */
+export interface ContextPressureState {
+  contextWindow?: number | undefined
+  pressureTokens?: number | undefined
+  surfaceTokens: number
+  sampledSurfaceTokens?: number | undefined
+  checkpoint?: MeteredCheckpoint<number> | undefined
+  claim?: ShadowPriceClaim | undefined
+}
+
+/** The context-pressure state saved at a projection checkpoint. */
+const contextPressureStateSchema: z.ZodType<ContextPressureState> = z.object({
   contextWindow: z.number().int().positive().optional(),
   pressureTokens: z.number().int().nonnegative().optional(),
   surfaceTokens: z.number().int().nonnegative(),
   sampledSurfaceTokens: z.number().int().nonnegative().optional(),
+  checkpoint: meteredCheckpointSchema(z.number().int()).optional(),
   claim: z.object({
     start: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).transform(SessionSeq),
     end: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).transform(SessionSeq),
     tokens: z.number().int().nonnegative(),
   }).optional(),
 }).strict()
-
-/** Host fold state for provider pressure and surface adjustments. */
-export type ContextPressureState = z.infer<typeof contextPressureStateSchema>
 
 /**
  * Token-meter's session projection unit.
@@ -166,12 +175,20 @@ export const tokenUsageProjectionDefinition = {
  */
 export const contextPressureProjectionDefinition = {
   key: 'contextPressure',
-  stateVersion: 5,
+  stateVersion: 6,
   stateSchema: contextPressureStateSchema,
   init: () => ({ surfaceTokens: 0 }),
   apply: (state, event) => {
-    const fold = foldSurfaceProjection(state.claim, event)
+    const transition = checkpointPriceTransition(state.checkpoint, event,
+      () => foldSurfaceProjection(state.claim, event).deltaTokens)
+    const fold = transition?.suppress === true
+      ? { deltaTokens: 0, claim: undefined }
+      : foldSurfaceProjection(state.claim, event)
     let next = state
+    if (transition !== undefined) {
+      const { checkpoint: _previous, ...rest } = next
+      next = transition.checkpoint === undefined ? rest : { ...rest, checkpoint: transition.checkpoint }
+    }
     if (event.type === 'request/context') {
       const contextWindow = event.data.contextWindow
       if (contextWindow !== state.contextWindow) {
@@ -190,8 +207,9 @@ export const contextPressureProjectionDefinition = {
         next = { ...next, pressureTokens, sampledSurfaceTokens: next.surfaceTokens }
       }
     }
-    if (fold.deltaTokens !== 0) {
-      next = { ...next, surfaceTokens: next.surfaceTokens + fold.deltaTokens }
+    const deltaTokens = transition?.publish ?? fold.deltaTokens
+    if (deltaTokens !== 0) {
+      next = { ...next, surfaceTokens: next.surfaceTokens + deltaTokens }
     }
     // A defined fold.claim is always freshly built, so presence decides claim
     // bookkeeping: no claim before or after this event leaves `next` as is.

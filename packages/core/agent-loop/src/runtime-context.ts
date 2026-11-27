@@ -8,7 +8,6 @@
 import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed, ContextSnapshotSection, Message } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionSeq, SurfaceIntent, SystemMessage, UserMessage } from '@deepseek-ai/dsh-session'
-import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import type { Context } from '@deepseek-ai/cordis'
 declare module '@deepseek-ai/dsh-llm' {
@@ -133,6 +132,7 @@ export class RuntimeContextProjection {
    */
   constructor(ctx: Context, session: Session) {
     const surface = new Set(session.surface.nodes)
+    let replaceGeneration = session.surface.replaceGeneration
     for (const event of eventsNewestFirst(session)) {
       if (event.type !== 'user/message' || !isOwned(event.data)) continue
       this.retained ??= null
@@ -144,11 +144,17 @@ export class RuntimeContextProjection {
 
     ctx.on('session/event', (subject, event) => {
       if (subject !== session) return
+      const previousGeneration = replaceGeneration
+      replaceGeneration = session.surface.replaceGeneration
       if (event.type === 'user/message' && isOwned(event.data)) {
-        this.retained = { seq: event.seq, sections: sectionsOf(event.data) }
-      } else if (this.retained
-        && isReplacementSurfaceEvent(event)
-        && event.sourceEventSeqs?.includes(this.retained.seq) === true) {
+        if (session.surface.nodes.includes(event.seq)) {
+          this.retained = { seq: event.seq, sections: sectionsOf(event.data) }
+          return
+        }
+        this.retained ??= null
+      }
+      if (this.retained && replaceGeneration !== previousGeneration
+        && !session.surface.nodes.includes(this.retained.seq)) {
         this.retained = null
       }
     })

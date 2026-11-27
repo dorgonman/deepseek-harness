@@ -7,12 +7,9 @@
  */
 
 import { createHash } from 'node:crypto'
-import {
-  isCompactCheckpointSource,
-  type CompactionCoveredRange,
-  type CompactionIncrementalCoverage,
-} from '@deepseek-ai/dsh-compaction'
+import type { CompactionCoveredRange, CompactionIncrementalCoverage } from '@deepseek-ai/dsh-compaction'
 import { isAppendSurfaceEvent, type SessionEvent, type SessionSeq } from '@deepseek-ai/dsh-session'
+import { advanceCompactionCheckpoint, type PendingCompactionCheckpoint } from '@deepseek-ai/dsh-session/surface'
 
 /** Failure class for incremental coverage derivation and selection. */
 export class IncrementalCoverageError extends Error {
@@ -202,31 +199,6 @@ export function validateCoverage(
 }
 
 /**
- * Whether a summary event's log transaction closed successfully with the
- * replacement message that carries the checkpoint. A dangling summary never
- * proves that its checkpoint became the surface.
- */
-function transactionCommitted(
-  events: readonly SessionEvent[],
-  index: number,
-  compactionId: string,
-): boolean {
-  const replacement = events[index + 1]
-  if (replacement?.type !== 'user/message' || !isCompactCheckpointSource(replacement.data.source)) {
-    return false
-  }
-  for (let cursor = index + 2; cursor < events.length; cursor += 1) {
-    const event = events[cursor]
-    if (event === undefined) break
-    if (event.type === 'compaction/start' && event.data.compactionId === compactionId) return false
-    if (event.type === 'compaction/end' && event.data.compactionId === compactionId) {
-      return event.data.error === undefined
-    }
-  }
-  return false
-}
-
-/**
  * Whether the summary event at `index` closed with its checkpoint replacement
  * and a clean `compaction/end`. Dangling or failed summaries never commit
  * derived state.
@@ -237,7 +209,18 @@ function transactionCommitted(
 export function summaryTransactionCommitted(events: readonly SessionEvent[], index: number): boolean {
   const event = events[index]
   if (event?.type !== 'compaction/summary') return false
-  return transactionCommitted(events, index, event.data.compactionId)
+  const start = advanceCompactionCheckpoint(undefined, event)
+  if (start?.kind !== 'arm') return false
+  let pending: PendingCompactionCheckpoint = start.checkpoint
+  for (let cursor = index + 1; cursor < events.length; cursor += 1) {
+    const next = events[cursor]
+    if (next === undefined) return false
+    const transition = advanceCompactionCheckpoint(pending, next)
+    if (transition?.kind === 'publish') return true
+    if (transition?.kind === 'defer') pending = transition.checkpoint
+    else if (transition !== undefined) return false
+  }
+  return false
 }
 /**
  * Read the latest committed incremental coverage from the session log.
@@ -250,7 +233,7 @@ export function deriveCommittedCoverage(
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event?.type !== 'compaction/summary' || event.data.incremental === undefined) continue
-    if (!transactionCommitted(events, index, event.data.compactionId)) continue
+    if (!summaryTransactionCommitted(events, index)) continue
     validateCoverage(event.data.incremental, events)
     return event.data.incremental
   }

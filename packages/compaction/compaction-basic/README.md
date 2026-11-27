@@ -107,6 +107,8 @@ All settings are optional. With context window `W`, effective request output cap
 | `residentMaxAgeMs` | `60000` | Maximum accepted observation age, 1–60000 ms. |
 | `residentObservationRoutes` | — | Hybrid KINF loopback bindings with node ID, node name, instance, logical model, and URL. |
 
+For incremental Hybrid compaction, a successful `compaction/end` commits the matching replacement, coverage, and Fact Ledger together. After an interrupted or failed close, the previous committed checkpoint and unprocessed raw history remain active.
+
 Misconfiguration fails fast: unknown settings, duplicate per-model overrides, invalid token counts, both retention forms together, or a retention ratio at least as large as the threshold ratio reject the plugin at load. When the model is first used, `W − O − B` must be positive and the resolved retained budget must be below the trigger. Zero headroom requires an explicit positive `maxTokens`, globally or in that model policy. Explicit headroom must fit the window. An omitted summary cap follows the adjusted headroom on the conversation route when it declares a window, with a minimum of one token. Explicit summary targets keep their configured or inherited cap. Lower `thresholdRatio` to compact earlier.
 
 Basic with `summarizationFallback: error` and the Hybrid backend verify the exact call before sending history. Missing or invalid context capacity fails with `SUMMARY_TARGET_UNVERIFIED`. A non-Chat protocol or declared input modalities that exclude text fail with `SUMMARY_TARGET_NOT_CHAT`. Undeclared modalities are allowed. Basic with `latest-route` still accepts an adapter that omits its context capacity.

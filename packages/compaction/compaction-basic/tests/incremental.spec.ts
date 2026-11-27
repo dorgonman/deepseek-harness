@@ -1,6 +1,6 @@
 import { CompactionId, compactCheckpointSource, type CompactionIncrementalCoverage } from '@deepseek-ai/dsh-compaction'
 import { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
+import { foldSurface, Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
 import {
   advanceCoverage,
@@ -44,7 +44,7 @@ function eventsOf(session: Session) {
   return session.snapshotEvents()
 }
 
-function commitCoverage(session: Session, coverage: CompactionIncrementalCoverage) {
+function commitCoverage(session: Session, coverage: CompactionIncrementalCoverage, beforeClose?: () => void) {
   const id = CompactionId(`incremental-${String(coverage.revision)}`)
   const nodes = [...session.surface.nodes]
   const start = nodes[0]!
@@ -65,6 +65,7 @@ function commitCoverage(session: Session, coverage: CompactionIncrementalCoverag
     content: [{ type: 'text', text: 'checkpoint' }],
     source: compactCheckpointSource(id),
   }), { surfaceOp: { op: 'replace', startSeq: start, endSeq: end }, sourceEventSeqs: nodes })
+  beforeClose?.()
   session.append('compaction/end', { compactionId: id, turn: null })
   return id
 }
@@ -82,6 +83,21 @@ describe('incremental coverage', () => {
     const derived = deriveCommittedCoverage(eventsOf(session))
     expect(derived).toEqual(coverage)
     validateCoverage(derived!, eventsOf(session))
+  })
+
+  it('refuses a persisted incremental summary without its replacement range', () => {
+    const session = conversation(1)
+    const coverage = advanceCoverage(undefined, eventsOf(session), SessionSeq(0), SessionSeq(3), { policyDigest: 'policy-a' })
+    commitCoverage(session, coverage)
+    const malformed = eventsOf(session).map((event) => {
+      if (event.type !== 'compaction/summary') return event
+      const data = { ...event.data }
+      Reflect.deleteProperty(data, 'shadowedRange')
+      return { ...event, data }
+    })
+
+    expect(() => foldSurface(malformed)).toThrow(/must identify its checkpoint and replacement range/)
+    expect(() => deriveCommittedCoverage(malformed)).toThrow(/must identify its checkpoint and replacement range/)
   })
 
   it('coalesces adjacent ranges and recomputes the merged digest', () => {
@@ -196,12 +212,24 @@ describe('incremental coverage', () => {
   it('requires the checkpoint and matching successful end before a summary commits', () => {
     const session = conversation(1)
     const coverage = advanceCoverage(undefined, eventsOf(session), SessionSeq(0), SessionSeq(3), { policyDigest: 'policy-a' })
-    commitCoverage(session, coverage)
+    const original = [...session.surface.nodes]
+    commitCoverage(session, coverage, () => {
+      expect(session.surface.nodes).toEqual(original)
+      const open = eventsOf(session)
+      expect(foldSurface(open).nodes).toEqual(original)
+      expect(foldSurface(open).replacements).toEqual([])
+      expect(deriveCommittedCoverage(open)).toBeUndefined()
+    })
     const events = eventsOf(session)
     const summaryIndex = events.findIndex(event => event.type === 'compaction/summary')
     const restart = events.find(event => event.type === 'compaction/start')!
     const end = events.find(event => event.type === 'compaction/end')!
     const beforeEnd = events.slice(0, -1)
+    const checkpoint = beforeEnd.at(-1)!
+    if (checkpoint.type !== 'user/message') throw new Error('fixture has no checkpoint')
+    expect(session.surface.nodes).toEqual([checkpoint.seq])
+    expect(foldSurface(events).replacements.map(replacement => replacement.seq)).toEqual([checkpoint.seq])
+    expect(Session.create(SessionId('open-incremental'), beforeEnd).surface.nodes).toEqual(original)
     const failed = { ...end, data: { ...end.data, error: 'cancelled' } }
     const unrelatedEnd = { ...end, data: { ...end.data, compactionId: CompactionId('unrelated') } }
     const interrupted = [...beforeEnd]
@@ -217,6 +245,28 @@ describe('incremental coverage', () => {
     }
     const unrelated = eventsOf(conversation(1)).find(event => event.type === 'user/message')!
     expect(summaryTransactionCommitted([...events.slice(0, summaryIndex + 1), unrelated, end], summaryIndex)).toBe(false)
+
+    const wrongSource = {
+      ...checkpoint,
+      data: { ...checkpoint.data, source: compactCheckpointSource(CompactionId('unrelated')) },
+    }
+    const appendOnly = { ...checkpoint, surfaceOp: 'append' as const }
+    const wrongRange = {
+      ...checkpoint,
+      surfaceOp: { op: 'replace' as const, startSeq: original[0]!, endSeq: original[0]! },
+    }
+    const seed = { type: 'session/end-seed' as const, seq: end.seq, time: end.time, data: {} }
+    const rejected = [
+      [...beforeEnd, failed],
+      [...beforeEnd.slice(0, -1), wrongSource, end],
+      [...beforeEnd.slice(0, -1), appendOnly, end],
+      [...beforeEnd.slice(0, -1), wrongRange, end],
+      [...beforeEnd, seed, { ...end, seq: SessionSeq(end.seq + 1) }],
+    ]
+    for (const log of rejected) {
+      expect(foldSurface(log).nodes).toEqual(original)
+      expect(deriveCommittedCoverage(log)).toBeUndefined()
+    }
   })
 
   it('refuses an overlapping range, a wrong digest and a watermark mismatch', () => {
