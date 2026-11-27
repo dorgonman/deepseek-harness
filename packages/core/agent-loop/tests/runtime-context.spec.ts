@@ -2,7 +2,7 @@ import { describe, expect, it, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed, ContextSnapshotSection } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { RuntimeContextProjection } from '../src/runtime-context.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -35,6 +35,51 @@ function contextMessage(text: string, contributions?: readonly ContextSnapshotSe
 }
 
 describe('RuntimeContextProjection', () => {
+  it('retains the old context until a ledger checkpoint closes', async () => {
+    const { ctx, session } = await harness()
+    const original = session.append('user/message', contextMessage(INITIAL, sections('retained')), { surfaceOp: 'append' })
+    const projection = new RuntimeContextProjection(ctx, session)
+    const compactionId = 'runtime-context-checkpoint' as SessionEvent<'compaction/start'>['data']['compactionId']
+    session.append('compaction/start', { compactionId, turn: null })
+    session.append('compaction/summary', {
+      compactionId, summary: [{ type: 'text', text: 'summary' }],
+      shadowedRange: { start: original.seq, end: original.seq },
+      shadowedSeqs: [original.seq], shadowedTokenCount: 1,
+      provider: 'test', model: 'test', ledger: [], chunkCalls: [],
+    })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'summary' }],
+      source: { kind: 'compact-checkpoint', compactionId },
+    }), {
+      surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq },
+      sourceEventSeqs: [original.seq],
+    })
+    expect(projection.project(sections('retained'))).toBeUndefined()
+    session.append('compaction/end', { compactionId, turn: null })
+    expect(projection.project(sections('retained'))?.content).toEqual([{
+      type: 'text', text: UPDATED.replace('\n\nnext\n', '\n\nretained\n'),
+    }])
+  })
+
+  it('ignores a reminder shadowed by a replacement in the same batch', async () => {
+    const { ctx, session } = await harness()
+    const projection = new RuntimeContextProjection(ctx, session)
+    const reminderSeq = SessionSeq(session.seq)
+    session.append([
+      ['user/message', contextMessage(INITIAL, sections('retained')), { surfaceOp: 'append' }],
+      ['user/message', createUserMessage({
+        content: [{ type: 'text', text: 'summary' }], source: { kind: 'test-compaction' },
+      }), {
+        surfaceOp: { op: 'replace', startSeq: reminderSeq, endSeq: reminderSeq },
+        sourceEventSeqs: [reminderSeq],
+      }],
+    ])
+    const restored = new RuntimeContextProjection(ctx, session)
+    const next = projection.project(sections('retained'))
+    expect(next?.content).toBeDefined()
+    expect(next?.content).toEqual(restored.project(sections('retained'))?.content)
+  })
+
   it('restores the latest visible owned snapshot and ignores other sessions', async () => {
     const { ctx, session } = await harness()
     const retained = session.append('user/message', contextMessage(INITIAL, sections('retained')), { surfaceOp: 'append' })

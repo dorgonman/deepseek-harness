@@ -162,7 +162,7 @@ session.deriveMessages()         // the derived model history
 
 #### Token 影响
 
-追加的 surface 条目会在后续步骤中重新发送。`replace` surface 操作会从未来输入中移除被遮蔽条目，但不删除其原始日志记录。
+追加的 surface 条目会在后续步骤中重新发送。`replace` surface 操作从后续输入中移除被遮蔽条目，并保留原始日志记录。增量摘要或附带事实账本的摘要之后，相邻的检查点必须与摘要的压缩 ID 和替换范围一致。成功的 `compaction/end` 发布替换。尝试失败或中断时，原节点继续有效。
 
 #### KV Cache 影响
 

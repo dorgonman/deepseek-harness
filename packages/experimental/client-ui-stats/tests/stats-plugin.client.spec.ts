@@ -350,6 +350,7 @@ function contextOf(
     start,
     state,
     current: new Map(),
+    loadedEvent: () => undefined,
   }
 }
 

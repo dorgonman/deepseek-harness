@@ -144,7 +144,7 @@ describe('Fact Ledger validation', () => {
     const conflicting = { ...older!, status: 'superseded', supersededBy: newer!.factId } satisfies FactRecord
 
     expect(() => { validateLedger([conflicting, newer!], events) }).toThrow(/supersededBy lineage is inconsistent/)
-    const merged = mergeFacts([older!], [{ ...newer!, supersedes: [older!.factId] }])
+    const merged = mergeFacts([older!], [{ ...newer!, supersedes: [older!.factId] }], events)
     expect(() => { validateLedger(merged, events) }).not.toThrow()
     expect(merged).toContainEqual(conflicting)
   })
@@ -157,8 +157,9 @@ describe('Fact Ledger validation', () => {
       { ...input, claim: 'Use the replacement model.' },
     ], events)
     const merged = mergeFacts(
-      mergeFacts([older!, alternate!], [{ ...newest!, supersedes: [older!.factId] }]),
+      mergeFacts([older!, alternate!], [{ ...newest!, supersedes: [older!.factId] }], events),
       [{ ...newest!, supersedes: [alternate!.factId] }],
+      events,
     )
 
     expect(merged.find(fact => fact.factId === newest!.factId)?.supersedes).toEqual([
@@ -177,13 +178,13 @@ describe('Fact Ledger validation', () => {
     ], events)
 
     for (const records of [facts, [...facts].reverse()]) {
-      expect(mergeFacts([], records).map(fact => fact.key)).toEqual(['enrollment', 'summary-model'])
+      expect(mergeFacts([], records, events).map(fact => fact.key)).toEqual(['enrollment', 'summary-model'])
     }
   })
 
   it('prices disputed claims in stable identity order regardless of input order', () => {
     const { events, input } = factFixture('disputed-order')
-    const disputed = mergeFacts([], createFacts([input, { ...input, claim: 'Use the alternate model.' }], events))
+    const disputed = mergeFacts([], createFacts([input, { ...input, claim: 'Use the alternate model.' }], events), events)
     const ids = disputed.map(fact => fact.factId).sort()
     const options = { maxTokens: 1, tokensOf: () => 1 }
 

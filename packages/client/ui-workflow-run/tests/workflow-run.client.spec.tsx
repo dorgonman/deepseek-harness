@@ -275,6 +275,7 @@ describe('workflow-run Conversation Definition', () => {
     const emptyContext: Parameters<typeof workflowRunDefinition.start>[0] = {
       key: 'workflow-run:direct', kind: 'workflow-run', id: 'direct',
       matches: [invalidStart], start: invalidStart, state: undefined, current: new Map(),
+      loadedEvent: () => undefined,
     }
     const reader: Parameters<typeof workflowRunDefinition.start>[2] = { previous: () => undefined }
     expect(() => workflowRunDefinition.start(emptyContext, invalidStart, reader))

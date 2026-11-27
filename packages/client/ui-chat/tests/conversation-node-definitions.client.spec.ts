@@ -2821,20 +2821,22 @@ describe('built-in conversation node Definitions', () => {
     expect(snapshot(compactions).nodes.values().filter(candidate => candidate.kind === 'compaction')).toHaveLength(1)
   })
 
-  it('fills a landed compaction marker when an older page supplies its summary', () => {
+  it('waits for backfill to verify a historical compaction marker', () => {
     const value = assembler([
       at(13, 'user/message', {
         ...textMessage('checkpoint', 'checkpoint'),
         source: { kind: 'compact-checkpoint', compactionId: 'compact-1' },
       }, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 8 } }),
+      at(14, 'compaction/end', { compactionId: 'compact-1', turn: null }),
     ], true)
-    const before = node(snapshot(value), 'compaction')
-    expect(before?.data).toMatchObject({ summary: null, summaryEventSeq: null })
+    expect(node(snapshot(value), 'compaction')).toBeUndefined()
 
     value.prepend([
-      at(9, 'compaction/start', { compactionId: 'compact-1', turn: null }),
-      at(10, 'compaction/summary', {
+      at(11, 'compaction/start', { compactionId: 'compact-1', turn: null }),
+      at(12, 'compaction/summary', {
         compactionId: 'compact-1',
+        ledger: [],
+        shadowedRange: { start: 1, end: 8 },
         summary: [
           { type: 'text', text: 'older ' },
           { type: 'image', data: 'ignored' },
@@ -2847,13 +2849,56 @@ describe('built-in conversation node Definitions', () => {
     value.flush()
 
     const after = node(snapshot(value), 'compaction')
-    expect(after?.key).toBe(before?.key)
     expect(after?.data).toMatchObject({
       summary: 'older summary',
-      summaryEventSeq: 10,
+      summaryEventSeq: 12,
       shadowedItemCount: 3,
       shadowedTokenCount: 42,
     })
+  })
+
+  it.each([false, true])('publishes a gated compaction only after a valid close (manual: %s)', (manual) => {
+    const compactionId = 'compact-gated'
+    const commandId = 'compact-command'
+    const identity = manual ? { compactionId, sourceCommandId: commandId } : { compactionId }
+    const checkpoint = (endSeq: number) => at(5, 'user/message', {
+      ...textMessage('gated-checkpoint', 'model-only checkpoint'),
+      source: { kind: 'compact-checkpoint', ...identity },
+    }, { surfaceOp: { op: 'replace', startSeq: 1, endSeq } })
+    const beforeClose = [
+      at(1, 'user/message', textMessage('original', 'original transcript'), { surfaceOp: 'append' }),
+      ...manual ? [at(2, 'command/run', { commandId, name: 'compact', args: '' })] : [],
+      at(3, 'compaction/start', { ...identity, turn: null }),
+      at(4, 'compaction/summary', {
+        ...identity,
+        ledger: [],
+        summary: [{ type: 'text', text: 'gated summary' }],
+        shadowedRange: { start: 1, end: 1 },
+        shadowedSeqs: [1],
+        shadowedTokenCount: 5,
+      }),
+      checkpoint(1),
+    ]
+    const marker = (value: ConversationNodeAssembler) => manual
+      ? (node(snapshot(value), 'manual-compaction')?.data as ManualCompactionChatData | undefined)?.compaction
+      : node(snapshot(value), 'compaction')?.data
+    const live = assembler(beforeClose)
+    expect(marker(live)).toBeFalsy()
+    expect(node(snapshot(live), 'user')?.data).toMatchObject({ messageId: 'original' })
+    live.append(at(6, 'compaction/end', { ...identity, compactionId: 'different', turn: null }))
+    live.flush()
+    expect(marker(live)).toBeFalsy()
+    const clean = at(7, 'compaction/end', { ...identity, turn: null })
+    live.append(clean)
+    live.flush()
+    expect(marker(live)).toMatchObject({ summary: 'gated summary', summaryEventSeq: 4, seq: 5 })
+
+    const failed = at(6, 'compaction/end', { ...identity, turn: null, error: 'interrupted' })
+    expect(marker(assembler([...beforeClose, failed]))).toBeFalsy()
+    const seedReturn = at(6, 'session/end-seed', {})
+    expect(marker(assembler([...beforeClose, seedReturn, clean]))).toBeFalsy()
+    const closeAtSix = at(6, 'compaction/end', { ...identity, turn: null })
+    expect(marker(assembler([...beforeClose.slice(0, -1), checkpoint(2), closeAtSix]))).toBeFalsy()
   })
 
   it('renders a historical compaction when its start remains outside the loaded window', () => {

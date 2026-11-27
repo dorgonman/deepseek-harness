@@ -1888,8 +1888,39 @@ def smoke_sdk_snapshot_mode(
         )
 
 
+def append_torn_restart_checkpoint(
+    sessions: Path, records: list[dict[str, object]], marker: str,
+) -> list[dict[str, object]]:
+    """Append an unfinished checkpoint to the stopped fixture's first Session journal."""
+    [path] = [path for path in latest_persisted_session_paths(sessions) if path.parent.name == RESTART_FIRST_SESSION_ID]
+    [original] = [record for record in records if record.get("type") == "user/message"
+                  and record["data"]["source"]["kind"] == "user" and record.get("surfaceOp") == "append"]
+    original_seq = original["seq"]
+    shadowed = {"start": original_seq, "end": original_seq}
+    content = [{"type": "text", "text": marker}]
+    compaction_id = "torn-sdk-restart"
+    first_seq = int(records[-1]["seq"]) + 1
+    time = records[-1]["time"]
+    torn = [
+        {"type": "compaction/start", "seq": first_seq, "time": time,
+         "data": {"compactionId": compaction_id, "turn": None}},
+        {"type": "compaction/summary", "seq": first_seq + 1, "time": time,
+         "data": {"compactionId": compaction_id, "summary": content, "shadowedRange": shadowed,
+                  "shadowedSeqs": [original_seq], "shadowedTokenCount": 1, "provider": "deepseek-official",
+                  "model": "smoke-model", "ledger": []}},
+        {"type": "user/message", "seq": first_seq + 2, "time": time,
+         "data": {"role": "user", "id": "torn-sdk-restart-checkpoint", "content": content,
+                  "source": {"kind": "compact-checkpoint", "compactionId": compaction_id}},
+         "surfaceOp": {"op": "replace", "startSeq": original_seq, "endSeq": original_seq},
+         "sourceEventSeqs": [original_seq]},
+    ]
+    with path.open("a", encoding="utf-8", newline="\n") as journal:
+        journal.write(render_jsonl(torn))
+    return [*records, *torn]
+
+
 def smoke_sdk_restart_snapshot(base_url: str, executable: Path, update_snapshots: bool) -> None:
-    """Check isolated sessions and explicit history restoration across runtime restarts."""
+    """Check isolated sessions and incomplete checkpoint recovery across runtime restarts."""
     from deepseek_harness import DeepSeekHarness
 
     with tempfile.TemporaryDirectory(prefix="dsh-sdk-restart-") as temporary:
@@ -1950,7 +1981,8 @@ def smoke_sdk_restart_snapshot(base_url: str, executable: Path, update_snapshots
             root,
             sessions,
         )
-        before_resume = logs[RESTART_FIRST_SESSION_ID]
+        torn_checkpoint = "UNCOMMITTED_RESTART_CHECKPOINT"
+        before_resume = append_torn_restart_checkpoint(sessions, logs[RESTART_FIRST_SESSION_ID], torn_checkpoint)
         with connect("resumed-smoke-model") as harness:
             session = harness.resume_session(RESTART_FIRST_SESSION_ID)
             if session.id != RESTART_FIRST_SESSION_ID:
@@ -1965,6 +1997,12 @@ def smoke_sdk_restart_snapshot(base_url: str, executable: Path, update_snapshots
         messages = requests[0].get("messages")
         if not isinstance(messages, list):
             raise AssertionError(f"resumed model request has no messages: {requests[0]}")
+        torn_checkpoint_in_request = any(
+            isinstance(message, dict) and torn_checkpoint in message_text(message.get("content"))
+            for message in messages
+        )
+        if torn_checkpoint_in_request:
+            raise AssertionError("resumed model history includes an uncommitted checkpoint")
         for role, expected in (
             ("user", RESTART_FIRST_PROMPT),
             ("assistant", RESTART_FIRST_TEXT),
@@ -2003,6 +2041,7 @@ def smoke_sdk_restart_snapshot(base_url: str, executable: Path, update_snapshots
         files["resume.json"] = json.dumps({
             "model": requests[0].get("model"),
             "final_response": resumed.final_response,
+            "tornCheckpointInRequest": torn_checkpoint_in_request,
             "eventTypes": [event.get("type") for event in resumed.events],
             "selectionEvents": selection_events,
         }, indent=2, ensure_ascii=False) + "\n"

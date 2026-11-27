@@ -11,6 +11,9 @@
 import type { Message, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { SessionLogOffset, SessionSeq } from './types.ts'
 import { KNOWN_SESSION_EVENT_TYPES, MESSAGE_PROJECTION_EVENT_TYPES } from './known-event-types.ts'
+import { advanceCompactionCheckpoint, isGatedCompactionSummary, type PendingCompactionCheckpoint } from './compaction-checkpoint.ts'
+export { advanceCompactionCheckpoint } from './compaction-checkpoint.ts'
+export type { PendingCompactionCheckpoint } from './compaction-checkpoint.ts'
 import type {
   SessionEvent,
   SessionEventType,
@@ -258,6 +261,7 @@ interface SurfaceFoldState {
   contentGeneration: number
   projectedMessages: Map<SessionSeq, Message>
   projections: Set<SessionMessageProjection>
+  checkpoint?: PendingCompactionCheckpoint
 }
 
 /** A validated replacement transition that has not mutated fold state yet. */
@@ -268,10 +272,14 @@ interface SurfaceReplacePlan extends SurfaceFoldReplacement {
 }
 
 /** One validated surface transition that has not mutated fold state yet. */
-type SurfacePlan =
+type SurfaceMutation =
   | { kind: 'append'; seq: SessionSeq }
   | SurfaceReplacePlan
   | { kind: 'project'; projection: SessionMessageProjection; messages: ReadonlyMap<SessionSeq, Message> }
+
+/** One mutation, or a checkpoint state change with an optional mutation. */
+type SurfacePlan = SurfaceMutation
+  | { kind: 'checkpoint'; checkpoint?: PendingCompactionCheckpoint; mutation?: SurfaceMutation }
 
 /** Create an empty surface fold state. */
 function createFoldState(): SurfaceFoldState {
@@ -521,6 +529,45 @@ function planSurfaceEvent(
     const index = seq - baseSeq
     return index < events.length ? events[index] : candidates?.[index - events.length]
   }
+  const checkpoint = advanceCompactionCheckpoint(state.checkpoint, event)
+  if (checkpoint !== undefined) {
+    switch (checkpoint.kind) {
+      case 'arm':
+      case 'defer':
+        if (surfaceOp !== undefined && surfaceOp !== 'append') {
+          planReplacement(state, event, surfaceOp, read)
+        }
+        return { kind: 'checkpoint', checkpoint: checkpoint.checkpoint }
+      case 'suppress':
+        return { kind: 'checkpoint' }
+      case 'publish': {
+        const replacement = read(checkpoint.seq)
+        if (replacement?.type !== 'user/message' || replacement.surfaceOp === 'append') {
+          throw new Error('compaction checkpoint replacement is outside the loaded Session history')
+        }
+        return { kind: 'checkpoint', mutation: planReplacement(state, replacement, replacement.surfaceOp, read) }
+      }
+      case 'clear':
+        break
+    }
+  }
+  const plan = planSurfaceMutation(state, event, surfaceOp, events, baseSeq, projections, read, candidates)
+  return checkpoint?.kind === 'clear'
+    ? { kind: 'checkpoint', ...plan === undefined ? {} : { mutation: plan } }
+    : plan
+}
+
+/** Plan the model-visible effect of one ordinary event. */
+function planSurfaceMutation(
+  state: SurfaceFoldState,
+  event: SessionEvent,
+  surfaceOp: SurfaceOp | undefined,
+  events: readonly SessionEvent[],
+  baseSeq: SessionLogOffset,
+  projections: readonly SessionMessageProjection[],
+  read: (seq: number) => SessionEvent | undefined,
+  candidates?: readonly SessionEvent[],
+): SurfaceMutation | undefined {
   assertDeveloperHeader(event, read)
   const projection = projections.find(item => item.type === event.type)
   if (projection !== undefined) {
@@ -539,6 +586,16 @@ function planSurfaceEvent(
   if (surfaceOp === 'append') {
     return { kind: 'append', seq: event.seq }
   }
+  return planReplacement(state, event, surfaceOp, read)
+}
+
+/** Prepare the validated replacement against the current surface positions. */
+function planReplacement(
+  state: SurfaceFoldState,
+  event: SessionEvent,
+  surfaceOp: Extract<SurfaceOp, { op: 'replace' }>,
+  read: (seq: number) => SessionEvent | undefined,
+): SurfaceReplacePlan {
   const range = replacementRange(state, surfaceOp)
   assertSourceEventReferences(event, range.shadowedSeqs)
   assertToolResultRewrite(event, range.shadowedSeqs, read)
@@ -570,6 +627,11 @@ function applySurfacePlan(
   state: SurfaceFoldState,
   plan: SurfacePlan | undefined,
 ): SurfaceFoldReplacement | undefined {
+  if (plan?.kind === 'checkpoint') {
+    if (plan.checkpoint !== undefined) state.checkpoint = plan.checkpoint
+    else delete state.checkpoint
+    plan = plan.mutation
+  }
   if (plan?.kind === 'append') {
     state.nodes.push(plan.seq)
   } else if (plan?.kind === 'replace') {
@@ -660,7 +722,8 @@ export class SurfaceManager implements SessionSurface {
     this._assertProjections()
     if (this._lastProcessedSeq < this.baseSeq + this.log.length - 1) this._processDelta()
     const lastProcessedSeq = SessionSeq(this.baseSeq + this.log.length + events.length - 1)
-    if (events.every(event => (event.surfaceOp === undefined || event.surfaceOp === 'append')
+    if (this._state.checkpoint === undefined && events.every(event => (event.surfaceOp === undefined || event.surfaceOp === 'append')
+      && !isGatedCompactionSummary(event)
       && !this.projections.some(projection => projection.type === event.type))) {
       const plans = events.map((event, index) => planSurfaceEvent(
         this._state, event, SessionSeq(this.baseSeq + this.log.length + index), this.log, this.baseSeq, this.projections, events,
@@ -746,8 +809,9 @@ export class SurfaceManager implements SessionSurface {
     const candidate = this._pendingPlan
     const pending = candidate !== undefined && this.log[candidate.expectedSeq - this.baseSeq] === candidate.event
       ? candidate.plan : undefined
-    const required = pending?.kind === 'project'
-      ? [...this._state.projections, pending.projection]
+    const mutation = pending?.kind === 'checkpoint' ? pending.mutation : pending
+    const required = mutation?.kind === 'project'
+      ? [...this._state.projections, mutation.projection]
       : this._state.projections
     for (const projection of required) {
       if (!this.projections.includes(projection)) {
