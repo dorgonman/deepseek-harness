@@ -151,7 +151,7 @@ function publishesCheckpoint(
       case 'defer': pending = transition.checkpoint; break
       case 'suppress':
       case 'clear': return false
-      case 'publish': return transition.seq === checkpointSeq
+      case 'publish': return transition.checkpoint.seq === checkpointSeq
       case undefined: break
     }
   }

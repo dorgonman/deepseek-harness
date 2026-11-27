@@ -11,9 +11,9 @@
 import type { Message, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { SessionLogOffset, SessionSeq } from './types.ts'
 import { KNOWN_SESSION_EVENT_TYPES, MESSAGE_PROJECTION_EVENT_TYPES } from './known-event-types.ts'
-import { advanceCompactionCheckpoint, isGatedCompactionSummary, type PendingCompactionCheckpoint } from './compaction-checkpoint.ts'
+import { advanceCompactionCheckpoint, isGatedCompactionSummary, type DeferredCompactionReplacement, type PendingCompactionCheckpoint } from './compaction-checkpoint.ts'
 export { advanceCompactionCheckpoint } from './compaction-checkpoint.ts'
-export type { PendingCompactionCheckpoint } from './compaction-checkpoint.ts'
+export type { DeferredCompactionReplacement, PendingCompactionCheckpoint } from './compaction-checkpoint.ts'
 import type {
   SessionEvent,
   SessionEventType,
@@ -254,6 +254,8 @@ export interface SessionSurface {
   readonly contentGeneration: number
 }
 
+type SurfaceCheckpoint = PendingCompactionCheckpoint<{ readonly replacement: DeferredCompactionReplacement }>
+
 /** Mutable state shared by complete and incremental folds. */
 interface SurfaceFoldState {
   nodes: SessionSeq[]
@@ -261,7 +263,7 @@ interface SurfaceFoldState {
   contentGeneration: number
   projectedMessages: Map<SessionSeq, Message>
   projections: Set<SessionMessageProjection>
-  checkpoint?: PendingCompactionCheckpoint
+  checkpoint?: SurfaceCheckpoint
 }
 
 /** A validated replacement transition that has not mutated fold state yet. */
@@ -279,7 +281,7 @@ type SurfaceMutation =
 
 /** One mutation, or a checkpoint state change with an optional mutation. */
 type SurfacePlan = SurfaceMutation
-  | { kind: 'checkpoint'; checkpoint?: PendingCompactionCheckpoint; mutation?: SurfaceMutation }
+  | { kind: 'checkpoint'; checkpoint?: SurfaceCheckpoint; mutation?: SurfaceMutation }
 
 /** Create an empty surface fold state. */
 function createFoldState(): SurfaceFoldState {
@@ -537,15 +539,17 @@ function planSurfaceEvent(
         if (surfaceOp !== undefined && surfaceOp !== 'append') {
           planReplacement(state, event, surfaceOp, read)
         }
-        return { kind: 'checkpoint', checkpoint: checkpoint.checkpoint }
+        return {
+          kind: 'checkpoint',
+          checkpoint: checkpoint.kind === 'arm'
+            ? checkpoint.checkpoint
+            : { ...checkpoint.checkpoint, replacement: checkpoint.replacement },
+        }
       case 'suppress':
         return { kind: 'checkpoint' }
       case 'publish': {
-        const replacement = read(checkpoint.seq)
-        if (replacement?.type !== 'user/message' || replacement.surfaceOp === 'append') {
-          throw new Error('compaction checkpoint replacement is outside the loaded Session history')
-        }
-        return { kind: 'checkpoint', mutation: planReplacement(state, replacement, replacement.surfaceOp, read) }
+        const { event: replacement, surfaceOp: replacementOp } = checkpoint.checkpoint.replacement
+        return { kind: 'checkpoint', mutation: planReplacement(state, replacement, replacementOp, read) }
       }
       case 'clear':
         break

@@ -239,6 +239,10 @@ describe('incremental coverage', () => {
     expect(summaryTransactionCommitted(events, summaryIndex)).toBe(true)
     expect(summaryTransactionCommitted([...beforeEnd, unrelatedEnd, end], summaryIndex)).toBe(true)
     expect(summaryTransactionCommitted(events, 0)).toBe(false)
+    const summary = events[summaryIndex]
+    if (summary?.type !== 'compaction/summary') throw new Error('expected checkpoint summary')
+    const { incremental: _coverage, ledger: _ledger, ...ungatedSummary } = summary.data
+    expect(summaryTransactionCommitted(events.with(summaryIndex, { ...summary, data: ungatedSummary }), summaryIndex)).toBe(false)
     for (const unfinished of [beforeEnd, [...beforeEnd, failed], [...beforeEnd, restart, end], interrupted]) {
       expect(summaryTransactionCommitted(unfinished, summaryIndex)).toBe(false)
       expect(deriveCommittedCoverage(unfinished)).toBeUndefined()

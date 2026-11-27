@@ -164,12 +164,13 @@ export const contextBreakdownProjectionDefinition = {
     breakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: 0 },
   }),
   apply: (state, event) => {
-    const transition = checkpointPriceTransition(state.checkpoint, event, () => {
-      if (!isSurfaceEvent(event)) throw new Error('pending compaction checkpoint has no surface operation')
-      const message = deriveEventMessage(event)
-      const tokens = message === null ? 0 : estimateMessage(message)
-      const totals = placeSurfaceEvent(state, state.claim, event, tokens)
-      return { deltaTokens: totals.surfaceTokens - state.surfaceTokens, systemSeqs: state.claim?.systemSeqs ?? [] }
+    const transition = checkpointPriceTransition(state.checkpoint, event, (replacement) => {
+      const totals = placeSurfaceEvent(state, state.claim, replacement, estimateMessage(replacement.data))
+      const remaining = new Set(totals.systems.map(system => system.seq))
+      return {
+        deltaTokens: totals.surfaceTokens - state.surfaceTokens,
+        systemSeqs: state.systems.filter(system => !remaining.has(system.seq)).map(system => system.seq),
+      }
     })
     if (transition !== undefined) {
       const { checkpoint: _previous, ...rest } = state

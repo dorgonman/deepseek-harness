@@ -42,9 +42,7 @@ export function meteredCheckpointSchema<T>(price: z.ZodType<T>): z.ZodType<Meter
 }
 
 /** Checkpoint state with the bounded price staged at its replacement. */
-export type MeteredCheckpoint<T> =
-  | Extract<PendingCompactionCheckpoint, { phase: 'summary' }>
-  | (Extract<PendingCompactionCheckpoint, { phase: 'replacement' }> & { readonly price: T })
+export type MeteredCheckpoint<T> = PendingCompactionCheckpoint<{ readonly price: T }>
 
 /**
  * Keep an incremental replacement price pending until the Session publishes it.
@@ -56,15 +54,15 @@ export type MeteredCheckpoint<T> =
 export function checkpointPriceTransition<T>(
   checkpoint: MeteredCheckpoint<T> | undefined,
   event: SessionEvent,
-  price: () => T,
+  price: (event: SessionEvent<'user/message'>) => T,
 ): { checkpoint?: MeteredCheckpoint<T>; suppress?: true; publish?: T } | undefined {
   const transition = advanceCompactionCheckpoint(checkpoint, event)
   switch (transition?.kind) {
     case 'arm': return { checkpoint: transition.checkpoint }
-    case 'defer': return { checkpoint: { ...transition.checkpoint, price: price() }, suppress: true }
+    case 'defer': return { checkpoint: { ...transition.checkpoint, price: price(transition.replacement.event) }, suppress: true }
     case 'suppress': return { suppress: true }
     case 'clear': return {}
-    case 'publish': return checkpoint?.phase === 'replacement' ? { publish: checkpoint.price } : {}
+    case 'publish': return { publish: transition.checkpoint.price }
     default: return undefined
   }
 }

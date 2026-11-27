@@ -141,6 +141,22 @@ describe('contextBreakdown session projection', () => {
     else expect(restored.checkpoint.contextPressure?.val).toEqual(pressureBefore)
   })
 
+  it('ignores the price of a replacement carrying a different checkpoint ID', async () => {
+    const { ctx, session } = await harness()
+    const original = appendUser(session, 'the original request stays visible')
+    const before = projected(ctx, session)
+    const priceBefore = ctx.tokenMeter.measure(session).nodes
+    const compactionId = appendSummaryMeter(ctx, session, original, original, true)
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'summary for a different checkpoint' }],
+      source: compactCheckpointSource(CompactionId('different-checkpoint')),
+    }), { surfaceOp: { op: 'replace', startSeq: original, endSeq: original }, sourceEventSeqs: [original] })
+    session.append('compaction/end', { compactionId, turn: null })
+
+    expect(projected(ctx, session)).toEqual(before)
+    expect(ctx.tokenMeter.measure(session).nodes).toEqual(priceBefore)
+  })
+
   it('serves zeros for an empty log', async () => {
     const { ctx, session } = await harness()
     expect(projected(ctx, session)).toEqual({ systemTokens: 0, toolsTokens: 0, messageTokens: 0 })

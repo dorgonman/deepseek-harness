@@ -23,7 +23,7 @@ import {
   SessionLogOffset,
   SessionSeq,
 } from '@deepseek-ai/dsh-session'
-import { advanceCompactionCheckpoint, type PendingCompactionCheckpoint } from '@deepseek-ai/dsh-session/surface'
+import { advanceCompactionCheckpoint, type DeferredCompactionReplacement, type PendingCompactionCheckpoint } from '@deepseek-ai/dsh-session/surface'
 import type { ProjectionHandle } from '@deepseek-ai/dsh-session-projection'
 import type {
   ContextPressureProjection,
@@ -47,7 +47,7 @@ export type * from './types.ts'
 interface ReplayState {
   consumedEvents: SessionLogOffsetType
   surface: MeterSurfaceNode[]
-  checkpoint?: PendingCompactionCheckpoint
+  checkpoint?: PendingCompactionCheckpoint<{ readonly replacement: DeferredCompactionReplacement }>
   header: { seq: SessionSeqType | null; value: EpochHeader } | undefined
   anchorHeader: { seq: SessionSeqType | null; value: EpochHeader } | undefined
   anchorNodes: readonly MeterSurfaceNode[]
@@ -282,7 +282,7 @@ export class TokenMeter extends Service {
         if (event.type === 'assistant/message') planSurfaceTokens(state.surface, event)
         advanceMeasurement(measurement, event)
       }
-      this._foldEvent(state, event, session)
+      this._foldEvent(state, event)
       if (next !== undefined) state.pendingMeasurement = next
       state.consumedEvents = SessionLogOffset(state.consumedEvents + 1)
     }
@@ -298,7 +298,7 @@ export class TokenMeter extends Service {
   }
 
   /** Update only discardable positional prices and the pre-assistant view. */
-  private _foldEvent(state: ReplayState, event: SessionEvent, session: Session): void {
+  private _foldEvent(state: ReplayState, event: SessionEvent): void {
     if (event.type === 'request/header') state.header = { seq: event.seq, value: canonicalHeader(event.data.header) }
     if (event.type === 'image/offload') {
       const offloaded = new Map(event.data.targets.map(target => [target.seq, new Set(target.imageIndexes)]))
@@ -314,21 +314,15 @@ export class TokenMeter extends Service {
     const transition = advanceCompactionCheckpoint(state.checkpoint, event)
     let visible = isSurfaceEvent(event) ? event : undefined
     if (transition?.kind === 'defer' || transition?.kind === 'suppress') visible = undefined
-    if (transition?.kind === 'publish') {
-      // oxlint-disable-next-line typescript/no-deprecated -- the retained event belongs to this existing replay cache
-      const replacement = session.eventAt(transition.seq)
-      if (replacement === undefined || !isSurfaceEvent(replacement)) {
-        throw new Error('compaction checkpoint price is outside the loaded Session history')
-      }
-      visible = replacement
-    }
+    if (transition?.kind === 'publish') visible = transition.checkpoint.replacement.event
     const plan = visible === undefined ? undefined : planSurfaceTokens(state.surface, visible)
     if (event.type === 'assistant/message') {
       state.anchorNodes = [...state.surface]
       state.anchorHeader = state.header
     }
     if (plan !== undefined) commitSurfaceTokens(state.surface, plan)
-    if (transition?.kind === 'arm' || transition?.kind === 'defer') state.checkpoint = transition.checkpoint
+    if (transition?.kind === 'arm') state.checkpoint = transition.checkpoint
+    else if (transition?.kind === 'defer') state.checkpoint = { ...transition.checkpoint, replacement: transition.replacement }
     else if (transition !== undefined) delete state.checkpoint
   }
 }

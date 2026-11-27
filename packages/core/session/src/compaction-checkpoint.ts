@@ -1,26 +1,35 @@
 /** Publication state of one incremental compaction on a Session. */
 import { brandString, type Branded } from '@deepseek-ai/dsh-brand'
-import { SessionSeq, type SessionEvent } from './types.ts'
+import { SessionSeq, type SessionEvent, type SurfaceOp } from './types.ts'
 
 type CheckpointId = Branded<'CompactionId'>
 
-/** Summary or replacement waiting for a matching successful close. */
-export type PendingCompactionCheckpoint =
-  | {
-    readonly phase: 'summary'
-    readonly id: CheckpointId
-    readonly seq: SessionSeq
-    readonly start: SessionSeq
-    readonly end: SessionSeq
-  }
-  | { readonly phase: 'replacement'; readonly id: CheckpointId; readonly seq: SessionSeq }
+type CheckpointSummary = {
+  readonly phase: 'summary'
+  readonly id: CheckpointId
+  readonly seq: SessionSeq
+  readonly start: SessionSeq
+  readonly end: SessionSeq
+}
+
+type CheckpointReplacement = { readonly phase: 'replacement'; readonly id: CheckpointId; readonly seq: SessionSeq }
+
+/** Positional user message accepted as the replacement for a checkpoint. */
+export interface DeferredCompactionReplacement {
+  readonly event: SessionEvent<'user/message'>
+  readonly surfaceOp: Exclude<SurfaceOp, 'append'>
+}
+
+/** Pending summary or replacement, with consumer-owned state attached to the replacement. */
+export type PendingCompactionCheckpoint<State extends object = object> =
+  CheckpointSummary | (CheckpointReplacement & State)
 
 /** Change to checkpoint publication state. An absent transition preserves the state. */
-export type CompactionCheckpointTransition =
-  | { readonly kind: 'arm'; readonly checkpoint: Extract<PendingCompactionCheckpoint, { phase: 'summary' }> }
-  | { readonly kind: 'defer'; readonly checkpoint: Extract<PendingCompactionCheckpoint, { phase: 'replacement' }> }
+export type CompactionCheckpointTransition<State extends object> =
+  | { readonly kind: 'arm'; readonly checkpoint: CheckpointSummary }
+  | { readonly kind: 'defer'; readonly checkpoint: CheckpointReplacement; readonly replacement: DeferredCompactionReplacement }
   | { readonly kind: 'suppress' | 'clear' }
-  | { readonly kind: 'publish'; readonly seq: SessionSeq }
+  | { readonly kind: 'publish'; readonly checkpoint: CheckpointReplacement & State }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -46,10 +55,10 @@ export function isGatedCompactionSummary(
  * @param event - next contiguous Session event.
  * @returns a state change or publication, if any.
  */
-export function advanceCompactionCheckpoint(
-  pending: PendingCompactionCheckpoint | undefined,
+export function advanceCompactionCheckpoint<State extends object>(
+  pending: PendingCompactionCheckpoint<State> | undefined,
   event: SessionEvent,
-): CompactionCheckpointTransition | undefined {
+): CompactionCheckpointTransition<State> | undefined {
   // Compaction declares these durable records above Session in the package graph.
   const record: { type: string; data: unknown } = event
   if (isGatedCompactionSummary(record)) {
@@ -73,9 +82,13 @@ export function advanceCompactionCheckpoint(
     if (event.seq !== pending.seq + 1 || !('compactionId' in source) || source.compactionId !== pending.id
       || op === 'append' || op.startSeq !== pending.start
       || op.endSeq !== pending.end) return { kind: 'suppress' }
-    return { kind: 'defer', checkpoint: { phase: 'replacement', id: pending.id, seq: event.seq } }
+    return {
+      kind: 'defer',
+      checkpoint: { phase: 'replacement', id: pending.id, seq: event.seq },
+      replacement: { event, surfaceOp: op },
+    }
   }
   if (record.type !== 'compaction/end' || !isRecord(record.data)
     || record.data['compactionId'] !== pending.id) return undefined
-  return record.data['error'] === undefined ? { kind: 'publish', seq: pending.seq } : { kind: 'clear' }
+  return record.data['error'] === undefined ? { kind: 'publish', checkpoint: pending } : { kind: 'clear' }
 }
