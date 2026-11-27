@@ -185,6 +185,7 @@ function withCompaction(raw: string, meter: TokenMeter): string {
       shadowedTokenCount,
       provider: 'snapshot',
       model: 'snapshot-compactor',
+      ledger: [],
     },
   })
   at({

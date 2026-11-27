@@ -11,6 +11,7 @@ declare module '@deepseek-ai/dsh-llm/types' {
 }
 
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import type { KinfResidentObservationRoute } from './kinf-resident-observation.ts'
 
 /** Policy fields shared by the default policy and exact model overrides. */
 export interface CompactionPolicyConfig {
@@ -93,6 +94,8 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   residentProvider?: string
   /** Maximum accepted observation age in milliseconds; at most 60000. Defaults to 60000. */
   residentMaxAgeMs?: number
+  /** Explicit KINF routes observed by the Hybrid backend in resident-preferred mode. */
+  residentObservationRoutes?: KinfResidentObservationRoute[]
 }
 
 /** Exactly one validated retention form. */
@@ -114,21 +117,26 @@ interface ResolvedPolicyFields {
   readonly maxOverflowRetries: number
 }
 
+/** Summary routing validated during config resolution. Resident mode binds a gateway and provider. */
+export type ResolvedSummaryRouting = {
+  readonly residentPinnedNodeId?: string
+  readonly residentAllowedNodeIds?: readonly string[]
+  readonly residentPreferredVariantIds?: readonly string[]
+} & (
+  | { readonly summarizationMode: 'fixed'; readonly residentGatewayId?: string; readonly residentProvider?: string }
+  | { readonly summarizationMode: 'resident-preferred'; readonly residentGatewayId: string; readonly residentProvider: string }
+)
+
 /** Validated immutable config whose target-specific defaults remain unresolved. */
-export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & {
+export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & ResolvedSummaryRouting & {
   readonly modelPolicies: readonly Readonly<ModelCompactPolicyConfig>[]
   readonly auto: boolean
   readonly incremental: boolean
   readonly factLedger: boolean
   readonly factMaxClaims: number
   readonly factMaxClaimChars: number
-  readonly summarizationMode: 'fixed' | 'resident-preferred'
-  readonly residentGatewayId?: string
-  readonly residentPinnedNodeId?: string
-  readonly residentAllowedNodeIds?: readonly string[]
-  readonly residentPreferredVariantIds?: readonly string[]
-  readonly residentProvider?: string
   readonly residentMaxAgeMs: number
+  readonly residentObservationRoutes?: readonly KinfResidentObservationRoute[]
 }
 
 /** Fully merged policy for one routed conversation target, before capacity scaling. */

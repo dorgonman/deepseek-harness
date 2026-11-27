@@ -14,6 +14,8 @@ On Linux, `--with-deps` installs dependencies through the system package manager
 
 Ordinary scenarios begin with no registered Workspace or Session and a durable marker recording a removed default Workspace, so explicit folder-selection scenarios retain control of their cwd. `launchWebScaffold({ firstUse: true })` leaves initialization eligible for startup scenarios.
 
+For exact `request/admission` comparisons, use `workspacePathLength` to fix the JSON-quoted workspace path length. If the scenario includes checkout context, set `pinAdmissionSourceRoot: true` to give the real checkout a fixed-length alias. The receipt comparison uses the estimates recorded from those request inputs.
+
 Same-day message goldens use the shared `WEB_FIXTURE_TIME`: seeded transcripts pass it as `createdAt` and pin the browser calendar with `pinBrowserClock`; scenarios that submit live messages also use `pinHostClock` and restore it after teardown. These clocks advance with real elapsed time while keeping native timers intact, so midnight does not change a scenario's date labels.
 
 Every scenario requires the whole client composition to activate. The product boot only warns about inactive entries outside its required list, but the `watchConsole` tripwire, the [real-host smoke](smoke-real.e2e.ts), and the [assembled jsdom boot](assembled-boot.ts) treat a `web boot: warning` as a failure. No scenario option relaxes this: an inactive plugin in a product composition is a defect to fix.

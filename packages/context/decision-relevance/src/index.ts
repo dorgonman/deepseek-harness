@@ -147,7 +147,8 @@ export class DecisionRelevanceFilter extends Service {
     signal: AbortSignal | undefined,
   ): Promise<{ messages: readonly RequestMessage[] } & ProjectionResult> {
     const unchanged = { messages, applied: false, judgments: [] as readonly RelevanceJudgment[] }
-    if (!this.enabled || messages.length === 0) return unchanged
+    const config = this.config
+    if (!isEffective(config) || messages.length === 0) return unchanged
 
     const session = this.resolveSession(sessionId)
     if (session === undefined) return unchanged
@@ -177,7 +178,7 @@ export class DecisionRelevanceFilter extends Service {
         continue
       }
       evaluated += 1
-      const outcome = await this.evaluate(candidate, goal, conversation, signal)
+      const outcome = await this.evaluate(candidate, goal, conversation, signal, config)
       this.remember(candidate, outcome)
       judgments.push(outcome)
       if (outcome.disposition === 'elided-irrelevant') elided.set(candidate.messageIndex, outcome)
@@ -214,19 +215,19 @@ export class DecisionRelevanceFilter extends Service {
     return candidates
   }
 
-  /** Run one bounded Decision evaluation; every failure path retains the content. */
+  /**
+   * Run one bounded Decision evaluation. Every failure retains the content.
+   * The caller supplies the immutable route validated at project entry.
+   */
   protected async evaluate(
     candidate: Candidate,
     goal: string,
     conversation: { provider: string; model: string },
     signal: AbortSignal | undefined,
+    route: { readonly provider: string; readonly model: string },
   ): Promise<RelevanceJudgment> {
     const base = this.judgment(candidate, 'retained-error', 'evaluation failed', conversation)
-    const provider = this.config.provider
-    const model = this.config.model
-    if (provider === undefined || model === undefined) {
-      return { ...base, disposition: 'retained-error', reason: 'no explicit Decision route' }
-    }
+    const { provider, model } = route
 
     const input = truncateCodePoints(candidate.message.content
       .filter((block): block is ContentBlock & { type: 'text' } => block.type === 'text')

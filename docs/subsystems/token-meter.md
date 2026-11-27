@@ -151,9 +151,18 @@ estimateMessage(message: RequestMessage): number
  * @returns tool-schema tokens under the fixed service heuristic.
  */
 estimateTools(tools: readonly ToolSchema[] | undefined): number
+
+/**
+ * Estimate input tokens for the projected request sent to the adapter.
+ * @param messages - messages with files and text-only image substitutions already projected.
+ * @param tools - tool declarations sent with the request.
+ * @param pricing - image pricing from the prepared route, when declared.
+ * @returns estimated input tokens with declared visual charges where available.
+ */
+estimateRequest( messages: readonly RequestMessage[], tools: readonly ToolSchema[] | undefined, pricing?: LlmImageRequestPricing, ): number
 ```
 
-Types: [EpochHeader](session.md) · [RequestMessage](llm-streaming.md) · [Session](session.md) · [ToolSchema](tools.md)
+Types: [EpochHeader](session.md) · [LlmImageRequestPricing](llm-streaming.md) · [RequestMessage](llm-streaming.md) · [Session](session.md) · [ToolSchema](tools.md)
 
 Source: [`packages/llm/token-meter/src/index.ts`](../../packages/llm/token-meter/src/index.ts)
 <!-- END GENERATED cordis-surface -->

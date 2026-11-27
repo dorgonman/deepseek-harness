@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { chromium, type Browser, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   acknowledgeReloadConnectionLoss, assertFixtureInventory, captureStableAria, compareOrRefreshGolden,
   fixtureUserPrompts, launchWebScaffold, watchConsole, type WebScaffold,
 } from './scaffold.ts'
@@ -20,6 +21,7 @@ describe('creation recommendation after an explicit wish', () => {
 
   beforeAll(async () => {
     scaffold = await launchWebScaffold({ replayFixture: fixture, compareReplaySession: true,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH, pinAdmissionSourceRoot: true,
       profile: { packages: [{ dir: fileURLToPath(new URL('../../../packages/experimental/personalized-recommendations', import.meta.url)), enabled: true }] },
     })
     browser = await chromium.launch()

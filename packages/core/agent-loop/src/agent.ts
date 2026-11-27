@@ -33,6 +33,7 @@ import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { EpochHeader, RequestContext, SessionEvent, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader, headerEquals, Session, ToolCallRecovery } from '@deepseek-ai/dsh-session'
+import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import { renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import { ToolActivationError, ToolBatchExecutionError } from '@deepseek-ai/dsh-tools'
@@ -168,6 +169,7 @@ export class ReactLoopAgent implements Agent {
     projections: LoopProjections,
     lastTurn: number,
     private readonly lifetimeSignal: AbortSignal,
+    private readonly sessionWriter?: SessionHandle,
   ) {
     this.requestSurfaceGeneration = session.surface.contentGeneration
     this.dispatch = agentEvents(loopCtx, this)
@@ -500,7 +502,7 @@ export class ReactLoopAgent implements Agent {
         // shadow.
         admitted = switching
           ? admission ?? plan(this.session)
-          : await this.admitEnvelope(header, preparedCall, plan, position, signal)
+          : await this.admitEnvelope(header, preparedCall, plan, position, startsRequestSeries, signal)
       } catch (error: unknown) {
         // A refused admission must not consume the input it refused to price.
         // Only the first attempt owns that claim: a retry already committed it.
@@ -514,7 +516,19 @@ export class ReactLoopAgent implements Agent {
       this.appendStepAdmission(this.session, admitted, position)
       firstAttempt = false
       const request = this.buildRequest(header, preparedCall, position, startsRequestSeries, signal)
-      await this.verifyEnvelope(header, preparedCall, signal)
+      const requestGeneration = this.session.surface.contentGeneration
+      const requestNodeCount = this.session.surface.nodes.length
+      const requestHeader = this.session.requestHeader()
+      const requestContext = this.session.requestContext()
+      const assertCurrent = () => {
+        if (this.loopCtx.sessions.get(this.session.id) !== this.session
+          || this.session.surface.contentGeneration !== requestGeneration
+          || this.session.surface.nodes.length !== requestNodeCount
+          || this.session.requestHeader() !== requestHeader
+          || this.session.requestContext() !== requestContext) {
+          throw new LlmError('agent: Session changed before the admitted request could be dispatched', 'CONTEXT_ADMISSION_REFUSED')
+        }
+      }
       const live = new AssistantStreamAttempt(
         this.session.id,
         ++this.assistantAttemptCounter,
@@ -527,7 +541,13 @@ export class ReactLoopAgent implements Agent {
         ? new StreamRepetition() : undefined
       let started = false
       try {
-        const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
+        const context = preparedCall?.context
+        const stream = preparedCall?.stream(request, {
+          assertCurrent,
+          ...context === undefined ? {} : {
+            verify: projected => this.verifyEnvelope(header, preparedCall, projected, position, context.contextWindow, signal),
+          },
+        }) ?? this.loopCtx.llm.stream(request)
         signal.throwIfAborted()
         live.start()
         started = true
@@ -715,6 +735,9 @@ export class ReactLoopAgent implements Agent {
     const request: PendingAgentRequest = {
       header,
       ...contextWindow === undefined ? {} : { contextWindow },
+      completionSource: preparedCall?.completion.source ?? 'unknown',
+      ...preparedCall === undefined ? {} : { projectRequest: preparedCall.projectRequest.bind(preparedCall) },
+      ...preparedCall?.imagePricing === undefined ? {} : { imagePricing: preparedCall.imagePricing },
       preview: (events, replacement) => {
         signal.throwIfAborted()
         if (events.length !== session.seq || session.requestHeader() !== baseline) {
@@ -766,12 +789,15 @@ export class ReactLoopAgent implements Agent {
   ): Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall }> {
     const { session } = this
 
-    // A loop instance seeds output controls from its options until it logs its
-    // own header; later steps re-resolve marked defaults.
-    const maxTokens = this.options.maxTokens
+    // A fresh loop uses its configured cap or inherits the Session's last explicit cap.
+    // Marked adapter defaults are resolved again for the active profile and route.
+    const previousHeader = session.requestHeader()
+    const persistedCap = previousHeader?.adapterDefaults?.maxTokens === true
+      ? undefined : previousHeader?.config.maxTokens
+    const maxTokens = this.options.maxTokens ?? persistedCap
     const persisted: Partial<LlmCallConfig> = this.requestHeaderLogged
       // oxlint-disable-next-line typescript/no-non-null-assertion -- the instance logged the header it now folds
-      ? requestProposal(session.requestHeader()!)
+      ? requestProposal(previousHeader!)
       : maxTokens === undefined ? {} : { maxTokens }
     const { provider: _provider, model: _model, reasoningEffort: _effort, ...controls } = persisted
     const seedConfig = deepFreeze(structuredClone({ ...controls, ...selection }))
@@ -810,6 +836,7 @@ export class ReactLoopAgent implements Agent {
    * @param preparedCall - registration-bound call supplying window and reservation.
    * @param plan - recomputes the step admission against the current Surface.
    * @param position - turn and step owning the admission.
+   * @param startsRequestSeries - whether the step explicitly starts a new series.
    * @param signal - the current turn's cancellation signal.
    * @returns the admission to commit for this attempt.
    */
@@ -818,6 +845,7 @@ export class ReactLoopAgent implements Agent {
     preparedCall: PreparedLlmCall | undefined,
     plan: (view: Session, shadowed?: readonly SessionSeq[]) => StepAdmission,
     position: StepPosition,
+    startsRequestSeries: boolean,
     signal: AbortSignal,
   ): Promise<StepAdmission> {
     let admission = plan(this.session)
@@ -831,7 +859,9 @@ export class ReactLoopAgent implements Agent {
       let view: Session | undefined
       await this.dispatch.serial('agent/request-envelope', {
         header,
-        view: () => (view ??= this.previewView(events, admission, position)),
+        view: () => (view ??= this.previewView(events, admission, header, position, startsRequestSeries)),
+        ...preparedCall === undefined ? {} : { projectRequest: preparedCall.projectRequest.bind(preparedCall) },
+        ...preparedCall?.imagePricing === undefined ? {} : { imagePricing: preparedCall.imagePricing },
         ...preparedCall?.context === undefined ? {} : { contextWindow: preparedCall.context.contextWindow },
         ...completionFields(preparedCall),
         phase: 'preview',
@@ -849,16 +879,30 @@ export class ReactLoopAgent implements Agent {
     }
   }
 
-  /** Price the frozen request dispatch is about to send; refusal only. */
+  /** Verify the frozen request before dispatch on a prepared route with a declared context window. */
   private async verifyEnvelope(
     header: EpochHeader,
-    preparedCall: PreparedLlmCall | undefined,
+    preparedCall: PreparedLlmCall,
+    request: GenerateOptions,
+    position: StepPosition,
+    contextWindow: number,
     signal: AbortSignal,
   ): Promise<void> {
     await this.dispatch.serial('agent/request-envelope', {
       header,
-      view: () => this.session,
-      ...preparedCall?.context === undefined ? {} : { contextWindow: preparedCall.context.contextWindow },
+      request,
+      flushReceipt: async () => {
+        const acknowledged = await this.loopCtx.sessions.flush(this.session, this.sessionWriter)
+        if (this.sessionWriter !== undefined && !acknowledged) {
+          throw new LlmError(
+            'agent: Session writer did not acknowledge the admission receipt; reopen the session before sending another request',
+            'CONTEXT_ADMISSION_REFUSED',
+          )
+        }
+      },
+      ...position,
+      contextWindow,
+      ...preparedCall.imagePricing === undefined ? {} : { imagePricing: preparedCall.imagePricing },
       ...completionFields(preparedCall),
       phase: 'verify',
       signal,
@@ -875,14 +919,46 @@ export class ReactLoopAgent implements Agent {
    * Clone the Session with the pending admission committed, for pricing only.
    * @param events - the exact pre-dispatch log observation to replay.
    * @param admission - the pending admission to append to the clone.
+   * @param header - the prepared header and tool declarations.
    * @param position - turn and step owning the admission.
+   * @param startsRequestSeries - whether the step explicitly starts a new series.
    * @returns the clone a listener prices.
    */
-  private previewView(events: readonly SessionEvent[], admission: StepAdmission, position: StepPosition): Session {
+  private previewView(
+    events: readonly SessionEvent[],
+    admission: StepAdmission,
+    header: EpochHeader,
+    position: StepPosition,
+    startsRequestSeries: boolean,
+  ): Session {
     const view = Session.fromRestore(this.session.id, events, this.session.header,
       this.session.inheritedEventCount, 'shared-frozen', this.loopCtx.sessions.messageProjections)
     this.appendStepAdmission(view, admission, position)
+    this.appendRequestHeader(view, header, position, startsRequestSeries)
     return view
+  }
+
+  /** Apply the same request header and tool deltas to preview and live Sessions. */
+  private appendRequestHeader(
+    view: Session,
+    header: EpochHeader,
+    position: StepPosition,
+    startsRequestSeries: boolean,
+  ): void {
+    const baseline = view.requestHeader()
+    const startsSeries = startsRequestSeries || this.requestSurfaceGeneration !== view.surface.contentGeneration
+    const reason = !this.requestHeaderLogged ? (baseline === undefined ? 'initial' : 'resume')
+      : baseline === undefined || !headerEquals(baseline, header) ? 'change'
+        : startsSeries ? 'series' : undefined
+    if (reason === undefined) return
+    const { seq } = view.append('request/header', {
+      header,
+      reason,
+      ...startsSeries && reason !== 'series' ? { startsSeries: true } : {},
+    })
+    if (baseline !== undefined && reason !== 'series') {
+      this.appendToolDelta(view, baseline, header.tools ?? [], position, seq)
+    }
   }
 
   /** Log the resolved envelope and derive a frozen request from the admitted surface. */
@@ -896,30 +972,8 @@ export class ReactLoopAgent implements Agent {
     const { session } = this
     const { config } = header
     const surfaceGeneration = session.surface.contentGeneration
-    const baseline = this.session.requestHeader()
-    const startsSeries = startsRequestSeries
-      || this.requestSurfaceGeneration !== surfaceGeneration
-    let headerSeq: SessionSeq | undefined
-    if (!this.requestHeaderLogged) {
-      // Compaction during the first resumed pre-step must still mark a new series.
-      headerSeq = this.session.append('request/header', {
-        header,
-        reason: baseline === undefined ? 'initial' : 'resume',
-        ...startsSeries ? { startsSeries: true } : {},
-      }).seq
-      this.requestHeaderLogged = true
-    } else if (baseline === undefined || !headerEquals(baseline, header)) {
-      headerSeq = this.session.append('request/header', {
-        header,
-        reason: 'change',
-        ...startsSeries ? { startsSeries: true } : {},
-      }).seq
-    } else if (startsSeries) {
-      this.session.append('request/header', { header, reason: 'series' })
-    }
-    if (baseline !== undefined && headerSeq !== undefined) {
-      this.appendToolDelta(session, baseline, header.tools ?? [], position, headerSeq)
-    }
+    this.appendRequestHeader(session, header, position, startsRequestSeries)
+    this.requestHeaderLogged = true
     this.requestSurfaceGeneration = surfaceGeneration
 
     const contextWindow = preparedCall?.context?.contextWindow

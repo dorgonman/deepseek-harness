@@ -14,7 +14,7 @@ import {
   toolPairingBalancedAfter,
   toolPairingBalancedBefore,
 } from '@deepseek-ai/dsh-compaction'
-import type { CompactionFact, CompactionIncrementalCoverage, CompactionResult } from '@deepseek-ai/dsh-compaction'
+import type { CompactionFact, CompactionIncrementalCoverage, CompactionResidentSelection, CompactionResult } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
@@ -42,8 +42,10 @@ export interface SurfaceSelection {
 export type CompactionChunkCall = NonNullable<SessionEvent<'compaction/summary'>['data']['chunkCalls']>[number]
 
 /** Summary output and optional provider requirements for replacement. */
-export type RegionSummary = SummaryResult & {
-  chunkCalls?: CompactionChunkCall[]
+export type RegionSummary = SummaryResult & (
+  | { chunkCalls?: never; residentSelection?: never }
+  | { chunkCalls: CompactionChunkCall[]; residentSelection?: CompactionResidentSelection }
+) & {
   /** Incremental RAW coverage committed with this checkpoint. */
   incremental?: CompactionIncrementalCoverage
   /** Merged sourced facts committed with this checkpoint. */
@@ -505,7 +507,10 @@ function commitCompactionBody(
     ledger,
   } = summarized
   const callRecord = summarized.chunkCalls !== undefined
-    ? { chunkCalls: summarized.chunkCalls }
+    ? {
+      chunkCalls: summarized.chunkCalls,
+      ...summarized.residentSelection === undefined ? {} : { residentSelection: summarized.residentSelection },
+    }
     : summarized.llmStreamCall === true
       ? { rawOutput: summarized.rawOutput, llmStreamCall: true as const }
       : summarized.rawOutput === undefined ? {} : { rawOutput: summarized.rawOutput }

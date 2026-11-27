@@ -12,7 +12,13 @@ const dshBin = fileURLToPath(new URL('../../../lib/bin.js', import.meta.url))
 const fixture = fileURLToPath(new URL('./fixtures/checkpoint-failure.mjs', import.meta.url))
 
 describe.skipIf(!existsSync(dshBin))('sdk-minimal durability checkpoints', () => {
-  it.each([false, true])('checkpoint storage failure with policy disabled=%s', async (disabled) => {
+  it.each([
+    { disabled: false, storageUnavailable: true },
+    { disabled: true, storageUnavailable: true },
+    { disabled: true, storageUnavailable: false },
+  ])('checks durability with policy disabled=$disabled and unavailable storage=$storageUnavailable', async ({
+    disabled, storageUnavailable,
+  }) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-sdk-checkpoint-'))
     onTestFinished(async () => { await rm(root, { recursive: true, force: true }) })
     let modelRequests = 0
@@ -48,7 +54,7 @@ describe.skipIf(!existsSync(dshBin))('sdk-minimal durability checkpoints', () =>
     const patch = join(root, 'checkpoint.patch.yml')
     await writeFile(patch, JSON.stringify([
       { id: 'session-log-deepseek', config: { enabled: false } },
-      { insert: [{ id: 'checkpoint-failure', name: fixture }] },
+      ...storageUnavailable ? [{ insert: [{ id: 'checkpoint-failure', name: fixture }] }] : [],
       ...disabled ? [{ id: 'session-checkpoint-policy', disabled: true }] : [],
     ]))
     const harness = new DeepSeekHarness({
@@ -58,15 +64,17 @@ describe.skipIf(!existsSync(dshBin))('sdk-minimal durability checkpoints', () =>
     })
     onTestFinished(async () => { await harness.close() })
     const result = await harness.run('Reply OK without calling tools.')
-    expect(modelRequests).toBe(disabled ? 1 : 0)
+    expect(modelRequests).toBe(storageUnavailable ? 0 : 1)
     const terminal = result.events.findLast(event => event.type === 'turn/end')
-    expect(terminal).toMatchObject({ data: { reason: { kind: disabled ? 'completed' : 'error' } } })
-    if (disabled) {
-      expect(result.finalResponse).toBe('OK')
-    } else {
+    if (storageUnavailable) {
       expect(terminal).toMatchObject({
         data: { reason: { kind: 'error', error: { message: 'sdk checkpoint persistence unavailable' } } },
       })
+      expect(result.events.some(event => event.type === 'request/admission')).toBe(disabled)
+    } else {
+      expect(terminal).toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(result.finalResponse).toBe('OK')
+      expect(result.events.some(event => event.type === 'request/admission')).toBe(true)
     }
   })
 })

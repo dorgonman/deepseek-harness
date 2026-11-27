@@ -69,7 +69,7 @@ function candidate(): Mutable<Candidate> {
       hostGeneration: identity.host_generation,
       residentGeneration: identity.resident_generation,
       targetConfigRevision: identity.target_config_revision,
-      renderedPromptTokens: 600,
+      promptTokens: 600,
     },
   }
 }

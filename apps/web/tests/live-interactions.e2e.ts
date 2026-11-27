@@ -23,6 +23,7 @@ import { deriveReplayScript, parseSessionLog } from '@deepseek-ai/dsh-llm-replay
 import type { ReplayEntry, ReplayOverrideDoc } from '@deepseek-ai/dsh-llm-replay'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFixtureInventory, captureExpandedTurnProcessAria, captureStableAria,
   compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
@@ -103,7 +104,9 @@ describe('web e2e: live-turn interactions (cancel / error / retry)', () => {
       replayFixture: FIXTURE,
       // Throughput snapshots need a nonzero interval between replayed chunks.
       paceMs: 1,
-      ...(overridePath === undefined ? {} : { replayOverride: overridePath }),
+      ...(overridePath === undefined
+        ? { workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH, pinAdmissionSourceRoot: true }
+        : { replayOverride: overridePath }),
       ...(overridePath === undefined ? {} : { compareReplaySession: false }),
       ...(retryPolicy === undefined ? {} : { replayRetryPolicy: retryPolicy }),
     })

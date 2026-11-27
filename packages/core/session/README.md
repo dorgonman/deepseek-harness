@@ -87,7 +87,7 @@ The logical `SessionHeader.isSeeded` field reports whether fork history exists w
 
 ### Flush durable state
 
-`ctx.sessions.flush(session)` dispatches the awaited durability checkpoint: every persistence listener flushes and the call settles after all of them. A producer that needs an immediate durability barrier awaits it instead of assuming the write-behind drained.
+`ctx.sessions.flush(session, expectedWriter?)` waits for every durability listener and reports whether the expected write handle acknowledged the flush. Without an expected handle, it reports whether any listener ran. A listener failure rejects the call after all listeners settle.
 
 -----
 
@@ -162,7 +162,7 @@ The model receives the complete messages from `system/message`, `developer/messa
 
 #### Token effect
 
-Appended surface entries are resent on later steps. A `replace` surface operation removes the shadowed entries from future inputs without deleting their raw log records.
+Appended surface entries are resent on later steps. A `replace` surface operation removes shadowed entries from future inputs and preserves their raw log records. For an incremental or ledger summary, the adjacent checkpoint must match the compaction ID and replacement range. A successful `compaction/end` publishes the replacement. A failed or interrupted attempt leaves the original nodes active.
 
 #### KV Cache effect
 

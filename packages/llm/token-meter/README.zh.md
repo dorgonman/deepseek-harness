@@ -33,12 +33,14 @@ kind: "package-reference"
 
 ### 测量压力
 
-`ctx.tokenMeter` 暴露两个操作。`measure(session, requestHeader?)` 在同一个已消费日志 revision 上返回独立、深度不可变的快照：`totalTokens` 是请求与响应压力，`surfaceTokens` 是仅表面的路由定价总量，等于 `nodes[].tokens` 之和。可选 `requestHeader` 覆盖会选择计价路由与压力字段；节点集合仍描述当前会话。`estimateMessage(message)` 用固定启发式规则为一条消息计价。每次调用都会克隆带位置的表面节点，因此测量是 O(surface)。
+`measure(session, requestHeader?)` 在同一个已消费日志 revision 上返回独立、深度不可变的快照：`totalTokens` 是请求与响应压力，`surfaceTokens` 是仅表面的路由定价总量，等于 `nodes[].tokens` 之和。可选 `requestHeader` 覆盖会选择计价路由与压力字段；节点集合仍描述当前会话。`estimateMessage(message)` 用固定启发式规则为一条消息计价。每次测量都会克隆带位置的表面节点，因此测量是 O(surface)。
 
 ```text
 const { totalTokens, surfaceTokens, nodes } = ctx.tokenMeter.measure(session)
 const price = ctx.tokenMeter.estimateMessage(message)
 ```
+
+`estimateRequest(messages, tools, pricing?)` 根据已投影的消息与工具声明，估算发送给适配器的请求。已准备的路由可以为保留的图片块提供视觉 token 数与随附文本。文本采用固定启发式规则计价，包括投影后的文件句柄和图片替代文本。
 
 每次测量都会通过可选的 `llm` 服务解析生效 envelope 的提供方／模型。适配器声明图片定价时，图片出现处使用路由请求的视觉 token 价格加模型可见文本，`image/offload` 事件选中的出现位置则按路由的占位文本计价，与表层实际发送的一致；其他路由保持固定启发式规则。文件出现处使用同一个 `llm` 服务为适配器分发解析的确切、与路由无关的 句柄文本，其中包含当前执行世界路径或明确的无路径说明。每个节点还携带与路由无关的 `heuristicTokens`，供替换影子价使用。只有当最新成功调用的规范请求 envelope 与已测量 envelope 匹配、且其总量不低于该调用完整路由定价锚点时，才复用提供方用量；否则会对完整当前 envelope 与表面做估算。表面变更保持相对于按同一路由重新定价的匹配锚点的带符号值，包括缩减替换后的负 delta。
 
@@ -103,7 +105,7 @@ token-meter 通过必需的 `ctx.sessionProjections` 服务注册三个客户端
 
 ### 投影语义
 
-`contextBreakdown` 只保留存活的 `system/message` 节点及其启发式价格、一个 surface 运行总量，以及至多一个已武装的影子价 claim；替换减去紧邻的 claim（其 `shadowedSeqs` 同时列出被移除的系统提示词），或减去被改写的那个系统提示词的保留价格（[决策](../../../.agents/notes/implemented/architecture/2026-10-13-context-breakdown-system-prompt-state.zh.md)）。其状态取决于存活系统提示词的数量，而非消息数；状态版本 6 使位置检查点失效。`contextPressure` 是另一个标量影子价消费方：没有相邻 claim 的替换贡献零增量。用量 fold 保留一个最后样本槽，因为合法日志不会在更晚步骤报告用量后再次报告更早步骤的用量。
+`contextBreakdown` 保留存活的 `system/message` 节点及其启发式价格、一个 surface 运行总量，以及一个影子价 claim。替换减去相邻 claim 的价格，或减去被改写的系统提示词的保留价格。claim 的 `shadowedSeqs` 标识被移除的系统提示词（[决策](../../../.agents/notes/implemented/architecture/2026-10-13-context-breakdown-system-prompt-state.zh.md)）。`contextPressure` 将没有相邻 claim 的替换计为零增量。两个投影都在匹配的压缩成功关闭后才计入增量压缩价格，状态版本分别为 7 和 6。用量归约保留最后一个样本，因为用量报告按步骤顺序到达。
 
 `./estimate` 导出无服务状态的文字与内容估算函数，供工具结果保留复用。图片的实际请求成本由模型适配器的 `imageRequestPricing` 提供。
 

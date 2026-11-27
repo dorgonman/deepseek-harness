@@ -467,6 +467,7 @@ describe('produced-file Turn data', () => {
       start: startMatch,
       state: undefined,
       current: new Map(),
+      loadedEvent: () => undefined,
     }
     const reader: Parameters<typeof deliverablesDefinition.start>[2] = { previous: () => undefined }
     const state = deliverablesDefinition.start(emptyContext, startMatch, reader)

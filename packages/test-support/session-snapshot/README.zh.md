@@ -96,6 +96,8 @@ Headless/ACP 与 SDK 适配器在规范化之前，将原始目录中的子创�
 
 需要非 Windows 主机的场景声明 `posixOnly`，在 Windows 上跳过运行测试，但 fixture 保护仍在所有平台覆盖其已提交文件；组合需要可用 `pwsh` 的场景声明 `pwshOnly`。当临时目录授权自身待测时，`workspaceParent` 将生成子级 cwd 移出平台临时区域；场景签入的 `workspace/` 会先复制到该子级，随后 `prepareWorkspace` 在 agent 启动前针对生成 cwd 运行。默认生成的 workspace 在会话 fixture 中存储为 `{{cwd}}`，使平台临时根目录与随机 basename 不影响录制。headless manifest 在测试 Session workspace 授权本身时使用 `workspace.parent: outside-temp`。适配器在父目录可写且位于系统临时授权之外时，于平台临时根目录旁分配目录，否则使用 home，并拒绝已被自动临时写授权覆盖的生成 cwd。
 
+比较 token 估算值的场景可设置 `workspaceCwdTextLength`，固定生成的工作区路径在 JSON 字符串中的长度。
+
 ### 可能出什么问题
 
 - **持久记录等待超时**——即使首次日志收集就超过期限，`waitForTurnStart`、`waitForTurnEnd`、`waitForSubagentTurnEnd`、`waitForGoalPhase`、`waitForInboxMessage`、`waitForTitleAfterTurnEnd` 和 `waitForEventAfterTurnEnd` 也会指出会话或子会话及等待期限。子会话等待还会指出目标轮次。这些等待都通过错误的 cause 保留底层失败。`waitForTurnStart` 会立即拒绝格式错误的轮次记录。

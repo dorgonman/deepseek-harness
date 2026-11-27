@@ -611,6 +611,14 @@ export interface PiAiModelProfile {
   requestProtocol?: 'kinf-decision-v1'
   /** Native tool support for this model; omission preserves normal admission, while false disables declarations and execution. */
   nativeTools?: boolean
+  /**
+   * Declares that this model's endpoint serves KINF's resident-only connected
+   * contract on the dedicated resident path; a call carrying a resident
+   * dispatch binding is then sent there and validated against the binding.
+   * Omission keeps the transport's refusal: a resident binding is rejected
+   * before any HTTP request.
+   */
+  residentTransport?: boolean
   /** HTTP(S) endpoint for this model, overriding the provider route's endpoint. */
   baseURL?: string
   /** Request headers overriding provider headers by case-insensitive name; Harness attribution still wins. */
@@ -863,6 +871,8 @@ export interface RouteCatalog {
   requestProtocols: ReadonlyMap<string, 'kinf-decision-v1'>
   /** Explicit native tool support keyed by selector id; absent entries retain normal admission. */
   nativeTools: ReadonlyMap<string, boolean>
+  /** Resident-only connected-transport declarations keyed by selector id; absent entries are not resident-capable. */
+  residentTransports: ReadonlyMap<string, boolean>
   /** Explicit model request headers keyed by selector id and layered above provider headers. */
   modelHeaders: ReadonlyMap<string, Readonly<Record<string, string>>>
   /** Explicit stream-read idle intervals keyed by selector id; absent entries inherit the provider interval. */
@@ -940,6 +950,7 @@ export function resolveRouteModels(
   const requestModels = new Map<string, string>()
   const requestProtocols = new Map<string, 'kinf-decision-v1'>()
   const nativeTools = new Map<string, boolean>()
+  const residentTransports = new Map<string, boolean>()
   const modelHeaders = new Map<string, Readonly<Record<string, string>>>()
   const modelStreamIdleTimeouts = new Map<string, number>()
   const crossOriginModels = new Set<string>()
@@ -959,6 +970,9 @@ export function resolveRouteModels(
     }
     if (entry.nativeTools !== undefined && typeof entry.nativeTools !== 'boolean') {
       invalid(provider, `model "${entry.id}" nativeTools must be a boolean`)
+    }
+    if (entry.residentTransport !== undefined && typeof entry.residentTransport !== 'boolean') {
+      invalid(provider, `model "${entry.id}" residentTransport must be a boolean`)
     }
     if (entry.streamIdleTimeoutMs !== undefined && (!Number.isFinite(entry.streamIdleTimeoutMs)
       || entry.streamIdleTimeoutMs <= 0 || entry.streamIdleTimeoutMs > MAX_TIMER_DELAY_MS)) {
@@ -1013,6 +1027,7 @@ export function resolveRouteModels(
     if (entry.requestModel !== undefined) requestModels.set(entry.id, entry.requestModel)
     if (entry.requestProtocol !== undefined) requestProtocols.set(entry.id, entry.requestProtocol)
     if (entry.nativeTools !== undefined) nativeTools.set(entry.id, entry.nativeTools)
+    if (entry.residentTransport !== undefined) residentTransports.set(entry.id, entry.residentTransport)
     if (entry.headers !== undefined) modelHeaders.set(entry.id, { ...entry.headers })
     if (entry.streamIdleTimeoutMs !== undefined) modelStreamIdleTimeouts.set(entry.id, entry.streamIdleTimeoutMs)
     return {
@@ -1061,6 +1076,6 @@ export function resolveRouteModels(
   }
   return {
     models: serviceableModels, configuredMaxTokens, requestModels, requestProtocols,
-    nativeTools, modelHeaders, modelStreamIdleTimeouts, crossOriginModels, modelErrors,
+    nativeTools, residentTransports, modelHeaders, modelStreamIdleTimeouts, crossOriginModels, modelErrors,
   }
 }

@@ -38,6 +38,12 @@ Hybrid combines chunk results in source order. During a model switch it prices t
 
 Cold Session replay restores the committed checkpoint and original history. Hybrid records each successful chunk in the summary record so adapter replay can reproduce its output in call order. The source test suite uses synthetic Sessions and fake adapters.
 
+The [resident compaction example](../../../apps/cli/config/examples/kinf-resident-compaction.cordis.yml) opts Hybrid into an existing local KINF managed listener. It ranks the configured 27B variant ahead of Flash-Next when both are eligible. Set the order with `residentPreferredVariantIds`. Match each observation route to its pi-ai model row, including the listener and logical model. Enable `residentTransport: true` on those rows.
+
+Hybrid checks fresh observations for loaded text Chat deployments and compares the projected history estimate against the resident's reported runtime context and output budgets. KINF owns final admission. Automatic, manual, overflow, and model-switch compaction share the selector. Hybrid prices each packed chunk against the chosen window before dispatch and records the resident identity, selection reason, and each dispatched projection digest in the committed summary.
+
+The resident contract prohibits cold loads and evictions. A definite stale refusal before first admission permits one refresh and reselect. Missing eligible capacity ends with a typed `no-eligible` cause. An accepted request or uncertain delivery cannot trigger a reselect. The example uses an explicitly configured loopback listener. A conversation alias with a node suffix scopes selection to that configured node unless an explicit compaction allowlist is set.
+
 ### What you get
 
 With the default settings you get four behaviors: automatic condensation as the conversation grows toward the model's context limit; recovery after a confirmed context-overflow error, where the conversation condenses and the request retries; on-demand condensation through the `/compact` command; and — when the pruner is mounted — trimming of oversized tool outputs before condensation.
@@ -99,6 +105,9 @@ All settings are optional. With context window `W`, effective request output cap
 | `residentPreferredVariantIds` | — | Configured quality preference, most preferred first. |
 | `residentProvider` | — | DSH LLM provider route that fronts the gateway. |
 | `residentMaxAgeMs` | `60000` | Maximum accepted observation age, 1–60000 ms. |
+| `residentObservationRoutes` | — | Hybrid KINF loopback bindings with node ID, node name, instance, logical model, and URL. |
+
+For incremental Hybrid compaction, a successful `compaction/end` commits the matching replacement, coverage, and Fact Ledger together. After an interrupted or failed close, the previous committed checkpoint and unprocessed raw history remain active.
 
 Misconfiguration fails fast: unknown settings, duplicate per-model overrides, invalid token counts, both retention forms together, or a retention ratio at least as large as the threshold ratio reject the plugin at load. When the model is first used, `W − O − B` must be positive and the resolved retained budget must be below the trigger. Zero headroom requires an explicit positive `maxTokens`, globally or in that model policy. Explicit headroom must fit the window. An omitted summary cap follows the adjusted headroom on the conversation route when it declares a window, with a minimum of one token. Explicit summary targets keep their configured or inherited cap. Lower `thresholdRatio` to compact earlier.
 
@@ -123,9 +132,13 @@ The oldest balanced span is replaced by one summary message and the recent tail 
 
 ### Switching models
 
-Before a changed provider/model request is committed, automatic compaction measures the existing history against the destination model's capacity, output reservation, and pressure policy. When condensation is needed, it uses the previous routed model and its summary settings; an explicitly configured summary target still takes precedence. The destination request proceeds only after history falls below its threshold. Failure reports `MODEL_SWITCH_COMPACTION_FAILED` with the previous route, destination route, effective summarizer, and failure stage, and leaves the previous request header intact; completed pruning or condensation remains in the session even when a later attempt fails. The check runs when the next request is prepared, and `auto: false` disables it.
+Before a changed provider/model request is committed, Basic automatic compaction measures the existing history against the destination model's capacity, output reservation, and pressure policy. When condensation is needed, it uses the previous routed model and its summary settings; an explicitly configured summary target still takes precedence. The destination request proceeds only after history falls below its threshold. Failure reports `MODEL_SWITCH_COMPACTION_FAILED` with the previous route, destination route, effective summarizer, and failure stage, and leaves the previous request header intact; completed pruning or condensation remains in the session even when a later attempt fails. The check runs when the next request is prepared, and `auto: false` disables it.
 
 The destination must have a registered adapter, declared context capacity, and a valid pressure budget even for short history. For example, an unconfigured 65,536-token destination that reserves 32,768 output tokens uses 4,096 headroom and a 28,672-token pressure threshold. Set `modelPolicies[].headroomTokens` to override that policy for an exact route. See the [upgrade guide](../../../docs/upgrade-guide/v0.2.1-alpha.4/model-switch-compaction/guide.md) for migration.
+
+The opt-in Hybrid backend estimates the full pending request and checks it against the destination's declared context capacity and effective completion reservation. It skips automatic compaction for the switch when that request fits. If the request exceeds capacity, the destination pressure policy sizes the replacement. The transport limits a fallback completion cap to the capacity left after input.
+
+With automatic compaction enabled and a declared context window, final admission checks the frozen adapter request after attachment and tool projection. It records the estimated input, output reservation, and window in `request/admission`. A persisted Session requires its own write handle to acknowledge the durable receipt before dispatch. A missing acknowledgement raises `CONTEXT_ADMISSION_REFUSED` and asks the caller to reopen the Session. A budget refusal or flush failure stops dispatch. An in-memory Session records the receipt in its live log.
 
 ### On-demand condensation with /compact
 

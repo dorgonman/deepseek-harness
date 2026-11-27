@@ -211,6 +211,8 @@ export interface RunOptions {
    * child, never the supplied parent.
    */
   workspaceParent?: string
+  /** Fixed JSON-quoted workspace path length for scenarios that assert token estimates. */
+  workspaceCwdTextLength?: number
   /**
    * Alternate live profile patch (absolute), overriding
    * {@link AgentUnderTest.configPath} for this run. Its basename still ends
@@ -246,7 +248,16 @@ export function snapshotSpillRoot(
  * @returns The captured stdout/stderr, session id, generated cwd, and harvested logs.
  */
 export async function runScenario(input: InputScript, opts: RunOptions): Promise<RunResult> {
-  const cwd = await mkdtemp(join(opts.workspaceParent ?? tmpdir(), 'acp-snap-cwd-'))
+  const workspaceParent = opts.workspaceParent ?? tmpdir()
+  const workspacePrefix = 'acp-snap-cwd-'
+  let workspaceTemplate = join(workspaceParent, workspacePrefix)
+  if (opts.workspaceCwdTextLength !== undefined) {
+    workspaceTemplate = join(realpathSync(workspaceParent), workspacePrefix)
+    const paddingLength = opts.workspaceCwdTextLength - JSON.stringify(`${workspaceTemplate}XXXXXX`).length
+    if (paddingLength < 0) throw new Error('snapshot workspace parent exceeds its fixed cwd text length')
+    workspaceTemplate += '-'.repeat(paddingLength)
+  }
+  const cwd = await mkdtemp(workspaceTemplate)
   const cwdAliases = [...new Set([realpathSync(cwd), realpathSync.native(cwd)])]
   const sessionsRoot = await mkdtemp(join(tmpdir(), 'acp-snap-sessions-'))
   let spillRoot: string | undefined

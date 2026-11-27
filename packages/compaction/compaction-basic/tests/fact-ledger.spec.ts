@@ -74,20 +74,23 @@ it('rejects empty claims, duplicate sources, unknown sources and dangling supers
   expect(() => createFacts([{ ...base, sourceEventIds: [SessionSeq(9999)] }], events))
     .toThrow(/outside the log/)
   const [fact] = createFacts([base], events)
-  expect(() => mergeFacts([fact!], [{ ...fact!, supersedes: ['unknown-fact'] }]))
+  expect(() => mergeFacts([fact!], [{ ...fact!, supersedes: ['unknown-fact'] }], events))
     .toThrow(/supersedes unknown/)
 })
 
-it('deduplicates identical facts and unions their sources and seen bounds', () => {
+it('deduplicates identical facts and binds their full source union', () => {
   const session = conversation(3)
   const events = session.snapshotEvents()
   const base = inputs(session)[0]!
   const later = events.filter(event => event.type === 'user/message')[2]!.seq
   const [first] = createFacts([base], events)
   const [sameFactLater] = createFacts([{ ...base, sourceEventIds: [later] }], events)
-  const merged = mergeFacts([first!], [sameFactLater!])
+  const merged = mergeFacts([first!], [sameFactLater!], events)
+  const [expected] = createFacts([{ ...base, sourceEventIds: [...base.sourceEventIds, later] }], events)
   expect(merged).toHaveLength(1)
   expect(merged[0]!.sourceEventIds).toEqual([...first!.sourceEventIds, later].sort((a, b) => a - b))
+  expect(merged[0]!.evidenceDigest).toBe(expected!.evidenceDigest)
+  expect(() => { validateLedger(merged, events) }).not.toThrow()
   expect(merged[0]!.firstSeenSeq).toBe(first!.firstSeenSeq)
   expect(merged[0]!.lastSeenSeq).toBe(later)
   expect(merged[0]!.status).toBe('active')
@@ -102,7 +105,7 @@ it('applies an explicit update and excludes the superseded fact from the view', 
     ...base, claim: 'Use only the 27B resident summarizer.', sourceEventIds: [base.sourceEventIds[1]!],
     supersedes: [oldFact!.factId],
   }], events)
-  const merged = mergeFacts([oldFact!], [newFact!])
+  const merged = mergeFacts([oldFact!], [newFact!], events)
   expect(merged.find(fact => fact.factId === oldFact!.factId)).toMatchObject({
     status: 'superseded', supersededBy: newFact!.factId,
   })
@@ -117,7 +120,7 @@ it('keeps conflicting claims as disputed rather than choosing a winner', () => {
   const base = inputs(session)[0]!
   const [first] = createFacts([base], events)
   const [conflicting] = createFacts([{ ...base, claim: 'Use a cloud summarizer.' }], events)
-  const merged = mergeFacts([first!], [conflicting!])
+  const merged = mergeFacts([first!], [conflicting!], events)
   expect(merged.map(fact => fact.status)).toEqual(['disputed', 'disputed'])
   const view = composeCompactView(merged, { maxTokens: 1000, tokensOf: () => 1 })
   expect(view.facts).toHaveLength(2)

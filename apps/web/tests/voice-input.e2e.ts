@@ -8,6 +8,7 @@ import { expect, it, onTestFinished, vi } from 'vitest'
 import type { SpeechInput, SpeechPreparationState, SpeechProviderId } from '@deepseek-ai/dsh-experimental-speech-to-text/types'
 import type {} from '@deepseek-ai/dsh-experimental-speech-to-text'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   captureStableAria, compareOrRefreshGolden, fixtureUserPrompts, launchWebScaffold, webSnapshotMode, watchConsole,
   type WebScaffold,
 } from './scaffold.ts'
@@ -32,6 +33,8 @@ it.skipIf(webSnapshotMode() === 'record')('guides voice setup, records from stan
   const prompt = fixtureUserPrompts(await readFile(fixture, 'utf8'))[0]!
   const prefix = 'Use the bash tool to '
   const scaffold = await launchWebScaffold({ profile: { packages: [{ dir: bundle, enabled: true }] },
+    workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+    pinAdmissionSourceRoot: true,
     extraOverlayPath: overlay, replayFixture: fixture, compareReplaySession: 'read-only',
   })
   resources.scaffold = scaffold

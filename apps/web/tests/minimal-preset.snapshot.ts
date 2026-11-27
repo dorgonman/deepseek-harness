@@ -14,6 +14,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFixtureInventory,
   captureStableAria,
   compareOrRefreshGolden,
@@ -50,7 +51,10 @@ describe('minimal agent preset', () => {
   let tripwire: ReturnType<typeof watchConsole> | undefined
 
   beforeAll(async () => {
-    scaffold = await launchWebScaffold({ replayFixture: FIXTURE, compareReplaySession: true, paceMs: 10 })
+    scaffold = await launchWebScaffold({
+      replayFixture: FIXTURE, compareReplaySession: true, paceMs: 10,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+    })
     disposeInjectedPrompt = scaffold.ctx.systemPrompt.section({
       name: 'test:injected-prompt',
       order: 999,
@@ -220,7 +224,10 @@ describe('minimal manual compaction', () => {
     expect(prompts).toHaveLength(2)
     const [initial, continuation] = prompts
     if (initial === undefined || continuation === undefined) throw new Error('minimal compaction fixture requires two user prompts')
-    scaffold = await launchWebScaffold({ replayFixture: fixture, compareReplaySession: true, workspacePathLength: 192 })
+    scaffold = await launchWebScaffold({
+      replayFixture: fixture, compareReplaySession: true,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+    })
     scaffold.ctx.on('llm/stream', async function* (options, next) {
       requests.push(options)
       yield* next()
@@ -365,6 +372,7 @@ describe('minimal image reading', () => {
   beforeAll(async () => {
     scaffold = await launchWebScaffold({
       replayFixture: join(snapshotDir, 'session.v4.jsonl'), compareReplaySession: true, paceMs: 10,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
     })
     await writeFile(join(scaffold.workspaceCwd, 'red.png'), Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', 'base64',

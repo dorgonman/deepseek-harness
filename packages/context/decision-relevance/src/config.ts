@@ -92,7 +92,11 @@ export function resolveConfig(config: DecisionRelevanceConfig = {}): ResolvedCon
  * @param config - a resolved configuration.
  * @returns whether the feature is enabled and has an explicit route.
  */
-export function isEffective(config: ResolvedConfig): boolean {
+export function isEffective(config: ResolvedConfig): config is ResolvedConfig & {
+  readonly mode: 'on'
+  readonly provider: string
+  readonly model: string
+} {
   return config.mode === 'on' && config.provider !== undefined && config.model !== undefined
 }
 

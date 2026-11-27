@@ -44,7 +44,8 @@ type Tail<K extends AgentSubjectEvent> = Params<Events[K]> extends [unknown, ...
  * field, which the fused dispatcher injects so subject and scope key cannot
  * diverge.
  */
-type PayloadRest<K extends AgentSubjectEvent> = Omit<PayloadOf<K> & object, 'agent'>
+type WithoutAgent<T> = T extends object ? Omit<T, 'agent'> : never
+type PayloadRest<K extends AgentSubjectEvent> = WithoutAgent<PayloadOf<K>>
 
 /**
  * The fused dispatcher {@link agentEvents} returns: each method dispatches the

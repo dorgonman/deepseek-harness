@@ -9,8 +9,9 @@
  * fixtures and rewrites expected outputs.
  */
 
+import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { appendFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -65,11 +66,15 @@ import {
   type SdkUserQuestionResult,
 } from '@deepseek-ai/dsh-sdk-client'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import { sessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog'
+import type { SessionFormatEvent } from '@deepseek-ai/dsh-session-format'
 import { deriveReplayScript, parseSessionLog } from '@deepseek-ai/dsh-llm-replay'
+import { estimateMessage } from '@deepseek-ai/dsh-token-meter/estimate'
 
 const corpusRoot = fileURLToPath(new URL('../', import.meta.url))
 
 const MINIMAL_SYSTEM_PROMPT = 'You are the environment-selected minimal software engineer.'
+const INTERRUPTED_CHECKPOINT = 'Unpublished compaction checkpoint.'
 const MINIMAL_BASH_DESCRIPTION = `Run commands in a bash shell
 * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
 * You don't have access to the internet via this tool.
@@ -167,6 +172,10 @@ const SDK_ASSERTIONS: Readonly<Record<string, SdkAssertions>> = {
     patches: [fileURLToPath(new URL('./manual-compact/capture.cordis.yml', import.meta.url))],
     modelRequestsFile: 'compact-requests.jsonl',
     replayStandaloneCommands: true,
+  },
+  'session-resume': {
+    patches: [fileURLToPath(new URL('./manual-compact/capture.cordis.yml', import.meta.url))],
+    modelRequestsFile: 'compact-requests.jsonl',
   },
   'permission-switch': {
     expectedFinalResponse: 'SDK_PERMISSION_OK',
@@ -364,6 +373,36 @@ async function persistedLogs(sessionsRoot: string): Promise<PersistedLog[]> {
   }))
 }
 
+/** Leave the journal at the durable prefix immediately before the compaction close. */
+async function appendInterruptedCompaction(log: PersistedLog, route: { provider: string; model: string }): Promise<void> {
+  const events = parseSessionLog(log.content)
+  const last = events.at(-1)
+  const original = events.find(event => event.type === 'user/message' && event.data.source.kind === 'user')
+  if (last === undefined || original?.type !== 'user/message') throw new Error('resume fixture has no original user message')
+  const compactionId = randomUUID()
+  const content = [{ type: 'text', text: INTERRUPTED_CHECKPOINT }]
+  const range = { start: original.seq, end: original.seq }
+  const interrupted: SessionFormatEvent[] = [
+    {
+      type: 'compaction/start', seq: last.seq + 1, time: last.time,
+      data: { compactionId, turn: null },
+    }, {
+      type: 'compaction/summary', seq: last.seq + 2, time: last.time,
+      data: {
+        compactionId, ...route, summary: content, ledger: [],
+        shadowedRange: range, shadowedSeqs: [original.seq], shadowedTokenCount: estimateMessage(original.data),
+      },
+    }, {
+      type: 'user/message', seq: last.seq + 3, time: last.time,
+      data: { role: 'user', id: randomUUID(), content, source: { kind: 'compact-checkpoint', compactionId } },
+      surfaceOp: { op: 'replace', startSeq: range.start, endSeq: range.end },
+      sourceEventSeqs: [original.seq],
+    },
+  ]
+  const records = interrupted.map(event => JSON.stringify(sessionFormatCatalog.encodeCurrentEvent(event)))
+  await appendFile(log.path, records.join('\n') + '\n')
+}
+
 interface LoggedRequestHeader {
   type?: string
   data?: { header?: { tools?: LoggedTool[] } }
@@ -448,10 +487,11 @@ async function fixtureFiles(scenario: CorpusScenario): Promise<string[]> {
 
 async function hydrateReplayFixtures(scenario: CorpusScenario, cwd: string): Promise<string[]> {
   const root = join(cwd, '.replay-fixtures')
+  const jsonCwd = JSON.stringify(cwd).slice(1, -1)
   await mkdir(root, { recursive: true })
   return Promise.all((await fixtureFiles(scenario)).map(async (source) => {
     const destination = join(root, basename(source))
-    await writeFile(destination, (await readFile(source, 'utf8')).replaceAll('{{cwd}}', cwd))
+    await writeFile(destination, (await readFile(source, 'utf8')).replaceAll('{{cwd}}', () => jsonCwd))
     return destination
   }))
 }
@@ -752,7 +792,9 @@ async function runScenario(scenario: CorpusScenario): Promise<{
 }> {
   const workspaceParent = await realpath(tmpdir())
   let workspacePrefix = `sdk-snapshot-${scenario.name}-`
-  const fixedWidthCwd = scenario.name === 'minimal-image-compaction' || scenario.name === 'manual-compact'
+  const fixedWidthCwd = scenario.name === 'minimal-image-compaction'
+    || scenario.name === 'manual-compact'
+    || scenario.name === 'session-resume'
   if (fixedWidthCwd) {
     // mkdtemp appends six characters; JSON quoting is part of the runtime-context text.
     const paddingLength = 192 - JSON.stringify(join(workspaceParent, `${workspacePrefix}XXXXXX`)).length
@@ -943,6 +985,9 @@ async function runScenario(scenario: CorpusScenario): Promise<{
         if (scenario.name === 'session-resume' && results.length > 0) {
           subscription.close()
           await harness.close()
+          const log = (await persistedLogs(sessionsRoot)).find(item => item.header.id === sessionId)
+          if (log === undefined) throw new Error('resume fixture did not persist the first turn')
+          await appendInterruptedCompaction(log, route)
           await prepareTurnReplay(action.turn)
           harness = createHarness('deepseek-v4-pro')
           await harness.start()
@@ -1401,6 +1446,23 @@ describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
         expect(continuationMessages.map(message => message.content)).toContainEqual(notices[0]?.data.content)
         expect(texts).not.toContain('/permission read-only')
         expect(texts).not.toContain('preset read-only')
+      }
+      if (scenario.name === 'session-resume') {
+        const parent = ordered[0]
+        if (parent === undefined) throw new Error('resume fixture has no persisted Session')
+        const events = parseSessionLog(parent.content)
+        const source = events.find(event => event.type === 'user/message' && event.data.source.kind === 'user')
+        const candidate = events.find(event => event.type === 'user/message' && event.data.source.kind === 'compact-checkpoint')
+        if (source?.type !== 'user/message' || candidate?.type !== 'user/message') {
+          throw new Error('resume fixture did not retain both journal rows')
+        }
+        expect(candidate.sourceEventSeqs).toEqual([source.seq])
+        expect(events.filter(event => event.type.startsWith('compaction/')).map(event => event.type))
+          .toEqual(['compaction/start', 'compaction/summary'])
+        expect(modelRequests).toHaveLength(2)
+        const resumedMessages = modelRequests[1]?.messages as JsonObject[]
+        expect(resumedMessages).toContainEqual(source.data)
+        expect(resumedMessages.map(message => message.content)).not.toContainEqual(candidate.data.content)
       }
       if (scenario.name === 'manual-compact') {
         const parent = ordered[0]

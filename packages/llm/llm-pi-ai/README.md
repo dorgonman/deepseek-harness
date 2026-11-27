@@ -100,6 +100,8 @@ Set `nativeTools: false` on a model entry or override to disable native tool dec
 
 An explicit per-model `requestProtocol: kinf-decision-v1` selects KINF's first-token Decision operation. It requires `api: openai-completions`, `maxTokens: 1`, `input: [text]`, and `reasoningEfforts: false`; omission retains ordinary pi-ai dispatch. The request sends `kinf_decision: label_scores` with native streaming disabled and accepts only plain-text system, user, and assistant history. Native tools, reasoning, stop controls, nonzero temperature, and output caps other than one are refused. The completed JSON response is limited to 64 KiB and validated for both logits, both uncalibrated label scores, token usage, and the exact served identity. Its native `length` finish completes the Decision successfully. Conversation text contains only the validated `model`, `decision`, `served_identity`, and `usage` fields; private or unknown response fields are omitted. No ordinary-chat or alternate-provider fallback is attempted.
 
+A model row with `residentTransport: true` accepts a KINF resident binding and sends the request to the dedicated resident-only endpoint. If the binding supplies an observed origin, the adapter requires the model endpoint to match it before dispatch. Only a resident-contract HTTP 409 that explicitly reports zero admission and start with a known stale-target code permits caller reselect.
+
 Model endpoint overrides on another origin require a custom keyless provider route. A resolved API key, a named credential reference, or an installed catalog provider's ambient/OAuth authentication refuses that override before dispatch. Same-origin overrides retain provider authentication. Explicit deployment headers apply to their configured endpoints; configure only trusted endpoints.
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-llm-pi-ai) is the exhaustive source for every accepted field and its JSDoc.
@@ -134,7 +136,7 @@ A route pi-ai does not ship needs `api`, `baseURL`, and a non-empty `models` lis
 
 Provider HTTP 408 responses and errors carrying `code: request_timeout` map to `TIMEOUT`, even when the provider's generic error type is `invalid_request_error`. Cancellation wording alone does not make a failure retryable; the route's retry policy controls recovery.
 
-The idle interval bounds each outstanding read of a converted stream chunk for Chat and Decision requests, excluding consumer processing time. SSE comments, dropped start events, and usage-only frames do not extend it. Expiry fails with `TIMEOUT` and aborts the provider request; caller cancellation remains `ABORTED`. This interval is independent of `timeoutMs`.
+The idle interval bounds each outstanding read of a converted stream chunk for Chat and Decision requests, excluding consumer processing time. Nonempty text received from resident Chat rearms the idle watchdog while the adapter buffers the reply for terminal validation. SSE comments, dropped start events, and usage-only frames do not extend the interval. Expiry fails with `TIMEOUT` and aborts the provider request; caller cancellation remains `ABORTED`. This interval is independent of `timeoutMs`.
 
 Config updates strictly validate changed providers. Initial loading retains stored catalog failures as editable provider diagnostics; unchanged failed providers do not block edits elsewhere. Serviceable models remain selectable, and unresolved models fail before network I/O. Repairing or deleting the offending configuration clears its diagnostic.
 

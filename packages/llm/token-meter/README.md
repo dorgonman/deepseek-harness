@@ -33,12 +33,14 @@ Choose it when several plugins should agree on one replay-based measurement — 
 
 ### Measuring pressure
 
-`ctx.tokenMeter` exposes two operations. `measure(session, requestHeader?)` returns a detached, deeply immutable snapshot at one consumed-log revision: `totalTokens` is request-and-response pressure, and `surfaceTokens` is the surface-only route-priced total equal to the sum of `nodes[].tokens`. An optional `requestHeader` override selects the priced route and pressure fields; the node set still describes the current session. `estimateMessage(message)` prices one message with the fixed heuristic. Every call clones the positional surface nodes, so measurement is O(surface).
+`measure(session, requestHeader?)` returns a detached, deeply immutable snapshot at one consumed-log revision: `totalTokens` is request-and-response pressure, and `surfaceTokens` is the surface-only route-priced total equal to the sum of `nodes[].tokens`. An optional `requestHeader` override selects the priced route and pressure fields; the node set still describes the current session. `estimateMessage(message)` prices one message with the fixed heuristic. Each measurement clones the positional surface nodes, so it is O(surface).
 
 ```text
 const { totalTokens, surfaceTokens, nodes } = ctx.tokenMeter.measure(session)
 const price = ctx.tokenMeter.estimateMessage(message)
 ```
+
+`estimateRequest(messages, tools, pricing?)` estimates the adapter-facing request from its projected messages and tool declarations. A prepared route may supply visual charges and accompanying text for retained image blocks. Text, including projected file handles and image substitutions, uses the fixed heuristic.
 
 Each measurement resolves the effective envelope's provider/model through the optional `llm` service. Image occurrences use the routed request's visual-token price plus model-visible text when the adapter declares pricing, and occurrences selected by an `image/offload` event are priced as the route's placeholder text exactly as the surface sends them; other routes keep the fixed heuristic. File occurrences use the exact route-independent handle text that the same `llm` service resolves for adapter dispatch, including its current execution-world path or explicit no-path message. Each node also carries route-independent `heuristicTokens` for replacement shadow prices. Provider usage is reused only when the latest successful call's canonical request envelope matches the measured envelope and its total is no lower than that call's full route-priced anchor; otherwise the complete current envelope and surface are estimated. Surface changes stay signed relative to a matching anchor repriced under the same route, including negative deltas after shrinking replacements.
 
@@ -103,7 +105,7 @@ Each `measure()` call synchronizes the fold to the current durable tail, then re
 
 ### Projection semantics
 
-`contextBreakdown` retains only the surviving `system/message` nodes with their heuristic prices, one running surface total, and at most one armed shadow-price claim; a replacement subtracts the adjacent claim, whose `shadowedSeqs` also name the system prompts it removes, or the retained price of the one system prompt it rewrites ([decision](../../../.agents/notes/implemented/architecture/2026-10-13-context-breakdown-system-prompt-state.md)). Its state follows the number of surviving system prompts, not the message count; state version 6 invalidates positional checkpoints. `contextPressure` is the other scalar shadow-price consumer: replacements without adjacent claims contribute zero delta. The usage fold retains one last-sample slot because legal logs never report usage for an earlier step after a later step reports usage.
+`contextBreakdown` retains surviving `system/message` nodes with their heuristic prices, one running surface total, and one shadow-price claim. A replacement subtracts the adjacent claim or the retained price of the system prompt it rewrites. The claim's `shadowedSeqs` identify any removed system prompts ([decision](../../../.agents/notes/implemented/architecture/2026-10-13-context-breakdown-system-prompt-state.md)). `contextPressure` treats replacements without adjacent claims as zero delta. Both projections defer incremental compaction prices until the matching successful close. Their state versions are 7 and 6 respectively. The usage fold retains one last sample because usage reports follow step order.
 
 `./estimate` exports the stateless text/content estimators used by tool-result retention. Model adapters supply request-image costs through `imageRequestPricing`.
 

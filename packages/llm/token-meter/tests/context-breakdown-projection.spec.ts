@@ -11,7 +11,7 @@ import type { Session, SessionEvent, SessionSeq as SessionSeqType } from '@deeps
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import type { ContextBreakdownProjection } from '@deepseek-ai/dsh-token-meter/client'
-import { CompactionId } from '@deepseek-ai/dsh-compaction'
+import { CompactionId, compactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { contextBreakdownProjectionDefinition } from '../src/breakdown-projection.ts'
 import {
   estimateContent,
@@ -87,23 +87,76 @@ function replaceSystem(session: Session, node: SessionSeqType, text: string): Se
  * replaced span from the measurement service's own nodes and log the
  * shadow-price event directly before the replace.
  */
-function appendSummaryMeter(ctx: Context, session: Session, start: SessionSeqType, end: SessionSeqType): void {
+function appendSummaryMeter(ctx: Context, session: Session, start: SessionSeqType, end: SessionSeqType, gated = false): CompactionId {
   const nodes = ctx.tokenMeter.measure(session).nodes
   const startIdx = nodes.findIndex(node => node.seq === start)
   const endIdx = nodes.findIndex(node => node.seq === end)
   const shadowed = nodes.slice(startIdx, endIdx + 1)
+  const compactionId = CompactionId('context-breakdown-summary')
   session.append('compaction/summary', {
-    compactionId: CompactionId('context-breakdown-summary'),
+    compactionId,
     summary: [{ type: 'text', text: 'summary' }],
     shadowedRange: { start, end },
     shadowedSeqs: shadowed.map(node => node.seq),
     shadowedTokenCount: shadowed.reduce((total, node) => total + node.tokens, 0),
     provider: 'mock',
     model: 'mock',
+    ...gated ? { ledger: [], chunkCalls: [] } : {},
   })
+  return compactionId
 }
 
 describe('contextBreakdown session projection', () => {
+  it.each([true, false])('publishes checkpoint pricing only on successful close (%s)', async (clean) => {
+    const { ctx, session } = await harness()
+    appendSystem(session, 'head')
+    const first = appendUser(session, 'before compaction with a long message')
+    const last = appendSystem(session, 'x'.repeat(4000))
+    const before = projected(ctx, session)
+    const nodesBefore = ctx.tokenMeter.measure(session).nodes.map(node => node.seq)
+    const pressureBefore = ctx.sessionProjections.checkpoint(session).contextPressure?.val
+    const compactionId = appendSummaryMeter(ctx, session, first, last, true)
+    const replacement = session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'summary' }], source: compactCheckpointSource(compactionId),
+    }), { surfaceOp: { op: 'replace', startSeq: first, endSeq: last }, sourceEventSeqs: [first, last] })
+
+    const saved = ctx.sessionProjections.checkpoint(session)
+    expect(projected(ctx, session)).toEqual(before)
+    expect(ctx.tokenMeter.measure(session).nodes.map(node => node.seq)).toEqual(nodesBefore)
+    expect(saved.contextPressure?.val).toHaveProperty('checkpoint.phase', 'replacement')
+    const end = session.append('compaction/end', {
+      compactionId, turn: null, ...clean ? {} : { error: 'cancelled' },
+    })
+    const restored = ctx.sessionProjections.restore(
+      saved, [end], SessionLogOffset(end.seq), session.header, session.inheritedEventCount,
+    )
+    expect(restored.checkpoint).toEqual(ctx.sessionProjections.checkpoint(session))
+    expect(projected(ctx, session)).toEqual(clean
+      ? { systemTokens: 5, toolsTokens: 0, messageTokens: 10 }
+      : before)
+    expect(ctx.tokenMeter.measure(session).nodes.map(node => node.seq)).toEqual(clean
+      ? [nodesBefore[0], replacement.seq]
+      : nodesBefore)
+    if (clean) expect(restored.checkpoint.contextPressure?.val).not.toEqual(pressureBefore)
+    else expect(restored.checkpoint.contextPressure?.val).toEqual(pressureBefore)
+  })
+
+  it('ignores the price of a replacement carrying a different checkpoint ID', async () => {
+    const { ctx, session } = await harness()
+    const original = appendUser(session, 'the original request stays visible')
+    const before = projected(ctx, session)
+    const priceBefore = ctx.tokenMeter.measure(session).nodes
+    const compactionId = appendSummaryMeter(ctx, session, original, original, true)
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'summary for a different checkpoint' }],
+      source: compactCheckpointSource(CompactionId('different-checkpoint')),
+    }), { surfaceOp: { op: 'replace', startSeq: original, endSeq: original }, sourceEventSeqs: [original] })
+    session.append('compaction/end', { compactionId, turn: null })
+
+    expect(projected(ctx, session)).toEqual(before)
+    expect(ctx.tokenMeter.measure(session).nodes).toEqual(priceBefore)
+  })
+
   it('serves zeros for an empty log', async () => {
     const { ctx, session } = await harness()
     expect(projected(ctx, session)).toEqual({ systemTokens: 0, toolsTokens: 0, messageTokens: 0 })
@@ -436,7 +489,7 @@ describe('contextBreakdown session projection', () => {
       ctx.sessionProjections.checkpoint(session),
     )) as ReturnType<typeof ctx.sessionProjections.checkpoint>
     const row = checkpoint['contextBreakdown']!
-    expect(row.ver).toBe(6)
+    expect(row.ver).toBe(7)
     expect(ctx.sessionProjections.viewCheckpoint(checkpoint).contextBreakdown).toEqual(projected(ctx, session))
     appendSummaryMeter(ctx, session, first, last)
     const meter = session.snapshotEvents().at(-1)!
@@ -457,7 +510,7 @@ describe('contextBreakdown session projection', () => {
       stale, session.snapshotEvents(), SessionLogOffset(0), session.header, session.inheritedEventCount,
     )
     expect(replayed.snapshot.values.contextBreakdown).toEqual(projected(ctx, session))
-    expect(replayed.checkpoint['contextBreakdown']?.ver).toBe(6)
+    expect(replayed.checkpoint['contextBreakdown']?.ver).toBe(7)
     const invalid = {
       ...checkpoint,
       contextBreakdown: {
@@ -491,7 +544,7 @@ describe('contextBreakdown session projection', () => {
         systemTokens: 8, toolsTokens: staleValue.toolsTokens, messageTokens: 9,
       })
       expect(restored.checkpoint).toEqual(current)
-      expect(restored.checkpoint['contextBreakdown']?.ver).toBe(6)
+      expect(restored.checkpoint['contextBreakdown']?.ver).toBe(7)
     } finally {
       await ctx.fiber.dispose()
     }

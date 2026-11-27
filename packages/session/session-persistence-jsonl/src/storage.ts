@@ -557,6 +557,7 @@ export class JsonlBackendTracker {
         return (async () => {
           await writer.drainLive()
           await writer.flush()
+          return writer
         })()
       })
       yield ctx.on('session/disposed', (session: Session) => {

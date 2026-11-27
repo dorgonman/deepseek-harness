@@ -13,6 +13,7 @@ import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 // Type-only: the `compaction/*` SessionEventMap merges (shadow-price events).
 import type {} from '@deepseek-ai/dsh-compaction'
 import { estimateMessage, estimateToolsTokens } from './estimate.ts'
+import { checkpointPriceTransition, meteredCheckpointSchema, type MeteredCheckpoint } from './surface-projection.ts'
 // Type-only: the client projection key and value declaration.
 import type {} from './projection.ts'
 
@@ -43,16 +44,28 @@ const claimSchema = z.object({
   systemSeqs: z.array(sessionSeq),
 }).strict()
 
-/** Plain-JSON checkpoint: surviving system prompts in surface order, the surface total, and an armed claim. */
-const contextBreakdownStateSchema = z.object({
+type SystemNode = z.infer<typeof systemNodeSchema>
+type BreakdownClaim = z.infer<typeof claimSchema>
+
+interface ContextBreakdownState {
+  systems: SystemNode[]
+  surfaceTokens: number
+  claim?: BreakdownClaim | undefined
+  checkpoint?: MeteredCheckpoint<{ deltaTokens: number; systemSeqs: SystemNode['seq'][] }> | undefined
+  breakdown: z.infer<typeof breakdownSchema>
+}
+
+/** Plain-JSON checkpoint: surviving system prompts, the surface total, and any pending price. */
+const contextBreakdownStateSchema: z.ZodType<ContextBreakdownState> = z.object({
   systems: z.array(systemNodeSchema),
   surfaceTokens: tokenCount,
   claim: claimSchema.optional(),
+  checkpoint: meteredCheckpointSchema(z.object({
+    deltaTokens: z.number().int(),
+    systemSeqs: z.array(sessionSeq),
+  }).strict()).optional(),
   breakdown: breakdownSchema,
 }).strict()
-type ContextBreakdownState = z.infer<typeof contextBreakdownStateSchema>
-type SystemNode = ContextBreakdownState['systems'][number]
-type BreakdownClaim = z.infer<typeof claimSchema>
 
 /** The system prompts and surface total after one surface event. */
 interface SurfaceTotals {
@@ -143,7 +156,7 @@ function withoutClaim(state: ContextBreakdownState): ContextBreakdownState {
  */
 export const contextBreakdownProjectionDefinition = {
   key: 'contextBreakdown',
-  stateVersion: 6,
+  stateVersion: 7,
   stateSchema: contextBreakdownStateSchema,
   init: (): ContextBreakdownState => ({
     systems: [],
@@ -151,6 +164,26 @@ export const contextBreakdownProjectionDefinition = {
     breakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: 0 },
   }),
   apply: (state, event) => {
+    const transition = checkpointPriceTransition(state.checkpoint, event, (replacement) => {
+      const totals = placeSurfaceEvent(state, state.claim, replacement, estimateMessage(replacement.data))
+      const remaining = new Set(totals.systems.map(system => system.seq))
+      return {
+        deltaTokens: totals.surfaceTokens - state.surfaceTokens,
+        systemSeqs: state.systems.filter(system => !remaining.has(system.seq)).map(system => system.seq),
+      }
+    })
+    if (transition !== undefined) {
+      const { checkpoint: _previous, ...rest } = state
+      state = transition.checkpoint === undefined ? rest : { ...rest, checkpoint: transition.checkpoint }
+    }
+    if (transition?.suppress === true) return withoutClaim(state)
+    if (transition?.publish !== undefined) {
+      const removed = new Set(transition.publish.systemSeqs)
+      return withTotals(withoutClaim(state), {
+        systems: state.systems.filter(system => !removed.has(system.seq)),
+        surfaceTokens: state.surfaceTokens + transition.publish.deltaTokens,
+      })
+    }
     if (event.type === 'compaction/summary' || event.type === 'compaction/prune') {
       const shadowed = new Set<number>(event.data.shadowedSeqs)
       return {

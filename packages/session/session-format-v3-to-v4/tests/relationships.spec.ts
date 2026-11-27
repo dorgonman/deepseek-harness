@@ -120,6 +120,7 @@ describe('mandatory V4 compaction restoration', () => {
       groups: [{ eventSeqs: [1], toolBodiesOmitted: false }],
       estimatedInputTokens: 100,
       contextWindow: 256,
+      reasoningEffort: 'low',
       rawOutput: [{ type: 'reasoning', text: 'trace' }, { type: 'text', text: 'summary' }],
       usage: { inputTokens: 100, outputTokens: 10 },
     }
@@ -134,6 +135,97 @@ describe('mandatory V4 compaction restoration', () => {
       { chunkCalls: [{ ...receipt, groups: [{ eventSeqs: [2], toolBodiesOmitted: false }] }] },
     ]) {
       expect(() => reopen(change(compact(), 3, { maxTokens: 32, ...fields }))).toThrow(/compaction chunk/)
+    }
+  })
+
+  it('rejects chunk receipts that omit required evidence or exceed the output cap', () => {
+    const group = { eventSeqs: [1], toolBodiesOmitted: false }
+    const receipt = {
+      groups: [group],
+      estimatedInputTokens: 100,
+      contextWindow: 256,
+      rawOutput: [{ type: 'text', text: 'summary' }],
+    }
+    for (const [fields, message] of [
+      [{ usage: { inputTokens: 100, outputTokens: 33 } }, /chunk output exceeds its cap/],
+      [{ rawOutput: [{ type: 'reasoning', text: 'trace' }, { type: 'text', text: '  ' }] }, /chunk output requires nonempty text/],
+      [{ groups: [] }, /chunk groups must be nonempty/],
+      [{ groups: [{ toolBodiesOmitted: false, eventSeqs: [] }] }, /chunk group requires sources/],
+      [{ groups: [{ ...group, toolBodiesOmitted: true }] }, /omits tool bodies without a tool result/],
+    ] as const) {
+      expect(() => reopen(change(compact(), 3, { maxTokens: 32, chunkCalls: [{ ...receipt, ...fields }] }))).toThrow(message)
+    }
+
+    const rows = compact()
+    rows[1] = { ...input('compact-checkpoint'), data: { ...rows[4]!.data } }
+    expect(() => reopen(change(rows, 3, { maxTokens: 32, chunkCalls: [receipt] }))).toThrow(/chunk source is a prior checkpoint/)
+
+    const toolGroup = { eventSeqs: [2, 4], toolBodiesOmitted: true }
+    const acceptedReceipt = { ...receipt, groups: [toolGroup] }
+    const completedToolTurn = [...begin(), assistant(), toolCall(), result(), ...end()]
+    const { artifact } = reopen([
+      ...completedToolTurn,
+      row('turn/start', { turn: 2 }),
+      row('compaction/start', { compactionId: 'c', turn: 2, sourceCommandId: 'cmd' }),
+      row('compaction/summary', {
+        ...compact()[3]!.data, shadowedRange: { start: 2, end: 4 }, shadowedSeqs: [2, 4],
+        maxTokens: 32, chunkCalls: [acceptedReceipt],
+      }),
+    ])
+    expect(artifact.events.at(-1)?.data).toMatchObject({ chunkCalls: [acceptedReceipt] })
+  })
+
+  it('retains the accepted deployment and exact chunk projections across a V4 reopen', () => {
+    const residentSelection = {
+      alias: 'qwen27@local',
+      gatewayId: 'local-kinf',
+      routeId: 'local-27b',
+      nodeId: 'node-a',
+      nodeName: 'local',
+      instance: 'managed',
+      servingVariantId: 'qwen27-mtp',
+      servingVariantRevision: 'chat-v1',
+      modelArtifact: 'qwen27-weights',
+      artifactRevision: 'weights-v1',
+      targetConfigRevision: 'config-1',
+      hostGeneration: 'host-1',
+      residentGeneration: 'resident-1',
+      reason: 'configured-preference',
+      projectionIds: ['a'.repeat(64)],
+    }
+    const chunkCalls = [{
+      groups: [{ eventSeqs: [1], toolBodiesOmitted: false }],
+      estimatedInputTokens: 100,
+      contextWindow: 256,
+      rawOutput: [{ type: 'text', text: 'summary' }],
+    }]
+    const summary = { model: residentSelection.alias, maxTokens: 32, chunkCalls, residentSelection }
+    const restored = reopen(change(compact(), 3, summary))
+    expect(restored.artifact.events[3]?.data).toMatchObject(summary)
+    expect(restored.messages).toEqual(reopen(change(compact(), 3, { ...summary, residentSelection: undefined })).messages)
+    expect(() => reopen(change(compact(), 3, { ...summary, chunkCalls: undefined }))).toThrow(/compaction resident selection/)
+    expect(() => reopen(change(compact(), 3, { ...summary, model: 'another@local' }))).toThrow(/compaction resident selection/)
+    expect(() => reopen(change(compact(), 3, { ...summary, residentSelection: null }))).toThrow(/compaction resident selection/)
+    for (const [alias, nodeName] of [
+      ['@local', 'local'], ['qwen27@local@unexpected', 'local'],
+      ['qwen27@bad.name', 'bad.name'], ['qwen27@auto', 'auto'],
+    ]) {
+      expect(() => reopen(change(compact(), 3, {
+        ...summary, model: alias, residentSelection: { ...residentSelection, alias, nodeName },
+      }))).toThrow(/compaction resident selection alias/)
+    }
+    for (const fields of [
+      { nodeName: 'another' },
+      { residentGeneration: undefined },
+      { reason: 'unverified' },
+      { projectionIds: [] },
+      { projectionIds: [1] },
+      { projectionIds: ['not-a-digest'] },
+      { projectionIds: ['a'.repeat(64), 'b'.repeat(64)] },
+    ]) {
+      expect(() => reopen(change(compact(), 3, {
+        ...summary, residentSelection: { ...residentSelection, ...fields },
+      }))).toThrow(/compaction resident selection/)
     }
   })
 

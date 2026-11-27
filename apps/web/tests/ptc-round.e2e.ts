@@ -8,6 +8,7 @@ import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   acknowledgeReloadConnectionLoss, captureExpandedTurnProcessAria, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -37,6 +38,8 @@ describe('web e2e: PTC mode round renders nested sub-calls', () => {
     scaffold = await launchWebScaffold({
       agentPresets: { default: 'ptc' },
       compareReplaySession: true,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+      pinAdmissionSourceRoot: true,
       ...(MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 15 }),
     })
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })

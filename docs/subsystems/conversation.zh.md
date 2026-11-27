@@ -255,6 +255,8 @@ match 结果带 `exclusive: true` 时，即在该 Definition 的 target 上认�
 
 `target` 与 `buildViewNode(context)` 必须同时声明一项由 target 拥有的渲染贡献。把 `context.key` 保留为 React 侧身份，根据持久排序证据选择 `anchorSeq`，并且只返回 renderer 可以直接使用的数据。某个 target Node 一旦发布，就要继续返回同一个 key；需要暂时离开可见流时使用 `visibility: 'hidden'`，不要改为返回 `null` 撤回它。
 
+用 `context.loadedEvent(seq)` 验证由 Node 的 Match 确定的有限持久事件区间。区间内缺少记录时无法完成验证。查询只读取当前历史窗口，不会请求历史页。
+
 Chat Node 还通过 `groupTree` 选择所在行的位置。位置由外到内排列，站在某个位置的 Node 同时具有所有内层位置的效果。Chat 的过程分组、整轮折叠和轮次输入判断只读取这个位置；完整契约见 [group-tree.ts](../../packages/client/ui-chat/src/client/contract/group-tree.ts)。
 
 | Node 是 | 声明 |

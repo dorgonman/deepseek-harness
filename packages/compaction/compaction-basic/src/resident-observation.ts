@@ -23,8 +23,8 @@ export interface ResidentObservationRequest {
   /** Cooperative cancellation for the transport call. */
   readonly signal?: AbortSignal
   /**
-   * Exact projected summary envelope, so the source can measure every
-   * candidate with its own target tokenizer for this projection.
+   * Projected summary envelope for candidate-specific prompt accounting.
+   * A source can supply an estimate when its listener has no tokenizer API.
    */
   readonly projection?: {
     readonly id: string
@@ -103,6 +103,7 @@ export type ResidentSourceSelection =
     readonly ok: true
     readonly target: Extract<SelectionResult, { ok: true }>['target']
     readonly receipt: ResidentSelectionReceipt
+    readonly contextTokens: number
   }
   | { readonly ok: false; readonly code: Extract<SelectionResult, { ok: false }>['code'] }
 
@@ -183,6 +184,11 @@ export async function selectResidentFromSource(
   })
   if (!result.ok) return result
   const winner = candidates.find(candidate => candidate.route.id === result.target.routeId)
-  if (winner === undefined) return { ok: false, code: 'resident_summary_no_eligible' }
-  return { ok: true, target: result.target, receipt: receiptFor(winner, result.reason, request.projectionId) }
+  if (winner?.model.budget == null) return { ok: false, code: 'resident_summary_no_eligible' }
+  return {
+    ok: true,
+    target: result.target,
+    receipt: receiptFor(winner, result.reason, request.projectionId),
+    contextTokens: winner.model.budget.contextTokens,
+  }
 }

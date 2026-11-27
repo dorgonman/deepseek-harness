@@ -13,9 +13,10 @@ import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { strToU8, zipSync } from 'fflate'
 import { chromium, type Browser } from 'playwright'
-import { expect, it, onTestFailed } from 'vitest'
+import { expect, it, onTestFailed, onTestFinished, vi } from 'vitest'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFixtureInventory, fixtureUserPrompts, launchWebScaffold, recordFixture, selectedSessionFixture,
   watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -122,9 +123,14 @@ async function importArchive(scaffold: WebScaffold, workspaceId: string): Promis
 it('continues a Session imported from a DeepSeek chat export with one model turn', async () => {
   if (MODE !== 'record') {
     expect(fixtureUserPrompts(await readFile(await selectedSessionFixture(FIXTURE), 'utf8')).at(-1)).toBe(PROMPT)
+    // Elapsed-time text contributes to admission. Boot with a fixed Host clock
+    // 20 seconds after the latest model-visible archive message.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(BASE + 200_000)
+    onTestFinished(() => { clock.mockRestore() })
   }
   const scaffold = await launchWebScaffold({
     profile: { packages: [{ dir: BUNDLE_DIR, enabled: true }] },
+    workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH, pinAdmissionSourceRoot: true,
     ...(MODE === 'record' ? {} : { replayFixture: FIXTURE, compareReplaySession: true }),
   })
   let browser: Browser | undefined

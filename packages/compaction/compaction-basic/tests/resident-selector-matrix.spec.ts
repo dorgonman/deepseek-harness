@@ -58,7 +58,7 @@ function candidate(variant = FLASH, placement: NodePlacement = LOCAL): FixtureCa
     measurement: {
       projectionId: PROJECTION_ID, hostGeneration: identity.host_generation,
       residentGeneration: identity.resident_generation, targetConfigRevision: identity.target_config_revision,
-      renderedPromptTokens: 600,
+      promptTokens: 600,
     },
   }
 }
@@ -253,10 +253,10 @@ rejectRows([
   ['measured a different host generation', (row) => { row.measurement!.hostGeneration = 'fixture-old-host' }],
   ['measured a different resident generation', (row) => { row.measurement!.residentGeneration = 'fixture-old-resident' }],
   ['measured a different target configuration', (row) => { row.measurement!.targetConfigRevision = 'fixture-old-config' }],
-  ['zero rendered prompt tokens', (row) => { row.measurement!.renderedPromptTokens = 0 }],
-  ['negative rendered prompt tokens', (row) => { row.measurement!.renderedPromptTokens = -1 }],
-  ['fractional rendered prompt tokens', (row) => { row.measurement!.renderedPromptTokens = 600.5 }],
-  ['unsafe rendered prompt count', (row) => { row.measurement!.renderedPromptTokens = Number.MAX_SAFE_INTEGER + 1 }],
+  ['zero rendered prompt tokens', (row) => { row.measurement!.promptTokens = 0 }],
+  ['negative rendered prompt tokens', (row) => { row.measurement!.promptTokens = -1 }],
+  ['fractional rendered prompt tokens', (row) => { row.measurement!.promptTokens = 600.5 }],
+  ['unsafe rendered prompt count', (row) => { row.measurement!.promptTokens = Number.MAX_SAFE_INTEGER + 1 }],
   ['no authoritative token budget', (row) => { row.model.budget = null }],
   ['non-finite context budget', (row) => { row.model.budget!.contextTokens = Infinity }],
   ['negative advertised input budget', (row) => { row.model.budget!.maxInputTokensAtMaxOutput = -1 }],
@@ -266,10 +266,10 @@ rejectRows([
 ])
 
 it('measured prompt + requested output + reserve can exactly fill context, not exceed it', () => {
-  const row = edit(candidate(), (value) => { value.measurement!.renderedPromptTokens = 1760 })
+  const row = edit(candidate(), (value) => { value.measurement!.promptTokens = 1760 })
   const atLimit = { outputTokens: 256, reserveTokens: 32 }
   expectTarget(request([row], atLimit), row, 'only-eligible')
-  const oneOver = edit(row, (value) => { value.measurement!.renderedPromptTokens++ })
+  const oneOver = edit(row, (value) => { value.measurement!.promptTokens++ })
   expectRefusal(request([oneOver], atLimit))
   expectRefusal(request([row], { ...atLimit, reserveTokens: 33 }))
   expectTarget(request([oneOver], { ...atLimit, outputTokens: 255 }), oneOver, 'only-eligible')
@@ -282,8 +282,8 @@ it('output cap is independent of context fit; zero reserve is allowed', () => {
 })
 
 it('fit is per-target tokenization, not one rendered count reused for every resident', () => {
-  const flash = edit(candidate(FLASH), (row) => { row.measurement!.renderedPromptTokens = 1761 })
-  const large = edit(candidate(TWENTY_SEVEN), (row) => { row.measurement!.renderedPromptTokens = 1760 })
+  const flash = edit(candidate(FLASH), (row) => { row.measurement!.promptTokens = 1761 })
+  const large = edit(candidate(TWENTY_SEVEN), (row) => { row.measurement!.promptTokens = 1760 })
   const overrides = { outputTokens: 256, reserveTokens: 32, preferredVariantIds: [FLASH.variantId] }
   for (const rows of permutations([flash, large])) expectTarget(request(rows, overrides), large, 'only-eligible')
 })
@@ -477,7 +477,7 @@ it('contradictory measurements for the same fresh residency do not pool proof', 
   const valid = candidate(FLASH)
   const invalid = edit(valid, (row) => {
     row.route.id += '-other-proof'
-    row.measurement!.renderedPromptTokens = 4096
+    row.measurement!.promptTokens = 4096
   })
   expectTarget(request([valid]), valid, 'only-eligible')
   expectRefusal(request([invalid]))

@@ -173,6 +173,12 @@ export interface ConversationNodeContext<State = unknown> {
   readonly start: ConversationStartMatch | undefined
   readonly state: State | undefined
   readonly current: ReadonlyMap<string, ConversationViewNode | null>
+  /**
+   * Read a durable event at a known sequence in the current history window.
+   * @param seq - durable event sequence.
+   * @returns the loaded record, or undefined when the window does not contain it.
+   */
+  readonly loadedEvent: (seq: number) => SessionEvent | undefined
 }
 
 /** Read-only predecessor returned to a Definition's start function. */

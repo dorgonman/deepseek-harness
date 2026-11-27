@@ -2,7 +2,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { parseSessionLog, prepareSessionSnapshotFixtureForComparison } from '@deepseek-ai/dsh-llm-replay'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-schedule'
 import type {} from '@deepseek-ai/dsh-subagent'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   fixtureUserPrompts, launchWebScaffold, normalizeWebSessionVolatiles, rawSessionLog, readPersistedEvents,
   recordedSessionFixturePath, selectedSessionFixture, webSnapshotMode,
 } from './scaffold.ts'
@@ -24,12 +25,17 @@ const DIR = fileURLToPath(new URL('../../../snapshots/web/subagent-fork-schedule
 const PIN = join(DIR, '../fresh-round-trip')
 const MODE = webSnapshotMode()
 
-it.skipIf(MODE === 'record')('replays inherited schedule tools and refusals in a seeded Web fork', async () => {
+it.skipIf(MODE === 'record')('replays inherited schedule tools and refusals in a seeded Web fork', async ({ onTestFinished }) => {
+  // The request meter counts the fallback time-zone label before snapshot normalization.
+  vi.stubEnv('TZ', 'UTC')
+  onTestFinished(() => { vi.unstubAllEnvs() })
   const paths = await Promise.all(['session.v4.jsonl', 'session.1.v4.jsonl']
     .map(file => selectedSessionFixture(join(DIR, file))))
   let expected = await Promise.all(paths.map(path => readFile(path, 'utf8')))
   const scaffold = await launchWebScaffold({
     replayFixture: paths[0]!, replayChildFixtures: [paths[1]!], compareReplaySession: false,
+    workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+    pinAdmissionSourceRoot: true,
   })
   try {
     const sessions: Session[] = []

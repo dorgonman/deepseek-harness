@@ -76,6 +76,36 @@ function snapshotMode(value: string | undefined): SnapshotMode {
 
 const mode = snapshotMode(process.env.DSH_SNAPSHOT)
 const RUNTIME_WORKSPACE_ENTRIES = ['.agents', '.dsh', '.snapshot-patches'] as const
+const FIXED_WIDTH_WORKSPACE_SCENARIOS = new Set([
+  'apply-patch-partial',
+  'apply-patch-rejected',
+  'apply-patch-update',
+  'claude-code-mods',
+  'compaction-output-reserve',
+  'compaction-policy-restore',
+  'compaction-recovery',
+  'compaction-summary-headroom',
+  'compaction-summary-missing-context',
+  'compaction-summary-no-text',
+  'compaction-text-only-summary',
+  'fs-write-overwrite-bounded',
+  'kinf-decision',
+  'mcp-empty',
+  'mcp-empty-ptc',
+  'mcp-resources',
+  'mcp-resources-ptc',
+  'mcp-template-error',
+  'model-switch-compaction',
+  'model-switch-notice',
+  'office-skills-no-renderer',
+  'pi-ai-model-idle-timeout',
+  'plugin-manager',
+  'plugin-manager-mcp',
+  'web-search-endpoint-guidance',
+  'web-search-legacy-endpoint-guidance',
+  'working-directory-consumers',
+  'worktree',
+])
 
 interface JsonObject {
   [key: string]: unknown
@@ -96,14 +126,14 @@ interface SessionLog {
   readonly header: JsonObject
 }
 
-/** Keep the cwd text priced by compaction independent of the platform's temporary-root length. */
-async function compactionWorkspaceOptions(): Promise<{ tempDirParent: string; tempDirPrefix: string }> {
-  const tempDirParent = await realpath(tmpdir())
+/** Keep the cwd text priced by admission and compaction independent of the temporary-root length. */
+async function fixedWidthWorkspaceOptions(parent: string): Promise<{ tempDirParent: string; tempDirPrefix: string }> {
+  const tempDirParent = await realpath(parent)
   const prefix = 'dsh-log-snap-'
   // mkdtemp appends six characters; JSON quoting is part of the runtime-context text.
   const unpaddedLength = JSON.stringify(join(tempDirParent, `${prefix}XXXXXX`)).length
   const paddingLength = 192 - unpaddedLength
-  if (paddingLength < 0) throw new Error('compaction snapshot temporary root exceeds its fixed cwd text length')
+  if (paddingLength < 0) throw new Error('snapshot workspace parent exceeds its fixed cwd text length')
   return { tempDirParent, tempDirPrefix: prefix + '-'.repeat(paddingLength) }
 }
 
@@ -1401,11 +1431,14 @@ describe('headless recorded-session snapshots', () => {
         ? await startHttpMcpFixture({ rejectToolCalls: scenario.name === 'mcp-template-error' }) : undefined
       let result: Awaited<ReturnType<typeof runLoaderSmoke>>
       try {
+        const workspaceParent = scenario.manifest.workspace?.parent === 'outside-temp'
+          ? outsideTempWorkspaceParent() : undefined
+        const workspaceOptions = FIXED_WIDTH_WORKSPACE_SCENARIOS.has(scenario.name)
+          ? await fixedWidthWorkspaceOptions(workspaceParent ?? tmpdir())
+          : { tempDirPrefix: 'dsh-log-snap-', ...(workspaceParent === undefined ? {} : { tempDirParent: workspaceParent }) }
         result = await runLoaderSmoke({
           label: `${scenario.name} headless snapshot`,
-          tempDirPrefix: 'dsh-log-snap-',
-          ...(scenario.name === 'compaction-recovery' ? await compactionWorkspaceOptions() : {}),
-          ...(scenario.manifest.workspace?.parent === 'outside-temp' ? { tempDirParent: outsideTempWorkspaceParent() } : {}),
+          ...workspaceOptions,
           binScript: dshBin,
           sourceImport: 'tsx/esm',
           configPath: join(baseComposition.dir, 'cordis.yml'),

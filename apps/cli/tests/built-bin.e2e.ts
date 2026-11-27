@@ -619,7 +619,8 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
   it('runs the headless profile through its app-owned task positional', async () => {
     const apiKey = 'built-dsh-headless-key'
     const server = await startMockLlmServer({
-      sequence: ['reasoning_success'],
+      // The shipped profile can request its first Session title before the task dispatch.
+      sequence: ['reasoning_success', 'reasoning_success'],
       apiKey,
       reasoningText: 'Inspecting the published entry.',
       successText: 'published headless profile reached the mock',
@@ -635,9 +636,12 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       expect(result.code, result.stderr).toBe(0)
       expect(result.stdout).toBe('published headless profile reached the mock')
       expect(result.stderr).toBe('dsh: reasoning:\nInspecting the published entry.')
-      expect(server.requests.length).toBeGreaterThan(0)
+      expect(server.requests.length).toBeLessThanOrEqual(2)
       expect(server.requests.every(request => request.path === '/v1/messages')).toBe(true)
-      expect(JSON.stringify(server.requests.map(request => request.body))).toContain('answer from the published entry')
+      const bodies = server.requests.map(request => JSON.stringify(request.body))
+      const taskBodies = bodies.filter(body => !body.includes('Generate the session title'))
+      expect(taskBodies).toHaveLength(1)
+      expect(taskBodies[0]).toContain('answer from the published entry')
     } finally {
       await server.close()
       rmSync(home, { recursive: true, force: true })

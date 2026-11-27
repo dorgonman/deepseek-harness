@@ -23,6 +23,7 @@ import {
   SessionLogOffset,
   SessionSeq,
 } from '@deepseek-ai/dsh-session'
+import { advanceCompactionCheckpoint, type DeferredCompactionReplacement, type PendingCompactionCheckpoint } from '@deepseek-ai/dsh-session/surface'
 import type { ProjectionHandle } from '@deepseek-ai/dsh-session-projection'
 import type {
   ContextPressureProjection,
@@ -38,7 +39,7 @@ import { advanceMeasurement, measurementProjectionDefinition } from './measureme
 import type { MeasurementState } from './measurement-projection.ts'
 import { commitSurfaceTokens, planSurfaceTokens } from './surface-fold.ts'
 import type { MeterSurfaceNode } from './surface-fold.ts'
-import { priceSurface } from './route-pricing.ts'
+import { estimateRequestTokens, priceSurface } from './route-pricing.ts'
 
 export type * from './types.ts'
 
@@ -46,6 +47,7 @@ export type * from './types.ts'
 interface ReplayState {
   consumedEvents: SessionLogOffsetType
   surface: MeterSurfaceNode[]
+  checkpoint?: PendingCompactionCheckpoint<{ readonly replacement: DeferredCompactionReplacement }>
   header: { seq: SessionSeqType | null; value: EpochHeader } | undefined
   anchorHeader: { seq: SessionSeqType | null; value: EpochHeader } | undefined
   anchorNodes: readonly MeterSurfaceNode[]
@@ -230,6 +232,21 @@ export class TokenMeter extends Service {
     return estimateToolSchemasTokens(tools)
   }
 
+  /**
+   * Estimate input tokens for the projected request sent to the adapter.
+   * @param messages - messages with files and text-only image substitutions already projected.
+   * @param tools - tool declarations sent with the request.
+   * @param pricing - image pricing from the prepared route, when declared.
+   * @returns estimated input tokens with declared visual charges where available.
+   */
+  estimateRequest(
+    messages: readonly RequestMessage[],
+    tools: readonly ToolSchema[] | undefined,
+    pricing?: LlmImageRequestPricing,
+  ): number {
+    return estimateRequestTokens(messages, tools, pricing)
+  }
+
   /** Resolve one of the two header payloads retained by the rebuildable price cache. */
   private _cachedHeader(state: ReplayState, seq: SessionSeqType | null): EpochHeader | undefined {
     if (seq === null) return undefined
@@ -294,12 +311,19 @@ export class TokenMeter extends Service {
         }
       })
     }
-    const plan = isSurfaceEvent(event) ? planSurfaceTokens(state.surface, event) : undefined
+    const transition = advanceCompactionCheckpoint(state.checkpoint, event)
+    let visible = isSurfaceEvent(event) ? event : undefined
+    if (transition?.kind === 'defer' || transition?.kind === 'suppress') visible = undefined
+    if (transition?.kind === 'publish') visible = transition.checkpoint.replacement.event
+    const plan = visible === undefined ? undefined : planSurfaceTokens(state.surface, visible)
     if (event.type === 'assistant/message') {
       state.anchorNodes = [...state.surface]
       state.anchorHeader = state.header
     }
     if (plan !== undefined) commitSurfaceTokens(state.surface, plan)
+    if (transition?.kind === 'arm') state.checkpoint = transition.checkpoint
+    else if (transition?.kind === 'defer') state.checkpoint = { ...transition.checkpoint, replacement: transition.replacement }
+    else if (transition !== undefined) delete state.checkpoint
   }
 }
 

@@ -59,6 +59,10 @@ export const LLM_FAILURE_CODES = {
   REASONING_BUDGET_UNFIT: {},
   REQUEST_EXTENSION: {},
   REQUEST_HEADERS: {},
+  /** A resident refusal after admission: dispatch may have happened, so a retry could duplicate output. */
+  RESIDENT_ACCEPTANCE_AMBIGUOUS: {},
+  /** A resident refusal proven before admission: nothing was dispatched, so a retry cannot duplicate output. */
+  RESIDENT_PRECONDITION_STALE: {},
   SERVER: { retryChoice: true },
   STREAM_CLOSED: { retryChoice: true },
   SUMMARY_CAPACITY_EXCEEDED: {},

@@ -6,6 +6,7 @@ import { chromium, type Browser, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -30,7 +31,11 @@ describe('web e2e: recommended multi-select options', () => {
 
   beforeAll(async () => {
     if (MODE !== 'record') hostClock = pinHostClock()
-    scaffold = await launchWebScaffold(MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 15, compareReplaySession: true })
+    scaffold = await launchWebScaffold({
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+      pinAdmissionSourceRoot: true,
+      ...MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 15, compareReplaySession: true },
+    })
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })
     browser = await chromium.launch()
     page = await newEnglishPage(browser)

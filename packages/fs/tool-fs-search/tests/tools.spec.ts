@@ -44,6 +44,21 @@ import {
   toWorkdirRelative,
 } from '@deepseek-ai/dsh-tool-fs-search'
 
+const pathDialect = vi.hoisted(() => ({ selected: undefined as 'win32' | 'posix' | undefined }))
+
+vi.mock('node:path', async (importOriginal) => {
+  const native = await importOriginal<typeof import('node:path')>()
+  const active = () => pathDialect.selected === undefined ? native : native[pathDialect.selected]
+  return {
+    ...native,
+    get sep() { return active().sep },
+    isAbsolute: (path: string) => active().isAbsolute(path),
+    relative: (from: string, to: string) => active().relative(from, to),
+  }
+})
+
+afterEach(() => { pathDialect.selected = undefined })
+
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'test': { kind: 'test' } & ContextFormed
@@ -374,8 +389,9 @@ describe('command construction (plain argv)', () => {
       '--', 'docs dir'])
   })
 
-  it.runIf(process.platform === 'win32').each(['C:', 'c:.git', 'C:.git/objects', 'C:src'])(
+  it.each(['C:', 'c:.git', 'C:.git/objects', 'C:src'])(
     'glob: adds only fixed drive-prefixed metadata exclusions for %s', (path) => {
+      pathDialect.selected = 'win32'
       const drive = path.slice(0, 2)
       expect(buildGlobCommand({ pattern: '*.ts', path })).toEqual([
         ...buildGlobCommand({ pattern: '*.ts' }),
@@ -396,8 +412,9 @@ describe('command construction (plain argv)', () => {
     },
   )
 
-  it.skipIf(process.platform === 'win32').each(['C:', 'c:.git', 'C:.git/objects', 'C:src'])(
+  it.each(['C:', 'c:.git', 'C:.git/objects', 'C:src'])(
     'glob: leaves POSIX colon-literal root argv unchanged: %s', (path) => {
+      pathDialect.selected = 'posix'
       expect(buildGlobCommand({ pattern: '*.ts', path })).toEqual([...buildGlobCommand({ pattern: '*.ts' }), '--', path])
     },
   )
@@ -536,7 +553,18 @@ describe('explicit slash-pattern roots', () => {
     expect(subprocess.handles[0]?.settled).toBe(true)
   })
 
-  it.runIf(process.platform === 'win32').each([
+  it('preserves a POSIX trailing separator in the child cwd and displayed paths', async () => {
+    const { ctx, subprocess } = await rootedSetup()
+    pathDialect.selected = 'posix'
+    subprocess.handler = () => runResult('./nested/a.ts\n')
+    const result = await call(ctx, 'glob', { pattern: 'nested/*.ts', path: '/sessions/s1/src/' }, { agent: agent('/sessions/s1') })
+    expect(subprocess.spawns[0]?.cwd).toBe('/sessions/s1/src/')
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected glob success')
+    expect(result.value).toEqual({ root: 'src', paths: ['src/nested/a.ts'] })
+  })
+
+  it.each([
     ['Q:src', 'Q:\\sessions\\s1\\src', 'Q:src\\nested\\a.ts'],
     ['q:src', 'Q:\\sessions\\s1\\src', 'q:src\\nested\\a.ts'],
     ['Q:', 'Q:\\sessions\\s1\\', 'Q:nested\\a.ts'],
@@ -547,6 +575,8 @@ describe('explicit slash-pattern roots', () => {
     ['\\\\?\\R:\\root/..', '\\\\?\\R:\\root/..', '\\\\?\\R:\\root/..\\nested\\a.ts'],
   ])('resolves Windows root %s from the Session, not the host drive cwd', async (path, expectedCwd, expectedPath) => {
     const { ctx, subprocess } = await rootedSetup()
+    pathDialect.selected = 'win32'
+    const cwd = 'Q:\\sessions\\s1'
     subprocess.handler = () => runResult('.\\nested\\a.ts\n')
     const result = await call(ctx, 'glob', { pattern: 'nested/*.ts', path }, { agent: agent(cwd) })
     expect(result.isError).toBe(false)
@@ -555,17 +585,19 @@ describe('explicit slash-pattern roots', () => {
     expect(result.value).toEqual({ root: toWorkdirRelative(path, cwd), paths: [toWorkdirRelative(expectedPath, cwd)] })
   })
 
-  it.runIf(process.platform === 'win32')('uses the Session drive in a namespaced Session cwd', async () => {
+  it('uses the Session drive in a namespaced Session cwd', async () => {
     const { ctx, subprocess } = await rootedSetup()
+    pathDialect.selected = 'win32'
     subprocess.handler = () => runResult('.\\a.ts\n')
     const result = await call(ctx, 'glob', { pattern: '**/*.ts', path: 'q:src' }, { agent: agent('\\\\?\\Q:\\sessions\\s1') })
     expect(result.isError).toBe(false)
     expect(subprocess.spawns[0]?.cwd).toBe('\\\\?\\Q:\\sessions\\s1\\src')
   })
 
-  it.runIf(process.platform === 'win32')('rejects another drive-relative root before spawn and requests an absolute path', async () => {
+  it('rejects another drive-relative root before spawn and requests an absolute path', async () => {
     const { ctx, subprocess } = await rootedSetup()
-    const result = await call(ctx, 'glob', { pattern: 'nested/*.ts', path: 'R:src' }, { agent: agent(cwd) })
+    pathDialect.selected = 'win32'
+    const result = await call(ctx, 'glob', { pattern: 'nested/*.ts', path: 'R:src' }, { agent: agent('Q:\\sessions\\s1') })
     expect(result.isError).toBe(true)
     expect(result.error).toMatchObject({ info: { name: 'SearchError', code: 'SEARCH_FAILED' } })
     expect(text(result)).toContain('glob needs an absolute path when a drive-relative search root is not on the Session drive')

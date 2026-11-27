@@ -87,7 +87,7 @@ session.deriveMessages()         // the derived model history
 
 ### 刷新持久状态
 
-`ctx.sessions.flush(session)` 分发需等待完成的持久性检查点：每个持久化监听器都会刷新，调用在所有监听器结算后完成。需要立即持久性屏障的生产方应等待它，而不是假定延后写入已经排空。
+`ctx.sessions.flush(session, expectedWriter?)` 等待所有持久化监听器，并报告预期的写句柄是否确认了刷新。省略预期句柄时，它报告是否运行了任一监听器。监听器失败时，调用在所有监听器结束后拒绝。
 
 -----
 
@@ -162,7 +162,7 @@ session.deriveMessages()         // the derived model history
 
 #### Token 影响
 
-追加的 surface 条目会在后续步骤中重新发送。`replace` surface 操作会从未来输入中移除被遮蔽条目，但不删除其原始日志记录。
+追加的 surface 条目会在后续步骤中重新发送。`replace` surface 操作从后续输入中移除被遮蔽条目，并保留原始日志记录。增量摘要或附带事实账本的摘要之后，相邻的检查点必须与摘要的压缩 ID 和替换范围一致。成功的 `compaction/end` 发布替换。尝试失败或中断时，原节点继续有效。
 
 #### KV Cache 影响
 

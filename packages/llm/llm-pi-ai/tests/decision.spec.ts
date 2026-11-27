@@ -1,7 +1,7 @@
 /** Strict native Decisions remain separate from ordinary pi-ai chat dispatch. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { PiAiAdapter } from '../src/adapter.ts'
@@ -61,6 +61,14 @@ async function collect(chunks: AsyncIterable<StreamChunk>) {
   return result
 }
 
+function directDecision(overrides: Partial<Parameters<typeof decisionChunks>[0]> = {}) {
+  return decisionChunks({
+    options: options(), model: MODEL, baseURL: 'https://fixture.invalid/v1',
+    headers: { ...headers, Authorization: `Bearer ${KEY}` },
+    signal: new AbortController().signal, ...overrides,
+  })
+}
+
 async function harness(baseURL: string) {
   const ctx = new Context()
   contexts.push(ctx)
@@ -115,6 +123,31 @@ describe('KINF Decision adaptation', () => {
     expect(server.requests[0]).not.toHaveProperty('kinf_decision')
   })
 
+  it('uses the selected model id without a wire override and forwards the configured timeout', async () => {
+    const { requestModel: _requestModel, ...modelProfile } = model()
+    const profiles = resolveProfiles({ fixture: {
+      api: 'openai-completions', baseURL: 'https://fixture.invalid/v1', timeoutMs: 2500, headers,
+      models: [{ ...modelProfile, id: MODEL }],
+    } })
+    const adapter = new PiAiAdapter({ profiles: () => profiles, resolveApiKey: () => Promise.resolve(KEY), auth: memoryAuth() })
+    const fetch = vi.fn(() => Promise.resolve(Response.json(reply())))
+    vi.stubGlobal('fetch', fetch)
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      const result = await collect(adapter.stream(options({ model: MODEL, system: 'Classify the evidence.' })))
+      expect(result.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+      expect(timeout).toHaveBeenCalledWith(2500)
+      expect(fetch).toHaveBeenCalledWith('https://fixture.invalid/v1/chat/completions', expect.objectContaining({
+        body: JSON.stringify({ model: MODEL, messages: [
+          { role: 'system', content: 'Classify the evidence.' },
+          { role: 'user', content: 'Is the evidence relevant?' },
+        ], stream: false, max_tokens: 1, kinf_decision: 'label_scores' }),
+      }))
+    } finally {
+      timeout.mockRestore()
+    }
+  })
+
   it('keeps no-tools Chat on ordinary streaming and refuses explicit tools before dispatch', async () => {
     const server = await mockServer([{ events: textEvents }])
     const ctx = await harness(server.url)
@@ -159,6 +192,8 @@ describe('KINF Decision adaptation', () => {
 
   it.each([
     (value: ReturnType<typeof reply>) => { value.model = 'ordinary' },
+    (value: ReturnType<typeof reply>) => { value.choices[0]!.message.content = 'no' },
+    (value: ReturnType<typeof reply>) => { value.decision.logits.no = 10 },
     (value: ReturnType<typeof reply>) => { value.decision.label_scores.no = 0.4 },
     (value: ReturnType<typeof reply>) => { value.decision.logits.yes = 10 },
     (value: ReturnType<typeof reply>) => { value.usage.completion_tokens = 2 },
@@ -186,6 +221,70 @@ describe('KINF Decision adaptation', () => {
     const result = await assemble(await harness(server.url), options())
     expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'MALFORMED_RESPONSE' } })
     expect(result.message.content).toEqual([])
+  })
+
+  it.each([
+    { name: 'array instead of an object', payload: [reply()] },
+    { name: 'zero input tokens', payload: { ...reply(), usage: { ...reply().usage, prompt_tokens: 0 } } },
+    { name: 'non-numeric logit', payload: { ...reply(), decision: { ...reply().decision, logits: { yes: '1.25', no: 1.25 } } } },
+    { name: 'missing label', payload: { ...reply(), decision: { ...reply().decision, logits: { yes: 1.25 } } } },
+    { name: 'unrecognized decision label', payload: { ...reply(), decision: { ...reply().decision, label: 'maybe' } } },
+  ])('rejects a malformed Decision reply with $name', async ({ payload }) => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(Response.json(payload))))
+    await expect(directDecision().next()).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+  })
+
+  it.each([
+    { name: 'missing content type', response: () => new Response(null) },
+    { name: 'missing JSON body', response: () => new Response(null, { headers: { 'content-type': 'application/json' } }) },
+  ])('rejects a successful HTTP reply with $name', async ({ response }) => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(response())))
+    await expect(directDecision().next()).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+  })
+
+  it('cancels a response with a declared byte count above the limit before reading it', async () => {
+    const cancel = vi.fn()
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(new ReadableStream({ cancel }), {
+      headers: { 'content-type': 'application/json', 'content-length': '65537' },
+    }))))
+    await expect(directDecision().next()).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a response whose body fails during a read', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.error(new TypeError('fixture response body failed')) },
+    })
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(body, {
+      headers: { 'content-type': 'application/json' },
+    }))))
+    await expect(directDecision().next()).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+  })
+
+  it.each([
+    { overrides: { headers }, code: 'MISSING_CREDENTIAL' },
+    { overrides: { headers: { ...headers, 'X-Kinf-Service': 'ordinary' }, apiKey: KEY }, code: 'INVALID_CONFIG' },
+    { overrides: { options: options({ messages: [
+      createToolResultMessage({ callId: ToolCallId('fixture-call'), content: [{ type: 'text', text: 'evidence' }], isError: false }),
+    ] }) }, code: 'UNSUPPORTED_CONTENT' },
+  ])('rejects an invalid Decision request before dispatch ($code)', async ({ overrides, code }) => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    await expect(directDecision(overrides).next()).rejects.toMatchObject({ code })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [401, 'AUTH'], [403, 'AUTH'], [402, 'QUOTA'], [429, 'RATE_LIMIT'], [408, 'TIMEOUT'], [503, 'SERVER'],
+  ])('maps a Decision HTTP %i response to %s', async (status, code) => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status }))))
+    await expect(directDecision().next()).rejects.toMatchObject({ code, failure: { status } })
+  })
+
+  it('reports fetch failure as a transport error', async () => {
+    const failure = new TypeError('fixture transport closed')
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(failure)))
+    await expect(directDecision().next()).rejects.toMatchObject({ code: 'TRANSPORT', cause: failure })
   })
 
   it('reports HTTP rejection without exposing its body or choosing another model', async () => {
@@ -250,5 +349,12 @@ describe('KINF Decision adaptation', () => {
     } })
     expect(resolveProfiles(providers(false)).get('fixture')?.nativeTools.get(SELECTOR)).toBe(false)
     expect(() => resolveProfiles(providers(true))).toThrow(/kinf-decision-v1 cannot enable nativeTools/)
+  })
+
+  it('rejects an absolute per-model endpoint whose provider endpoint cannot be compared', () => {
+    expect(() => resolveProfiles({ fixture: {
+      api: 'openai-completions', baseURL: '/relative-provider',
+      models: [{ ...model(), baseURL: 'https://fixture.invalid/v1' }],
+    } })).toThrow(/needs an absolute provider baseURL/)
   })
 })

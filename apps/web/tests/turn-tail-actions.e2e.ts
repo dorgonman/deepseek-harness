@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, onTestFailed, onTestFinished, vi } fro
 import type { ReplayOverrideDoc } from '@deepseek-ai/dsh-llm-replay'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   acknowledgeReloadConnectionLoss, assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, seedSession, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -106,7 +107,9 @@ describe('web e2e: assistant IconActions wait for the turn to end', () => {
         ? {}
         : {
           replayFixture: FIXTURE,
-          ...(overridePath === undefined ? {} : { replayOverride: overridePath }),
+          ...(overridePath === undefined
+            ? { workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH, pinAdmissionSourceRoot: true }
+            : { replayOverride: overridePath }),
           compareReplaySession: overridePath === undefined,
           paceMs,
         },

@@ -5,12 +5,44 @@
  * @module @deepseek-ai/dsh-token-meter/route-pricing
  */
 
-import type { ContentBlock, LlmImageRequestPricing } from '@deepseek-ai/dsh-llm'
-import { estimateContent } from './estimate.ts'
+import type { ContentBlock, ImageBlock, LlmImageRequestPricing, RequestMessage, ToolSchema } from '@deepseek-ai/dsh-llm'
+import { estimateContent, estimateMessage, estimateStructuralBlock, estimateToolSchemasTokens } from './estimate.ts'
 import type { MeterSurfaceNode } from './surface-fold.ts'
 import type { TokenSurfaceNode } from './types.ts'
 
 type FileAttachmentRef = Extract<ContentBlock, { type: 'file' }>['attachment']
+
+/** Price each image occurrence in request order, including its model-visible text. */
+function priceImages(images: readonly ImageBlock[], pricing: LlmImageRequestPricing): number[] {
+  const prices = pricing.priceImages(images)
+  if (prices.length !== images.length) {
+    throw new Error(
+      `token meter: route image pricing answered ${prices.length} prices for ${images.length} occurrences`,
+    )
+  }
+  return Array.from(prices, price => price.visualTokens + estimateContent([{ type: 'text', text: price.text }]))
+}
+
+/**
+ * Estimate the projected messages and tools of an adapter request.
+ * Files and substitutions are already represented by their projected text.
+ * @param messages - the adapter-facing messages in request order.
+ * @param tools - the declarations sent with the request.
+ * @param pricing - image pricing bound to the prepared route, when declared.
+ * @returns estimated input tokens, including declared visual tokens.
+ */
+export function estimateRequestTokens(
+  messages: readonly RequestMessage[],
+  tools: readonly ToolSchema[] | undefined,
+  pricing?: LlmImageRequestPricing,
+): number {
+  const heuristic = messages.reduce((total, message) => total + estimateMessage(message), estimateToolSchemasTokens(tools))
+  if (pricing === undefined) return heuristic
+  const images = messages.flatMap(message => message.content.filter(block => block.type === 'image'))
+  if (images.length === 0) return heuristic
+  const visualAndText = priceImages(images, pricing).reduce((total, tokens) => total + tokens, 0)
+  return images.reduce((total, image) => total - estimateStructuralBlock(image), heuristic + visualAndText)
+}
 
 /** One surface priced for a request route: public nodes plus their total. */
 export interface PricedSurface {
@@ -44,12 +76,7 @@ export function priceSurface(
     })
     return { nodes: publicNodes, surfaceTokens }
   }
-  const prices = pricing === undefined ? [] : pricing.priceImages(images)
-  if (pricing !== undefined && prices.length !== images.length) {
-    throw new Error(
-      `token meter: route image pricing answered ${prices.length} prices for ${images.length} occurrences`,
-    )
-  }
+  const prices = pricing === undefined ? [] : priceImages(images, pricing)
   let cursor = 0
   let surfaceTokens = 0
   const publicNodes = nodes.map((node) => {
@@ -64,9 +91,8 @@ export function priceSurface(
       tokens -= node.imageStructuralTokens
       for (let occurrence = 0; occurrence < node.images.length; occurrence += 1) {
         // oxlint-disable-next-line typescript/no-non-null-assertion -- length equality is asserted above
-        const price = prices[cursor]!
+        tokens += prices[cursor]!
         cursor += 1
-        tokens += price.visualTokens + estimateContent([{ type: 'text', text: price.text }])
       }
     }
     surfaceTokens += tokens

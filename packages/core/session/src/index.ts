@@ -81,10 +81,12 @@ declare module '@deepseek-ai/cordis' {
      * Awaited parallel durability checkpoint: every listener runs and the
      * caller awaits all of them, with no waterfall veto. Scope-filtered dispatch
      * (`@deepseek-ai/dsh-scope`) reuses the session's owner scope.
+     * The storage listener returns its write handle after durable completion.
+     * Observers that do not persist the session return void.
      * @param session - the session whose buffered events must reach durable storage.
      * @mode parallel
      */
-    'session/flush'(this: Scoped<Session>, session: Session): Promise<void> | void
+    'session/flush'(this: Scoped<Session>, session: Session): Promise<object | void> | object | void
   }
 }
 
@@ -539,7 +541,10 @@ function snapshotAppend(
 /** Construct and validate one live event from detached inputs. */
 function createAppendEvent(snapshot: ReturnType<typeof snapshotAppend>, seq: SessionSeq): SessionEvent {
   const { type, data, surface } = snapshot
-  const event = deepFreeze({ type, seq, time: Date.now(), data, ...surface } as SessionEvent)
+  const event = deepFreeze({
+    type, seq, time: Date.now(), data, ...surface,
+    ...type === 'request/admission' ? { ignorable: true } : {},
+  } as SessionEvent)
   validateSessionEventData(event, `session event "${type}" at seq ${seq}`)
   return event
 }
@@ -1415,11 +1420,12 @@ export class SessionStore extends Service {
    * rather than dispatch a raw `ctx.parallel('session/flush', …)` — one owner
    * and one spelling.
    * @param session - the session whose buffered events must reach durable storage.
-   * @returns whether at least one durability listener participated, after every
-   *   listener has settled successfully.
+   * @param expectedWriter - optional write handle whose acknowledgement is required.
+   * @returns after all listeners settle, whether the expected handle acknowledged
+   *   the flush, or whether any listener ran when no handle was supplied.
    * @throws the first registered listener failure after every listener settles.
    */
-  async flush(session: Session): Promise<boolean> {
+  async flush(session: Session, expectedWriter?: object): Promise<boolean> {
     const { carrier } = this.liveEntryFor(session)
     const callbackArgs: unknown[] = [session]
     const callbacks = collectSessionCallbacks(this.ctx, [carrier, 'session/flush', session])
@@ -1435,7 +1441,8 @@ export class SessionStore extends Service {
     }))
     const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failure !== undefined) throw failure.reason
-    return callbacks.length > 0
+    return expectedWriter === undefined ? callbacks.length > 0
+      : results.some(result => result.status === 'fulfilled' && result.value === expectedWriter)
   }
 
   /** Return the exact live entry; detached/prepared objects reject. */

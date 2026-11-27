@@ -10,6 +10,7 @@ import WebSocket from 'ws'
 import type {} from '@deepseek-ai/dsh-tool-present/types'
 import { deriveReplayScript, parseSessionLog } from '@deepseek-ai/dsh-llm-replay'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFinalWorkspaceSnapshot, captureExpandedTurnProcessAria, compareOrRefreshGolden,
   fixtureUserPrompts, launchWebScaffold, recordFixture, watchConsole,
   webSnapshotMode, type WebScaffold,
@@ -86,6 +87,7 @@ describe('web e2e: requested SVG is explicitly delivered', () => {
     }
     scaffold = await launchWebScaffold({
       compareReplaySession: true,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH, pinAdmissionSourceRoot: true,
       extraOverlayPath: fileURLToPath(new URL('./present-svg.overlay.yml', import.meta.url)),
       // Replay the large SVG incrementally to avoid a zero-delay traffic burst.
       ...(replayOverride === undefined ? {} : { replayFixture: FIXTURE, replayOverride, paceMs: 5 }),

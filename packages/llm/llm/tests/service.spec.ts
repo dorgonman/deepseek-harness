@@ -904,6 +904,22 @@ describe('LlmRuntime', () => {
     },
   )
 
+  it('rejects a nonpositive adapter-owned transport maxTokens', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new class extends ScriptedAdapter {
+      override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({ provider, id: model, name: model, transportMaxTokens: 0 })
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+
+    await expect(ctx.llm.resolveModelInfo('route', 'model')).rejects.toMatchObject({
+      code: 'INVALID_MODEL_MAX_TOKENS',
+      message: 'adapter returned invalid transport maxTokens for provider "route" model "model"',
+    })
+  })
+
   it.each([
     [{ efforts: [] }, 'empty effort list'],
     [{ efforts: [{ id: '', name: 'Empty' }] }, 'empty id'],
@@ -1029,6 +1045,22 @@ describe('LlmRuntime', () => {
 
     expect(first.lastOptions?.reasoningEffort).toBe(ReasoningEffortId('high'))
     expect(second.lastOptions).toBeUndefined()
+  })
+
+  it('refuses a stale prepared call even without envelope verification', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new RecordingAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+    const prepared = await ctx.llm.prepareCall({ provider: 'route', model: 'model' })
+    expect(prepared.context).toBeUndefined()
+
+    const stale = new Error('stale session')
+    const stream = prepared.stream({ ...prepared.config, messages: [] }, {
+      assertCurrent: () => { throw stale },
+    })
+    await expect(collect(stream)).rejects.toBe(stale)
+    expect(adapter.lastOptions).toBeUndefined()
   })
 
   it('prepares a one-shot registration-bound call and rejects config drift', async () => {

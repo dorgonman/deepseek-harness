@@ -2,16 +2,17 @@ import { imageOffloadProjection } from '@deepseek-ai/dsh-compaction-image-offloa
 import { describe, expect, it, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import {
-  LlmRuntime, LlmAdapter, createMessage, createToolResultMessage, createUserMessage, projectFilesToText, ToolCallId,
+  LlmRuntime, LlmAdapter, createMessage, createToolResultMessage, createUserMessage, projectFilesToText,
+  projectImagesForTextModel, ToolCallId,
 } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmImageRequestPricing, Message, StreamChunk, TokenUsage, UserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmImageRequestPricing, Message, StreamChunk, TokenUsage, ToolSchema, UserMessage } from '@deepseek-ai/dsh-llm'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { Session, SessionId, canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { EpochHeader } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
-import { estimateContent, estimateMessage } from '../src/estimate.ts'
+import { estimateContent, estimateMessage, estimateToolSchemasTokens } from '../src/estimate.ts'
 
 /** Adapter double declaring fixed per-occurrence image prices for one route. */
 class PricingAdapter extends LlmAdapter {
@@ -118,6 +119,50 @@ function appendSuccessfulCall(session: Session, value: EpochHeader, usage?: Toke
 }
 
 describe('request projection pricing', () => {
+  it('estimates projected file handles, tools and ordered image occurrences', async () => {
+    const { meter } = await harness(() => undefined)
+    const ref = imageRef('photo')
+    const file = { type: 'file' as const, attachment: fileRef('archive.zip') }
+    const visible = { type: 'image' as const, attachment: ref }
+    const offloaded = { ...visible, offloaded: true as const }
+    const user = createUserMessage({ content: [file, visible], source: { kind: 'user' } })
+    const result = createToolResultMessage({ callId: ToolCallId('call-1'), content: [offloaded], isError: false })
+    const tools: ToolSchema[] = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    const projected = projectFilesToText([user, result], attachment => `/sandbox/${attachment.name}`)
+    const text = HANDLE_TEXT
+    const placeholder = '[offloaded]'
+    const pricing: LlmImageRequestPricing = {
+      priceImages(images) {
+        expect(images).toEqual([visible, offloaded])
+        return [{ visualTokens: VISUAL_TOKENS, text }, { visualTokens: 0, text: placeholder }]
+      },
+    }
+    const expected = projected.reduce((total, message) => total + estimateMessage({
+      ...message,
+      content: message.content.filter(block => block.type !== 'image'),
+    }), estimateToolSchemasTokens(tools))
+      + VISUAL_TOKENS + estimateContent([{ type: 'text', text }, { type: 'text', text: placeholder }])
+    expect(meter.estimateRequest(projected, tools, pricing)).toBe(expected)
+  })
+
+  it('keeps the heuristic when pricing is absent or projection leaves only text', async () => {
+    const { meter } = await harness(() => undefined)
+    const source = imageMessage('photo')
+    const projected = projectImagesForTextModel([source])
+    expect(meter.estimateRequest([source], undefined)).toBe(estimateMessage(source))
+    expect(meter.estimateRequest(projected, undefined, {
+      priceImages() {
+        throw new Error('Text-only projection has no image occurrences')
+      },
+    })).toBe(projected.reduce((total, message) => total + estimateMessage(message), 0))
+  })
+
+  it('rejects a route price with a mismatched count on the complete projected request', async () => {
+    const { meter } = await harness(() => undefined)
+    expect(() => meter.estimateRequest([imageMessage('photo')], undefined, { priceImages: () => [] }))
+      .toThrow('route image pricing answered 0 prices for 1 occurrences')
+  })
+
   it('prices file blocks as the exact handle text dispatched to the provider', async () => {
     const { meter, session } = await harness(() => undefined)
     const ref = fileRef('archive.zip')

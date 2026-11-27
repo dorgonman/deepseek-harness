@@ -4,7 +4,7 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
-import { frameSummary, summarizeWithLlm } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
+import { frameSummary, summarizeWithLlm, unframeSummary } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import type { SummarizationInput, SummaryResult } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
 import {
@@ -1439,6 +1439,19 @@ async function summarizerHarness(
 }
 
 describe('default one-shot summarizer', () => {
+  it('returns detached content from an unframed checkpoint', () => {
+    const content: ContentBlock[] = [
+      { type: 'text', text: 'Legacy checkpoint body' },
+      { type: 'text', text: 'Retained fact' },
+      { type: 'text', text: '</compacted-summary>' },
+    ]
+    const summary = unframeSummary(content)
+    expect(summary).toEqual(content)
+    expect(summary).not.toBe(content)
+    expect(summary[0]).not.toBe(content[0])
+    expect(summary[2]).not.toBe(content[2])
+  })
+
   it.each([undefined, '', 'SYSTEM HEAD\n精确前缀\n'])('preserves the routed prefix through region summarization with system %j', async (system) => {
     const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'summary' }])
     const session = conversation(3, undefined, system)
@@ -1563,6 +1576,22 @@ describe('default one-shot summarizer', () => {
     expect(session.snapshotEvents().slice(0, before.length)).toEqual(before)
     expect(session.snapshotEvents().findLast(event => event.type === 'compaction/summary')?.data)
       .toMatchObject({ requestProjection: 'text-transcript-v1', llmStreamCall: true })
+  })
+
+  it('quotes the runtime file handle on a no-tools summary route', async () => {
+    const { ctx, adapter, compact } = await summarizerHarness([{ type: 'text', text: 'checkpoint' }])
+    vi.spyOn(adapter, 'resolveModel').mockResolvedValue({ provider: MODEL, id: MODEL, name: MODEL, nativeTools: false })
+    const attachment = { attachmentId: AttachmentId('sha256:' + 'a'.repeat(64)), name: 'reference.txt', bytes: 12 }
+    const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'file', attachment }] })
+    const handle = ctx.llm.fileRequestText(attachment)
+
+    await expect(compact.runSummarize({ messages: [message] }, agent(conversation(1), MODEL), SIGNAL))
+      .resolves.toMatchObject({ requestProjection: 'text-transcript-v1' })
+
+    const block = adapter.lastOptions?.messages[0]?.content[0]
+    expect(handle).toContain('cannot access a readable path')
+    expect(block?.type === 'text' ? block.text : '').toContain(JSON.stringify({ type: 'file', attachment, text: handle }))
+    expect(message.content).toEqual([{ type: 'file', attachment }])
   })
 
   it.each([undefined, true])('dispatches a legacy prefix without context capacity for nativeTools=%s', async (nativeTools) => {
@@ -2210,6 +2239,25 @@ describe('summary target preflight', () => {
       agent(conversation(1), MODEL),
       SIGNAL,
     )).rejects.toMatchObject({ code: 'SUMMARY_TARGET_UNCONFIGURED' })
+    expect(adapter.streamCalls).toBe(0)
+  })
+
+  it.each([
+    [undefined, ''],
+    [MODEL, ` (refusing the Agent target ${MODEL}/${MODEL})`],
+  ])('refuses a headerless session with Agent model %s when fallback is disabled', async (model, explanation) => {
+    const { ctx, adapter } = probe({ provider: 'probe', id: 'probe', name: 'probe' })
+    await expect(summarizeWithLlm(
+      ctx,
+      { ...CONFIG, summarizationProvider: '', summarizationModel: '' },
+      promptInput('history'),
+      agent(Session.create(SessionId('strict-headerless-summary')), model),
+      SIGNAL,
+    )).rejects.toMatchObject({
+      code: 'SUMMARY_TARGET_UNCONFIGURED',
+      message: 'compaction: no configured summarization target and fallback is disabled'
+        + explanation + '; set both summarization fields on the compaction policy',
+    })
     expect(adapter.streamCalls).toBe(0)
   })
 

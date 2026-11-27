@@ -18,7 +18,7 @@ import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed, onTestFinished } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import {
-  acknowledgeReloadConnectionLoss, assertFixtureInventory, captureExpandedTurnProcessAria,
+  ADMISSION_WORKSPACE_PATH_LENGTH, acknowledgeReloadConnectionLoss, assertFixtureInventory, captureExpandedTurnProcessAria,
   captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -56,7 +56,10 @@ describe('web e2e: lifecycle & chrome (workspace flow / reload / dark mode)', ()
   beforeAll(async () => {
     scaffold = await launchWebScaffold(MODE === 'record'
       ? {}
-      : { replayFixture: FIXTURE, replayOverride: REPLAY_OVERRIDE, paceMs: REPLAY_PACE_MS })
+      : {
+        replayFixture: FIXTURE, replayOverride: REPLAY_OVERRIDE, paceMs: REPLAY_PACE_MS,
+        workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH, pinAdmissionSourceRoot: true,
+      })
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })
     browser = await chromium.launch()
     page = await newEnglishPage(browser)

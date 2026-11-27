@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFinalWorkspaceSnapshot, assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -33,6 +34,8 @@ describe('web e2e: PTC program sandbox escalation', () => {
   beforeAll(async () => {
     scaffold = await launchWebScaffold({
       agentPresets: { default: 'ptc' },
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+      pinAdmissionSourceRoot: true,
       compareReplaySession: true,
       ...(MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 15 }),
     })

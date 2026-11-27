@@ -1,6 +1,7 @@
 {
   "model": "resumed-smoke-model",
   "final_response": "RESUMED_PROCESS_OK",
+  "tornCheckpointInRequest": false,
   "eventTypes": [
     "agent/inbox/spliced",
     "turn/start",
@@ -9,6 +10,7 @@
     "user/message",
     "request/header",
     "request/context",
+    "request/admission",
     "session-log-deepseek/delivery-accepted",
     "assistant/message",
     "step/end",

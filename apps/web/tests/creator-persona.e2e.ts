@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import { expect, it } from 'vitest'
 import type {} from '@deepseek-ai/dsh-token-meter'
-import { fixtureUserPrompts, launchWebScaffold } from './scaffold.ts'
+import { ADMISSION_WORKSPACE_PATH_LENGTH, fixtureUserPrompts, launchWebScaffold } from './scaffold.ts'
 import { connectFreshWorkspace, newEnglishPage } from './support.ts'
 
 const FIXTURE = fileURLToPath(new URL('../../../snapshots/web/creator-persona/session.v4.jsonl', import.meta.url))
@@ -13,6 +13,8 @@ const CUSTOMIZATION_INTENT = 'You help the user customize DeepSeek Harness itsel
 it('sends the Creator customization intent without taking actions for an ordinary request', async () => {
   const scaffold = await launchWebScaffold({
     replayFixture: FIXTURE, compareReplaySession: true, paceMs: 10,
+    workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+    pinAdmissionSourceRoot: true,
     agentPresets: { default: 'cordis' },
   })
   try {

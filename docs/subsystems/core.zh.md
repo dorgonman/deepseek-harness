@@ -1076,32 +1076,35 @@ Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/s
 
 #### `agent/request-envelope` — serial
 
-Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen request that dispatch will send, so a listener may only refuse. A refusal throws, and no request reaches the provider. The `view` accessor materializes the Session a listener prices: the preview clone is built on its first call, so a listener that never prices never pays for the clone.
+Price the request envelope before it is committed or dispatched. The `preview` phase runs before the step commits its admission, so a listener may commit a checkpoint (the loop then rebuilds the preview and re-admits); the `verify` phase runs on the frozen adapter-facing request after projection when the context window is known. A refusal prevents provider dispatch.
 
 ```ts cordis-catalog
 /**
  * Price the request envelope before it is committed or dispatched. The
  * `preview` phase runs before the step commits its admission, so a listener
  * may commit a checkpoint (the loop then rebuilds the preview and re-admits);
- * the `verify` phase runs on the frozen request that dispatch will send, so
- * a listener may only refuse. A refusal throws, and no request reaches the
- * provider. The `view` accessor materializes the Session a listener prices:
- * the preview clone is built on its first call, so a listener that never
- * prices never pays for the clone.
+ * the `verify` phase runs on the frozen adapter-facing request after
+ * projection when the context window is known. A refusal prevents provider dispatch.
  * @param payload.agent - the agent whose request is being admitted.
  * @param payload.header - the resolved envelope logged for this attempt.
- * @param payload.view - the Session whose derived messages are priced, materialized on first call.
  * @param payload.contextWindow - the destination model's window when known.
  * @param payload.completionMaxTokens - the output reservation bound to this attempt, when any.
  * @param payload.completionSource - which layer supplied that reservation.
+ * @param payload.imagePricing - image pricing bound to the adapter registration.
  * @param payload.phase - `preview` may compact; `verify` may only refuse.
+ * @param payload.view - detached preview Session, materialized on first call.
+ * @param payload.projectRequest - deterministic adapter projection available during preview.
+ * @param payload.request - the exact adapter input during verification.
+ * @param payload.flushReceipt - flush the receipt and require the original writer for a persisted Session.
+ * @param payload.turn - the verified request's owning turn.
+ * @param payload.step - the verified request's owning step.
  * @param payload.signal - the current turn's cancellation signal.
  * @mode serial
  */
-'agent/request-envelope'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader view: () => Session contextWindow?: number completionMaxTokens?: number completionSource: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown' phase: 'preview' | 'verify' signal: AbortSignal }): Promise<void> | void
+'agent/request-envelope'(this: Scoped<Agent>, payload: { agent: Agent header: EpochHeader contextWindow?: number completionMaxTokens?: number completionSource: LlmCompletionReservation['source'] imagePricing?: LlmImageRequestPricing signal: AbortSignal } & ({ phase: 'preview' view: () => Session projectRequest?: PreparedLlmCall['projectRequest'] } | { phase: 'verify' request: GenerateOptions flushReceipt: () => Promise<void> turn: number step: number })): Promise<void> | void
 ```
 
-Types: [EpochHeader](session.zh.md) · [Scoped](scope.zh.md) · [Session](session.zh.md)
+Types: [EpochHeader](session.zh.md) · [GenerateOptions](llm-streaming.zh.md) · [LlmCompletionReservation](llm-streaming.zh.md) · [LlmImageRequestPricing](llm-streaming.zh.md) · [PreparedLlmCall](llm-streaming.zh.md) · [Scoped](scope.zh.md) · [Session](session.zh.md)
 
 Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
 

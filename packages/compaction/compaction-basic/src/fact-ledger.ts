@@ -134,13 +134,14 @@ export function createFacts(
   return inputs.map(input => factsOf(input, events))
 }
 
-/** Merge sources and seen bounds for two records of the same fact. */
-function mergeSame(left: FactRecord, right: FactRecord): FactRecord {
+/** Rebind the merged fact to the canonical events in its full source set. */
+function mergeSame(left: FactRecord, right: FactRecord, events: readonly SessionEvent[]): FactRecord {
   const ids = [...new Set([...left.sourceEventIds, ...right.sourceEventIds])].sort((a, b) => a - b)
   const supersedes = [...new Set([...(left.supersedes ?? []), ...(right.supersedes ?? [])])]
   return Object.freeze<FactRecord>({
     ...left,
     sourceEventIds: Object.freeze(ids),
+    evidenceDigest: digestEventIds(events, ids),
     firstSeenSeq: SessionSeq(Math.min(left.firstSeenSeq, right.firstSeenSeq)),
     lastSeenSeq: SessionSeq(Math.max(left.lastSeenSeq, right.lastSeenSeq)),
     ...supersedes.length === 0 ? {} : { supersedes: Object.freeze(supersedes) },
@@ -156,13 +157,18 @@ function mergeSame(left: FactRecord, right: FactRecord): FactRecord {
  * winner without an explicit update.
  * @param existing - committed ledger records.
  * @param incoming - newly validated records (source order).
+ * @param events - the session log addressed by both sets of records.
  * @returns the merged ledger in stable order.
  */
-export function mergeFacts(existing: readonly FactRecord[], incoming: readonly FactRecord[]): FactRecord[] {
+export function mergeFacts(
+  existing: readonly FactRecord[],
+  incoming: readonly FactRecord[],
+  events: readonly SessionEvent[],
+): FactRecord[] {
   const byId = new Map(existing.map(fact => [fact.factId, fact]))
   for (const fact of incoming) {
     const prior = byId.get(fact.factId)
-    byId.set(fact.factId, prior === undefined ? fact : mergeSame(prior, fact))
+    byId.set(fact.factId, prior === undefined ? fact : mergeSame(prior, fact, events))
   }
   const supersededBy = new Map<string, string>()
   for (const fact of byId.values()) {
@@ -199,8 +205,13 @@ export function mergeFacts(existing: readonly FactRecord[], incoming: readonly F
   return merged.sort((left, right) => {
     const key = JSON.stringify([left.kind, left.key])
     const other = JSON.stringify([right.kind, right.key])
-    return key < other ? -1 : key > other ? 1 : left.factId < right.factId ? -1 : left.factId > right.factId ? 1 : 0
+    return compareText(key, other) || compareText(left.factId, right.factId)
   })
+}
+
+/** Compare exact code units so ledger ordering stays stable across locales. */
+function compareText(left: string, right: string): number {
+  return Number(left > right) - Number(left < right)
 }
 
 /**
@@ -318,9 +329,9 @@ export function composeCompactView(facts: readonly FactRecord[], options: Compac
   const candidates = facts
     .filter(fact => fact.status !== 'superseded')
     .sort((left, right) => rank(left) - rank(right)
-      || (left.kind < right.kind ? -1 : left.kind > right.kind ? 1 : 0)
-      || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0)
-      || (left.factId < right.factId ? -1 : left.factId > right.factId ? 1 : 0))
+      || compareText(left.kind, right.kind)
+      || compareText(left.key, right.key)
+      || compareText(left.factId, right.factId))
   const included: FactRecord[] = []
   const omitted: FactRecord[] = []
   let used = 0

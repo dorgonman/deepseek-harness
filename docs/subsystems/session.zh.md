@@ -149,6 +149,20 @@ interface SessionEventMap {
    */
   'request/context': RequestContext
   /**
+   * The adapter-facing request fit the estimated input plus reserved output
+   * budget. This ignorable audit record does not imply provider acceptance.
+   */
+  'request/admission': {
+    turn: number
+    step: number
+    provider: string
+    model: string
+    contextWindow: number
+    inputTokens: number
+    completionMaxTokens: number
+    completionSource: 'explicit' | 'adapter-default' | 'transport-fallback' | 'unknown'
+  }
+  /**
    * Separates inherited or restored history from later lifecycle-owned work.
    * This log-only marker need not be at {@link Session.firstLiveSeq}: a fork
    * seed can already contain its tagged marker and child-owned synthetic
@@ -1212,11 +1226,12 @@ announce(session: Session): void
  * rather than dispatch a raw `ctx.parallel('session/flush', …)` — one owner
  * and one spelling.
  * @param session - the session whose buffered events must reach durable storage.
- * @returns whether at least one durability listener participated, after every
- *   listener has settled successfully.
+ * @param expectedWriter - optional write handle whose acknowledgement is required.
+ * @returns after all listeners settle, whether the expected handle acknowledged
+ *   the flush, or whether any listener ran when no handle was supplied.
  * @throws the first registered listener failure after every listener settles.
  */
-async flush(session: Session): Promise<boolean>
+async flush(session: Session, expectedWriter?: object): Promise<boolean>
 
 /**
  * Look up a live session.
@@ -1438,17 +1453,19 @@ Source: [`packages/core/session/src/index.ts`](../../packages/core/session/src/i
 
 #### `session/flush` — parallel
 
-Awaited parallel durability checkpoint: every listener runs and the caller awaits all of them, with no waterfall veto. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`) reuses the session's owner scope.
+Awaited parallel durability checkpoint: every listener runs and the caller awaits all of them, with no waterfall veto. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`) reuses the session's owner scope. The storage listener returns its write handle after durable completion. Observers that do not persist the session return void.
 
 ```ts cordis-catalog
 /**
  * Awaited parallel durability checkpoint: every listener runs and the
  * caller awaits all of them, with no waterfall veto. Scope-filtered dispatch
  * (`@deepseek-ai/dsh-scope`) reuses the session's owner scope.
+ * The storage listener returns its write handle after durable completion.
+ * Observers that do not persist the session return void.
  * @param session - the session whose buffered events must reach durable storage.
  * @mode parallel
  */
-'session/flush'(this: Scoped<Session>, session: Session): Promise<void> | void
+'session/flush'(this: Scoped<Session>, session: Session): Promise<object | void> | object | void
 ```
 
 Types: [Scoped](scope.zh.md)

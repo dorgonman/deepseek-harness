@@ -27,6 +27,7 @@ const controllerCases: readonly {
   readonly name: string
   readonly hasModelTurn: boolean
   readonly configPath?: string
+  readonly workspaceCwdTextLength?: number
 }[] = [
   { name: 'handshake', hasModelTurn: false },
   { name: 'reject-extra-dirs', hasModelTurn: false },
@@ -40,6 +41,7 @@ const controllerCases: readonly {
     name: 'image-compaction',
     hasModelTurn: true,
     configPath: join(corpusDir, 'image-compaction', 'cordis.yml'),
+    workspaceCwdTextLength: 192,
   },
 ] as const
 

@@ -192,13 +192,19 @@ describe('Node program process', () => {
   })
 
   it.each([{}, { timeoutMs: null }] as const)('cancels a live program and closes its managed process with %j', async (timing) => {
-    const { run } = await setup()
-    const entered = Promise.withResolvers<undefined>()
+    const { run, cwd } = await setup()
     const controller = new AbortController()
-    const active = run({ ...timing, program: 'void tools.enter({}); for (;;) {}', signal: controller.signal, bindings: bindings({ enter: async () => { entered.resolve(undefined); return null } }) })
-    await entered.promise
-    controller.abort('stop')
-    expect((await active).error).toEqual({ kind: 'abort', message: 'stop' })
+    const active = run({
+      ...timing,
+      program: 'const fs = await import("node:fs"); await tools.enter({}); fs.writeFileSync("entered-loop", "ready"); for (;;) {}',
+      signal: controller.signal,
+      bindings: bindings({ enter: async () => null }),
+    })
+    try {
+      await expect.poll(async () => readFile(join(cwd, 'entered-loop'), 'utf8')).toBe('ready')
+      controller.abort('stop')
+      expect((await active).error).toEqual({ kind: 'abort', message: 'stop' })
+    } finally { controller.abort(); await active }
   })
 
   it('closes a still-running descendant before returning the program result', async () => {

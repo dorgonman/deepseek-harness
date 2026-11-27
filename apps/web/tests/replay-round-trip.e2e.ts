@@ -24,6 +24,7 @@ import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-ses
 import type { SessionListValue } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   acknowledgeReloadConnectionLoss, assertFixtureInventory, captureExpandedTurnProcessAria, captureStableAria,
   compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
@@ -70,6 +71,8 @@ describe('web e2e: fresh round trip through the real assembly', () => {
   beforeAll(async () => {
     scaffold = await launchWebScaffold({
       compareReplaySession: true,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+      pinAdmissionSourceRoot: true,
       ...(MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 15 }),
     })
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })

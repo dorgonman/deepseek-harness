@@ -24,6 +24,7 @@ import type {
   ModelModality,
   StreamChunk,
   SystemPromptUpdate,
+  ToolHistory,
   ToolSchema,
   ToolUpdate,
 } from './types.ts'
@@ -40,6 +41,7 @@ import { normalizeApiKey } from './api-key.ts'
 import {
   contentHasFile, contentHasImage, fileHandleText, projectFilesToText, projectImagesForTextModel, projectToolUpdates,
 } from './content.ts'
+import type { ProjectedToolUpdates } from './content.ts'
 import type { FileAttachmentRef, ImageAttachmentRef, ImageRequestTarget } from '@deepseek-ai/dsh-attachment'
 
 export * from './attribution.ts'
@@ -230,6 +232,18 @@ export interface PreparedLlmCall {
   readonly context?: LlmModelContext
   /** Exact model modalities captured with the adapter dispatch generation. */
   readonly inputModalities?: readonly ModelModality[]
+  /** Image pricing from the registration that will dispatch this call. */
+  readonly imagePricing?: LlmImageRequestPricing
+  /**
+   * Apply deterministic file, image and tool projection for a pending preview.
+   * @param messages - the pending message surface.
+   * @param tools - declarations active at this request.
+   * @param toolHistory - the preview Session's folded declarations and updates.
+   * @returns the base adapter projection before request-time relevance.
+   */
+  projectRequest(
+    messages: readonly RequestMessage[], tools: readonly ToolSchema[] | undefined, toolHistory?: ToolHistory,
+  ): ProjectedToolUpdates
   /** Exact model system prompt update mode captured with the adapter dispatch generation. */
   readonly systemPromptUpdate?: SystemPromptUpdate
   /** Exact model tool update mode captured with the adapter dispatch generation. */
@@ -241,9 +255,16 @@ export interface PreparedLlmCall {
    * preparation. The request's call-config fields must match {@link config};
    * reuse or mismatch fails with `INVALID_PREPARED_CALL`.
    * @param options - fully assembled request carrying the prepared config.
+   * @param beforeDispatch - optional freshness check and verification of the frozen adapter request.
    * @returns the chunk stream, including the `llm/stream` waterfall.
    */
-  stream(options: GenerateOptions): AsyncIterable<StreamChunk>
+  stream(options: GenerateOptions, beforeDispatch?: RequestDispatchGate): AsyncIterable<StreamChunk>
+}
+
+/** Check freshness at provider dispatch and after any asynchronous envelope verification. */
+interface RequestDispatchGate {
+  assertCurrent(): void
+  verify?(request: GenerateOptions): Promise<void>
 }
 
 /** One adapter-owned model-resolution generation bound to its eventual stream call. */
@@ -1083,6 +1104,7 @@ export class LlmRuntime extends TypertRemoteService {
         ? { maxTokens: true }
         : {},
     })
+    const imagePricing = registration.adapter.imageRequestPricing(provider, model)
     let dispatched = false
     return Object.freeze({
       config: resolvedConfig,
@@ -1093,9 +1115,13 @@ export class LlmRuntime extends TypertRemoteService {
       ...modelInfo.inputModalities === undefined
         ? {}
         : { inputModalities: Object.freeze([...modelInfo.inputModalities]) },
+      ...imagePricing === undefined ? {} : { imagePricing },
+      projectRequest: (
+        messages: readonly RequestMessage[], tools: readonly ToolSchema[] | undefined, toolHistory?: ToolHistory,
+      ) => this.projectRequest(messages, tools, toolHistory, modelInfo),
       ...modelInfo.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: modelInfo.systemPromptUpdate },
       ...modelInfo.toolUpdate === undefined ? {} : { toolUpdate: modelInfo.toolUpdate },
-      stream: (options: GenerateOptions): AsyncIterable<StreamChunk> => {
+      stream: (options: GenerateOptions, beforeDispatch?: RequestDispatchGate): AsyncIterable<StreamChunk> => {
         if (dispatched) {
           throw new LlmError('a prepared LLM call can only be dispatched once', 'INVALID_PREPARED_CALL')
         }
@@ -1111,6 +1137,7 @@ export class LlmRuntime extends TypertRemoteService {
           config: resolvedConfig,
           modelInfo,
           dispatch: options => adapterCall.stream(options),
+          ...beforeDispatch === undefined ? {} : { beforeDispatch },
         })
       },
     })
@@ -1159,6 +1186,24 @@ export class LlmRuntime extends TypertRemoteService {
     return fs?.processPathFromHostPath(hostPath)
   }
 
+  /** Apply the deterministic projection shared by pending previews and dispatch. */
+  private projectRequest(
+    messages: readonly RequestMessage[],
+    tools: readonly ToolSchema[] | undefined,
+    toolHistory: ToolHistory | undefined,
+    info: LlmResolvedModelInfo,
+  ): ProjectedToolUpdates {
+    const withFilesProjected = messages.some(message => contentHasFile(message.content))
+      ? projectFilesToText(messages, ref => this.fileReadPath(ref))
+      : messages
+    const withImagesProjected = info.inputModalities !== undefined
+      && !info.inputModalities.includes('image')
+      && withFilesProjected.some(message => contentHasImage(message.content))
+      ? projectImagesForTextModel(withFilesProjected)
+      : withFilesProjected
+    return projectToolUpdates(withImagesProjected, tools, info.toolUpdate, toolHistory)
+  }
+
   /**
    * Final adapter boundary. Adapter selection, dispatch, iterator construction,
    * and iteration failures become one terminal failure chunk. Middleware and
@@ -1168,13 +1213,13 @@ export class LlmRuntime extends TypertRemoteService {
     options: GenerateOptions,
     prepared?: PreparedDispatch,
   ): AsyncGenerator<StreamChunk> {
-    let iterator: AsyncIterator<StreamChunk>
+    let request: GenerateOptions
+    let dispatch: (options: GenerateOptions) => AsyncIterable<StreamChunk>
     try {
       const registration = prepared?.registration ?? this.registration(options.provider)
       const adapter = registration.adapter
       let modelInfo: LlmResolvedModelInfo
       let resolvedConfig: LlmCallConfig
-      let dispatch: (options: GenerateOptions) => AsyncIterable<StreamChunk>
       if (prepared === undefined) {
         const adapterCall = await adapter.prepareCall(options.provider, options.model, options.signal)
         modelInfo = this.normalizeModelInfo(registration, options.model, adapterCall.model)
@@ -1203,22 +1248,14 @@ export class LlmRuntime extends TypertRemoteService {
         && resolvedOptions.messages.some(message => message.content.some(block => block.type !== 'text'))) {
         throw new LlmError('The selected model requires plain text input without content projection.', 'UNSUPPORTED_CONTENT')
       }
-      // Files are never dispatched natively: every route receives handle text.
-      let projectedMessages: readonly RequestMessage[] = resolvedOptions.messages
-      if (projectedMessages.some(message => contentHasFile(message.content))) {
-        projectedMessages = projectFilesToText(projectedMessages, ref => this.fileReadPath(ref))
-      }
-      if (modelInfo.inputModalities !== undefined
-        && !modelInfo.inputModalities.includes('image')
-        && projectedMessages.some(message => contentHasImage(message.content))) {
-        projectedMessages = projectImagesForTextModel(projectedMessages)
-      }
       // Tool changes are logged on every route; the route's declared mode selects what it receives.
-      const projectedTools = projectToolUpdates(projectedMessages, resolvedOptions.tools, modelInfo.toolUpdate, resolvedOptions.toolHistory)
+      const projectedTools = this.projectRequest(
+        resolvedOptions.messages, resolvedOptions.tools, resolvedOptions.toolHistory, modelInfo,
+      )
       if (modelInfo.nativeTools === false && (projectedTools.tools?.length ?? 0) > 0) {
         throw new LlmError('The selected model does not support native tool declarations.', 'UNSUPPORTED_TOOLS')
       }
-      projectedMessages = projectedTools.messages
+      let projectedMessages = projectedTools.messages
       // An opt-in background relevance filter may elide judged-irrelevant tool
       // results from this request only. It is a merge-extensible Context
       // capability: absent by default, so ordinary routes are unaffected.
@@ -1241,8 +1278,28 @@ export class LlmRuntime extends TypertRemoteService {
         }
         if (Object.isFrozen(resolvedOptions)) deepFreeze(projectedOptions)
       }
-      const stream = dispatch(this.forAdapter(projectedOptions, adapter))
-      iterator = stream[Symbol.asyncIterator]()
+      request = this.forAdapter(projectedOptions, adapter)
+    } catch (error: unknown) {
+      yield adapterFailureChunk(error, options.signal)
+      return
+    }
+
+    // Admission and persistence failures belong to the loop, outside adapter
+    // normalization and retry. Dispatch consumes the verified object directly.
+    const gate = prepared?.beforeDispatch
+    if (gate !== undefined) {
+      request.signal?.throwIfAborted()
+      gate.assertCurrent()
+      if (gate.verify !== undefined) {
+        await gate.verify(deepFreeze(request))
+        request.signal?.throwIfAborted()
+        gate.assertCurrent()
+      }
+    }
+
+    let iterator: AsyncIterator<StreamChunk>
+    try {
+      iterator = dispatch(request)[Symbol.asyncIterator]()
     } catch (error: unknown) {
       yield adapterFailureChunk(error, options.signal)
       return
@@ -1339,6 +1396,7 @@ interface PreparedDispatch {
   readonly config: LlmCallConfig
   readonly modelInfo: LlmResolvedModelInfo
   readonly dispatch: (options: GenerateOptions) => AsyncIterable<StreamChunk>
+  readonly beforeDispatch?: RequestDispatchGate
 }
 
 export default LlmRuntime

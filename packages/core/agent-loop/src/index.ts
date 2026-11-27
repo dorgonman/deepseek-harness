@@ -578,7 +578,7 @@ export class AgentLoop extends Service implements AgentFactory {
         const created = machine = new ReactLoopAgent(
           loopCtx, id, agentOptions, session,
           projections,
-          lastTurn, abort.signal,
+          lastTurn, abort.signal, stored?.handle,
         )
         machineReady.resolve()
         // Adopt the scope on its original fiber so it cannot unload before teardown.

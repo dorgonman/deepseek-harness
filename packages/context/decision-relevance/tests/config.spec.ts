@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import {
   codePointLength,
   DEFAULT_ELISION_TEXT,
@@ -72,5 +73,19 @@ describe('decision relevance configuration', () => {
     // Cutting a surrogate pair in half would produce a lone surrogate.
     expect(truncateCodePoints('a😀b', 2)).toBe('a😀')
     expect(codePointLength(truncateCodePoints('a😀b', 2))).toBe(2)
+  })
+
+  it('rejects a deadline beyond the timer range', () => {
+    expect(resolveConfig({ timeoutMs: MAX_TIMER_DELAY_MS }).timeoutMs).toBe(MAX_TIMER_DELAY_MS)
+    expect(() => resolveConfig({ timeoutMs: MAX_TIMER_DELAY_MS + 1 })).toThrow(/exceeds the maximum timer delay/)
+  })
+
+  it.each([
+    [null, 'null'],
+    [true, 'true'],
+    [{ privateValue: 'hidden' }, 'object'],
+  ])('describes invalid threshold input as %j without dumping objects', (value, description) => {
+    const config: Record<string, unknown> = { retainThreshold: value }
+    expect(() => resolveConfig(config)).toThrow(`retainThreshold (${description}) must be a number in [0, 1]`)
   })
 })

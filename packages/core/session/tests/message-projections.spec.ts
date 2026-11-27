@@ -77,7 +77,7 @@ describe('plugin-owned message projections', () => {
     }
   })
 
-  it('registers by fiber and refuses cached or pending decisions after disposal', async () => {
+  it.each([true, false])('refuses cached or pending decisions after disposal (open checkpoint: %s)', async (gated) => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(SessionStore)
@@ -91,6 +91,13 @@ describe('plugin-owned message projections', () => {
     live.append('test/project', { seq: source.seq, text: 'changed' })
     const pending = ctx.sessions.create(SessionId('pending'))
     input(pending)
+    if (gated) pending.append('compaction/summary', {
+      compactionId: 'unfinished-checkpoint' as SessionEvent<'compaction/summary'>['data']['compactionId'],
+      summary: [{ type: 'text', text: 'unfinished' }],
+      shadowedRange: { start: source.seq, end: source.seq },
+      shadowedSeqs: [source.seq], shadowedTokenCount: 1,
+      provider: 'test', model: 'test', ledger: [], chunkCalls: [],
+    })
     pending.append('test/project', { seq: source.seq, text: 'changed' })
     const before = live.deriveMessages()
     const child = ctx.sessions.fork(live)

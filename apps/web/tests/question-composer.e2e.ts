@@ -17,6 +17,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { TIMED_WAIT_PARAMETER } from '@deepseek-ai/dsh-user-questions'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, seedSession, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
@@ -329,7 +330,11 @@ describe('web e2e: resident question composer round trip', () => {
 
   beforeAll(async () => {
     if (MODE !== 'record') hostClock = pinHostClock()
-    scaffold = await launchWebScaffold(MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 15, compareReplaySession: true })
+    scaffold = await launchWebScaffold({
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH,
+      pinAdmissionSourceRoot: true,
+      ...MODE === 'record' ? {} : { replayFixture: FIXTURE, paceMs: 15, compareReplaySession: true },
+    })
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })
     browser = await chromium.launch()
     page = await newEnglishPage(browser)

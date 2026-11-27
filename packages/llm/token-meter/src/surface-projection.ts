@@ -17,9 +17,55 @@
 
 import { deriveEventMessage, isSurfaceEvent, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { advanceCompactionCheckpoint, type PendingCompactionCheckpoint } from '@deepseek-ai/dsh-session/surface'
+import { z } from 'zod'
 // Type-only: the `compaction/*` SessionEventMap merges (shadow-price events).
 import type {} from '@deepseek-ai/dsh-compaction'
 import { estimateMessage } from './estimate.ts'
+
+const checkpointSeq = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).transform(SessionSeq)
+const checkpointFields = {
+  id: z.string().min(1).transform(value => value as PendingCompactionCheckpoint['id']),
+  seq: checkpointSeq,
+}
+
+/**
+ * Validate the pending publication price restored with a token projection.
+ * @param price - schema for the bounded price carried by the projection.
+ * @returns schema for the summary or replacement awaiting publication.
+ */
+export function meteredCheckpointSchema<T>(price: z.ZodType<T>): z.ZodType<MeteredCheckpoint<T>> {
+  return z.discriminatedUnion('phase', [
+    z.object({ phase: z.literal('summary'), ...checkpointFields, start: checkpointSeq, end: checkpointSeq }).strict(),
+    z.object({ phase: z.literal('replacement'), ...checkpointFields, price }).strict(),
+  ])
+}
+
+/** Checkpoint state with the bounded price staged at its replacement. */
+export type MeteredCheckpoint<T> = PendingCompactionCheckpoint<{ readonly price: T }>
+
+/**
+ * Keep an incremental replacement price pending until the Session publishes it.
+ * @param checkpoint - previously pending price, if any.
+ * @param event - next Session event.
+ * @param price - price the candidate replacement against the current projection.
+ * @returns the price transition, or undefined for ordinary events.
+ */
+export function checkpointPriceTransition<T>(
+  checkpoint: MeteredCheckpoint<T> | undefined,
+  event: SessionEvent,
+  price: (event: SessionEvent<'user/message'>) => T,
+): { checkpoint?: MeteredCheckpoint<T>; suppress?: true; publish?: T } | undefined {
+  const transition = advanceCompactionCheckpoint(checkpoint, event)
+  switch (transition?.kind) {
+    case 'arm': return { checkpoint: transition.checkpoint }
+    case 'defer': return { checkpoint: { ...transition.checkpoint, price: price(transition.replacement.event) }, suppress: true }
+    case 'suppress': return { suppress: true }
+    case 'clear': return {}
+    case 'publish': return { publish: transition.checkpoint.price }
+    default: return undefined
+  }
+}
 
 /**
  * One armed shadow price: the heuristic tokens of the surface range the

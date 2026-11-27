@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } f
 import * as fsPromises from 'node:fs/promises'
 import { once } from 'node:events'
 import { tmpdir } from 'node:os'
-import { delimiter, join, relative, sep } from 'node:path'
+import { delimiter, dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterAll, describe, expect, it, vi, type TestContext } from 'vitest'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
@@ -681,6 +681,25 @@ describe('runScenario', () => {
     expect(child).not.toBe('')
     expect(child).not.toBe('..')
     expect(child.startsWith(`..${sep}`)).toBe(false)
+  })
+
+  it('pads the generated workspace to the requested JSON path length', async () => {
+    const { fixtureFile } = await scenario({})
+    const workspaceParent = await mkdtemp(join(tmpdir(), 'acp-snap-parent-'))
+    tempDirs.push(workspaceParent)
+    const canonicalParent = await realpath(workspaceParent)
+    const workspaceCwdTextLength = JSON.stringify(canonicalParent).length + 48
+    const { cwd } = await runScenario(
+      { steps: boot },
+      { agent: AGENT, mode: 'replay', fixtureFile, workspaceParent, workspaceCwdTextLength },
+    )
+    expect(JSON.stringify(cwd)).toHaveLength(workspaceCwdTextLength)
+    expect(await realpath(dirname(cwd))).toBe(canonicalParent)
+    await expect(runScenario(
+      { steps: boot },
+      { agent: AGENT, mode: 'replay', fixtureFile, workspaceParent, workspaceCwdTextLength: 1 },
+    )).rejects.toThrow('snapshot workspace parent exceeds its fixed cwd text length')
+    expect(await readdir(workspaceParent)).toEqual([])
   })
 
   it('promptAndCancel waits for the durable turn start, cancels, and settles the prompt', { timeout: 20_000 }, async () => {

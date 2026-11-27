@@ -25,7 +25,7 @@ import RemoteAccessService from '@deepseek-ai/dsh-api-remote-access'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import { Peer } from '@deepseek-ai/dsh-client-connection'
 import type { Principal } from '@deepseek-ai/dsh-typert-protocol'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import AgentPresets, { type PresetDefinition } from '../src/index.ts'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
@@ -543,6 +543,22 @@ describe('profile-owned compaction policy control', () => {
     expect(ctx.compactionPolicyControl.read('preset-standard')).toEqual(before)
     expect(readFileSync(profile.patchPath, 'utf8')).toBe(bytes)
     expect(ctx.agentPresets.serviceFor(await agent(ctx, 'policy-compatibility-after'), 'compaction')).toBeUndefined()
+  })
+
+  it('rolls back the policy and releases its scope lease when the leased mount is unavailable', async () => {
+    const { ctx, profile } = await fixture()
+    const before = ctx.compactionPolicyControl.read('preset-standard')
+    const bytes = readFileSync(profile.patchPath, 'utf8')
+    const release = vi.fn(() => Promise.resolve())
+    const acquire = vi.spyOn(ctx.agentPresets, 'acquireScope').mockResolvedValueOnce({ key: {}, [Symbol.asyncDispose]: release })
+    onTestFinished(() => { acquire.mockRestore() })
+
+    await expect(ctx.compactionPolicyControl.setSummaryTarget(request(ctx))).rejects.toMatchObject({ code: 'compaction-policy/rejected' })
+    expect(acquire).toHaveBeenCalledExactlyOnceWith('standard')
+    expect(release).toHaveBeenCalledOnce()
+    expect(readFileSync(profile.patchPath, 'utf8')).toBe(bytes)
+    expect(ctx.compactionPolicyControl.read(before.entryId)).toEqual(before)
+    expect(engine(ctx, await agent(ctx, 'policy-missing-mount')).config.summarizationModel).toBe('original')
   })
 
   it('withdraws and remounts the policy service with the real optional editor lifecycle', async () => {

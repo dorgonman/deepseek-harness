@@ -6,6 +6,7 @@ import { chromium, type Browser, type Page } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type {} from '@deepseek-ai/dsh-plugin-manager'
 import {
+  ADMISSION_WORKSPACE_PATH_LENGTH,
   acknowledgeReloadConnectionLoss, assertFixtureInventory, captureStableAria, compareOrRefreshGolden,
   fixtureUserPrompts, launchWebScaffold, watchConsole, type WebScaffold,
 } from './scaffold.ts'
@@ -23,6 +24,7 @@ describe('official plugin recommendation in a conversation', () => {
 
   beforeAll(async () => {
     scaffold = await launchWebScaffold({ replayFixture: fixture, compareReplaySession: true,
+      workspacePathLength: ADMISSION_WORKSPACE_PATH_LENGTH, pinAdmissionSourceRoot: true,
       profile: { packages: [{ dir: fileURLToPath(new URL('../../../packages/experimental/personalized-recommendations', import.meta.url)), enabled: true }] },
     })
     // The recorded conversation exercises voice input; unrelated installed plugins vary by Host.
