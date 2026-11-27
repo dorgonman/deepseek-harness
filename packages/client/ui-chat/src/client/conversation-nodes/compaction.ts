@@ -1,10 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {
-  CompactionSummaryNode, ConversationMatch, ConversationNodeContext, ConversationNodeDefinition,
+  CompactionSummaryNode, ConversationNodeDefinition,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-compaction/types'
 import { chatNode } from './common.ts'
-import { compactSource, compactSummary, updateCompactionState } from './command.ts'
+import { compactSource, compactSummary, updateCompactionState, type CompactionEvidence } from './command.ts'
 
 declare module '../contract/chat-nodes.ts' {
   interface ChatNodeDataMap {
@@ -13,22 +13,8 @@ declare module '../contract/chat-nodes.ts' {
   }
 }
 
-interface CompactionState {
-  readonly summary?: ConversationMatch
-  readonly checkpoint?: ConversationMatch
-}
-
-function fallbackState(context: ConversationNodeContext<CompactionState>): CompactionState {
-  const summary = context.matches.find(match => match.event.type === 'compaction/summary')
-  const checkpoint = context.matches.find(match => compactSource(match.event) !== undefined)
-  return {
-    ...summary === undefined ? {} : { summary },
-    ...checkpoint === undefined ? {} : { checkpoint },
-  }
-}
-
 /** Automatic compaction lifecycle and landed checkpoint Definition. */
-export const compactionDefinition: ConversationNodeDefinition<CompactionState> = {
+export const compactionDefinition: ConversationNodeDefinition<CompactionEvidence> = {
   kind: 'compaction',
   target: 'chat',
   match: (event) => {
@@ -49,10 +35,9 @@ export const compactionDefinition: ConversationNodeDefinition<CompactionState> =
   start: () => ({}),
   update: (context, match) => updateCompactionState(context.state, match),
   buildViewNode: (context) => {
-    const state = context.state ?? fallbackState(context)
-    if (state.checkpoint === undefined) return null
-    const marker = compactSummary(state.summary, state.checkpoint)
-    return chatNode(context, 'compaction', marker.seq, marker)
+    const evidence = context.state ?? context.matches.reduce(updateCompactionState<CompactionEvidence>, {})
+    const marker = compactSummary(context, evidence)
+    return marker === null ? null : chatNode(context, 'compaction', marker.seq, marker)
   },
 }
 

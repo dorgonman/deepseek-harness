@@ -5,7 +5,10 @@ import type {
 import type { CompactionCheckpointSource } from '@deepseek-ai/dsh-compaction/checkpoint'
 import type {} from '@deepseek-ai/dsh-compaction/types'
 import type {} from '@deepseek-ai/dsh-commands/types'
-import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session/surface'
+import {
+  advanceCompactionCheckpoint, isReplacementSurfaceEvent,
+  type PendingCompactionCheckpoint,
+} from '@deepseek-ai/dsh-session/surface'
 import type { ManualCompactionChatData } from '../contract/chat-nodes.ts'
 import { chatNode } from './common.ts'
 
@@ -22,15 +25,15 @@ type CommandId = CommandNode['commandId']
 
 const COMPACT_KIND: CompactionCheckpointSource['kind'] = 'compact-checkpoint'
 
-interface CommandState {
+interface CommandState extends CompactionEvidence {
   readonly command: CommandNode
-  readonly summary?: ConversationMatch
-  readonly checkpoint?: ConversationMatch
 }
 
-interface CompactionEvidence {
+/** Correlated records needed to verify a Chat compaction marker. */
+export interface CompactionEvidence {
   readonly summary?: ConversationMatch
   readonly checkpoint?: ConversationMatch
+  readonly close?: ConversationMatch
 }
 
 function commandFromRun(match: ConversationMatch): CommandNode {
@@ -93,47 +96,72 @@ function compactSource(event: Parameters<ConversationNodeDefinition['match']>[0]
 }
 
 /**
- * Build the visible summary marker from optional lifecycle evidence.
- * @param match - compaction/summary Match, when loaded.
- * @param checkpoint - replacement checkpoint Match.
- * @returns final compaction summary Node data.
+ * Build the marker once its checkpoint is published in the loaded history.
+ * @param context - current conversation history window.
+ * @param evidence - correlated compaction events.
+ * @returns the published marker, or null while publication cannot be verified.
  */
-function compactSummary(match: ConversationMatch | undefined, checkpoint: ConversationMatch): CompactionSummaryNode {
-  let summary: string | null = null
-  let shadowedItemCount: number | null = null
-  let shadowedTokenCount: number | null = null
-  if (match?.event.type === 'compaction/summary') {
-    const data = match.event.data
-    if (Array.isArray(data.summary)) {
-      const text = data.summary
-        .map(block => block.type === 'text' ? block.text : '')
-        .join('')
-      summary = text.trim() === '' ? null : text
-    }
-    shadowedItemCount = Array.isArray(data.shadowedSeqs)
-      && data.shadowedSeqs.every(seq => Number.isSafeInteger(seq) && seq >= 0)
-      ? data.shadowedSeqs.length
-      : null
-    shadowedTokenCount = Number.isSafeInteger(data.shadowedTokenCount)
-      && data.shadowedTokenCount >= 0
-      ? data.shadowedTokenCount
-      : null
+function compactSummary(context: ConversationNodeContext, evidence: CompactionEvidence): CompactionSummaryNode | null {
+  const summary = evidence.summary?.event
+  const checkpoint = evidence.checkpoint?.event
+  if (summary?.type !== 'compaction/summary' || checkpoint === undefined
+    || compactSource(checkpoint)?.compactionId !== summary.data.compactionId) return null
+
+  const start = advanceCompactionCheckpoint(undefined, summary)
+  if (start?.kind === 'arm') {
+    const close = evidence.close?.event
+    if (close === undefined || close.seq <= checkpoint.seq
+      || !publishesCheckpoint(context.loadedEvent, start.checkpoint, checkpoint.seq, close.seq)) return null
   }
+
+  const { data } = summary
+  const text = Array.isArray(data.summary)
+    ? data.summary.map(block => block.type === 'text' ? block.text : '').join('')
+    : ''
   return {
     kind: 'compaction',
-    seq: checkpoint.event.seq,
-    time: checkpoint.event.time,
-    summary,
-    summaryEventSeq: match?.event.seq ?? null,
-    shadowedItemCount,
-    shadowedTokenCount,
+    seq: checkpoint.seq,
+    time: checkpoint.time,
+    summary: text.trim() === '' ? null : text,
+    summaryEventSeq: summary.seq,
+    shadowedItemCount: Array.isArray(data.shadowedSeqs)
+      && data.shadowedSeqs.every(seq => Number.isSafeInteger(seq) && seq >= 0)
+      ? data.shadowedSeqs.length
+      : null,
+    shadowedTokenCount: Number.isSafeInteger(data.shadowedTokenCount) && data.shadowedTokenCount >= 0
+      ? data.shadowedTokenCount
+      : null,
   }
+}
+
+function publishesCheckpoint(
+  loadedEvent: ConversationNodeContext['loadedEvent'],
+  summary: Extract<PendingCompactionCheckpoint, { phase: 'summary' }>,
+  checkpointSeq: number,
+  closeSeq: number,
+): boolean {
+  // Events owned by another Node can interrupt publication inside this interval.
+  let pending: PendingCompactionCheckpoint = summary
+  for (let seq = summary.seq + 1; seq <= closeSeq; seq++) {
+    const event = loadedEvent(seq)
+    if (event === undefined) return false
+    const transition = advanceCompactionCheckpoint(pending, event)
+    switch (transition?.kind) {
+      case 'arm':
+      case 'defer': pending = transition.checkpoint; break
+      case 'suppress':
+      case 'clear': return false
+      case 'publish': return transition.seq === checkpointSeq
+      case undefined: break
+    }
+  }
+  return false
 }
 
 function fallbackState(context: ConversationNodeContext<CommandState>): CommandState | undefined {
   const done = context.matches.find(match => match.event.type === 'command/done')
-  const checkpoint = context.matches.find(match => compactSource(match.event) !== undefined)
-  const summary = context.matches.find(match => match.event.type === 'compaction/summary')
+  const evidence = context.matches.reduce(updateCompactionState<CompactionEvidence>, {})
+  const { checkpoint } = evidence
   if (checkpoint === undefined) return done === undefined ? undefined : { command: commandFromDone(done) }
   const source = compactSource(checkpoint.event)
   if (source?.sourceCommandId === undefined) return done === undefined ? undefined : { command: commandFromDone(done) }
@@ -148,11 +176,7 @@ function fallbackState(context: ConversationNodeContext<CommandState>): CommandS
       outcome: null,
     }
     : { ...commandFromDone(done), name: 'compact' }
-  return {
-    command: fallbackCommand,
-    checkpoint,
-    ...summary === undefined ? {} : { summary },
-  }
+  return { command: fallbackCommand, ...evidence }
 }
 
 /**
@@ -167,6 +191,8 @@ export function updateCompactionState<State extends CompactionEvidence>(
 ): State {
   if (match.event.type === 'compaction/summary') return { ...state, summary: match }
   if (compactSource(match.event) !== undefined) return { ...state, checkpoint: match }
+  if (match.event.type === 'compaction/end' && state.summary?.event.type === 'compaction/summary'
+    && match.event.data.compactionId === state.summary.event.data.compactionId) return { ...state, close: match }
   return state
 }
 
@@ -207,9 +233,7 @@ export const commandDefinition: ConversationNodeDefinition<CommandState> = {
     if (state.command.name !== 'compact') {
       return chatNode(context, 'command', state.command.seq, state.command)
     }
-    const compaction = state.checkpoint === undefined
-      ? null
-      : compactSummary(state.summary, state.checkpoint)
+    const compaction = compactSummary(context, state)
     const data: ManualCompactionChatData = { command: state.command, compaction }
     return chatNode(context, 'manual-compaction', compaction?.seq ?? state.command.seq, data)
   },
