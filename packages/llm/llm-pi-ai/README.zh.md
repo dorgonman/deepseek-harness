@@ -136,7 +136,7 @@ pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无
 
 提供方的 HTTP 408 响应与携带 `code: request_timeout` 的错误映射为 `TIMEOUT`，即使提供方的通用错误类型是 `invalid_request_error`。仅有取消措辞不会使失败变为可重试；恢复行为由路由的重试策略决定。
 
-该空闲间隔限制 Chat 和 Decision 请求中每次等待转换后流块的读取，不计消费方的处理时间。SSE 注释、被丢弃的 start 事件和仅含 usage 的帧不会延长该间隔。超时以 `TIMEOUT` 失败并中止提供方请求；调用方取消仍为 `ABORTED`。该间隔与 `timeoutMs` 相互独立。
+该空闲间隔限制 Chat 和 Decision 请求中每次等待转换后流块的读取，不计消费方的处理时间。适配器缓存驻留 Chat 的回复并等待终止帧校验时，每次收到非空文本都会重新计时。SSE 注释、被丢弃的 start 事件和仅含 usage 的帧不会延长该间隔。超时以 `TIMEOUT` 失败并中止提供方请求；调用方取消仍为 `ABORTED`。该间隔与 `timeoutMs` 相互独立。
 
 Config 更新严格验证发生变化的 provider。初始加载将已存储的目录故障保留为可编辑的 provider 诊断；未更改的故障 provider 不阻止其他编辑。可用模型仍可选择，无法解析的模型在网络 I/O 前失败。修复或删除问题配置会清除其诊断。
 

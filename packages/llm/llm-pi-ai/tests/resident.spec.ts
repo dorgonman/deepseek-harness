@@ -12,7 +12,7 @@ import { Config, resolveProfiles } from '../src/config.ts'
 import { streamKinfResident } from '../src/resident.ts'
 import type { KinfResidentRequest } from '../src/resident.ts'
 import { memoryAuth } from './auth-double.ts'
-import { closeMockServers, mockServer } from './mock-server.ts'
+import { closeMockServers, controlledSseResponse, mockServer } from './mock-server.ts'
 
 const MODEL = 'fixture-resident-chat'
 const KEY = 'resident-fixture-key'
@@ -115,8 +115,10 @@ const RESIDENT_MODEL: PiAiModelProfile = {
 }
 
 /** Collect a chunk stream, retaining whatever was emitted before an error. */
-async function drain(stream: AsyncIterable<StreamChunk>): Promise<{ chunks: StreamChunk[]; error?: unknown }> {
-  const chunks: StreamChunk[] = []
+async function drain(
+  stream: AsyncIterable<StreamChunk>,
+  chunks: StreamChunk[] = [],
+): Promise<{ chunks: StreamChunk[]; error?: unknown }> {
   try {
     for await (const chunk of stream) chunks.push(chunk)
   } catch (error) {
@@ -126,6 +128,60 @@ async function drain(stream: AsyncIterable<StreamChunk>): Promise<{ chunks: Stre
 }
 
 describe('KINF resident-only transport', () => {
+  it.each(['finishes', 'stalls'] as const)('rearms idle while resident text is buffered and the stream %s', async (outcome) => {
+    const wire = controlledSseResponse()
+    let aborted = false
+    const fetchMock = vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+      const signal = init?.signal
+      if (signal === undefined || signal === null) throw new Error('expected a resident cancellation signal')
+      signal.addEventListener('abort', () => {
+        aborted = true
+        wire.abort(signal.reason)
+      }, { once: true })
+      return Promise.resolve(wire.response)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const emitted: StreamChunk[] = []
+    const pending = drain(adapter('https://fixture.invalid/v1', [{ ...RESIDENT_MODEL, streamIdleTimeoutMs: 20 }]).stream({
+      provider: 'fixture', model: MODEL, messages: [userMessage('hi')], residentBinding: BINDING,
+    }), emitted)
+    try {
+      await wire.readRequested(1)
+      wire.write(`data: ${JSON.stringify(firstFrame())}\n\n`)
+      await wire.readRequested(2)
+      await vi.advanceTimersByTimeAsync(15)
+      wire.write(`data: ${JSON.stringify(textFrame('hello'))}\n\n`)
+      await wire.readRequested(3)
+      await vi.advanceTimersByTimeAsync(15)
+      expect(aborted).toBe(false)
+      expect(emitted).toEqual([])
+      if (outcome === 'finishes') {
+        wire.write(`data: ${JSON.stringify(textFrame(' resident'))}\n\n`)
+        await wire.readRequested(4)
+        await vi.advanceTimersByTimeAsync(15)
+        expect(emitted).toEqual([])
+        wire.write(`data: ${JSON.stringify(finishFrame())}\n\ndata: [DONE]\n\n`)
+        expect((await pending).error).toBeUndefined()
+        expect(emitted).toContainEqual({ type: 'block-end', index: 0, block: { type: 'text', text: 'hello resident' } })
+      } else {
+        wire.write('data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":0}}\n\n')
+        await wire.readRequested(4)
+        await vi.advanceTimersByTimeAsync(4)
+        wire.write(': heartbeat\n\n')
+        await wire.readRequested(5)
+        await vi.advanceTimersByTimeAsync(1)
+        expect((await pending).error).toMatchObject({ code: 'TIMEOUT' })
+        expect(emitted).toEqual([])
+      }
+      expect(fetchMock).toHaveBeenCalledOnce()
+    } finally {
+      wire.abort(new Error('resident fixture complete'))
+      vi.useRealTimers()
+      await pending
+    }
+  })
+
   it('refuses an undeclared row before any request', async () => {
     const server = await mockServer([{ events: sse([firstFrame(), textFrame('hi'), finishFrame()]) }])
     const result = await drain(adapter(server.url, [{ id: MODEL, contextWindow: 65_536 }]).stream({

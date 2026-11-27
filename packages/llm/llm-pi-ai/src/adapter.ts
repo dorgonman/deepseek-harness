@@ -569,6 +569,7 @@ export class PiAiAdapter extends LlmAdapter {
           ...options.temperature === undefined ? {} : { temperature: 0 },
           binding: options.residentBinding,
           signal: watchdog.signal,
+          onTextProgress: () => { watchdog.pulse() },
         })
         try {
           for (;;) {

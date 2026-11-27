@@ -136,7 +136,7 @@ A route pi-ai does not ship needs `api`, `baseURL`, and a non-empty `models` lis
 
 Provider HTTP 408 responses and errors carrying `code: request_timeout` map to `TIMEOUT`, even when the provider's generic error type is `invalid_request_error`. Cancellation wording alone does not make a failure retryable; the route's retry policy controls recovery.
 
-The idle interval bounds each outstanding read of a converted stream chunk for Chat and Decision requests, excluding consumer processing time. SSE comments, dropped start events, and usage-only frames do not extend it. Expiry fails with `TIMEOUT` and aborts the provider request; caller cancellation remains `ABORTED`. This interval is independent of `timeoutMs`.
+The idle interval bounds each outstanding read of a converted stream chunk for Chat and Decision requests, excluding consumer processing time. Nonempty text received from resident Chat rearms the idle watchdog while the adapter buffers the reply for terminal validation. SSE comments, dropped start events, and usage-only frames do not extend the interval. Expiry fails with `TIMEOUT` and aborts the provider request; caller cancellation remains `ABORTED`. This interval is independent of `timeoutMs`.
 
 Config updates strictly validate changed providers. Initial loading retains stored catalog failures as editable provider diagnostics; unchanged failed providers do not block edits elsewhere. Serviceable models remain selectable, and unresolved models fail before network I/O. Repairing or deleting the offending configuration clears its diagnostic.
 

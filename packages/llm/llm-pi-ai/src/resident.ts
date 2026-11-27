@@ -62,6 +62,8 @@ export interface KinfResidentRequest {
   binding: ResidentCallBinding
   /** Caller cancellation forwarded to the request. */
   signal?: AbortSignal
+  /** Reports received nonempty text while the reply awaits terminal validation. */
+  onTextProgress?: () => void
 }
 
 /** A contract violation in a resident reply. */
@@ -414,7 +416,10 @@ export async function* streamKinfResident(request: KinfResidentRequest): AsyncGe
       first = true
       if (choice !== undefined) {
         const content = record(choice['delta'])?.['content']
-        if (typeof content === 'string' && content.length > 0) deltas.push(content)
+        if (typeof content === 'string' && content.length > 0) {
+          deltas.push(content)
+          request.onTextProgress?.()
+        }
         if (finishing) reason = finishReason(terminal)
       }
       const frameUsage = usageOf(frame)
