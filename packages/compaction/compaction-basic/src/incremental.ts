@@ -215,7 +215,8 @@ export function summaryTransactionCommitted(events: readonly SessionEvent[], ind
   for (let cursor = index + 1; cursor < events.length; cursor += 1) {
     const next = events[cursor]
     if (next === undefined) return false
-    const transition = advanceCompactionCheckpoint(pending, next)
+    const transition: ReturnType<typeof advanceCompactionCheckpoint> =
+      advanceCompactionCheckpoint(pending, next)
     if (transition?.kind === 'publish') return true
     if (transition?.kind === 'defer') pending = transition.checkpoint
     else if (transition !== undefined) return false

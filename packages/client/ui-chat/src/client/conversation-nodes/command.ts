@@ -145,7 +145,8 @@ function publishesCheckpoint(
   for (let seq = summary.seq + 1; seq <= closeSeq; seq++) {
     const event = loadedEvent(seq)
     if (event === undefined) return false
-    const transition = advanceCompactionCheckpoint(pending, event)
+    const transition: ReturnType<typeof advanceCompactionCheckpoint> =
+      advanceCompactionCheckpoint(pending, event)
     switch (transition?.kind) {
       case 'arm':
       case 'defer': pending = transition.checkpoint; break
