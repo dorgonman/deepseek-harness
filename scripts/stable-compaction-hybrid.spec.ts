@@ -1695,6 +1695,60 @@ it('refreshes once after a definite stale refusal and selects another already-lo
 })
 
 it.each([
+  { name: 'dispatches a fresh prepared call for each resident chunk after reselection', staleAfterFirst: false },
+  { name: 'refuses a late stale refusal without reselecting after a resident chunk', staleAfterFirst: true },
+])('$name', async ({ staleAfterFirst }) => {
+  const qwenReplies = staleAfterFirst ? ['observe', 'summary', 'stale'] as const : ['observe', 'stale', 'unloaded'] as const
+  const flashReplies: readonly NativeResidentReply[] = staleAfterFirst
+    ? ['observe']
+    : ['observe', 'observe', ...Array.from({ length: 6 }, () => 'summary' as const)]
+  await withResidentComposition(qwenReplies, flashReplies, async (ctx, root, qwen, flash) => {
+    const chat = new WindowAdapter(Array.from({ length: 6 }, () => textResponse('Acknowledged.')))
+    ctx.llm.registerAdapter([wide.provider], chat)
+    const sessionId = SessionId('hybrid-kinf-multiple-chunks')
+    const owned = await ctx.agents.create({ sessionId, agentOptions: wide, meta: { cwd: root } })
+    for (const label of ['first', 'second', 'third', 'fourth', 'fifth', 'sixth']) {
+      await send(owned.agent, label + ' owned context. ' + 'delta signal verified. '.repeat(1_250))
+    }
+    const before = (await ctx.sessionQuery.readSession(sessionId)).events
+    const header = owned.agent.session.requestHeader()
+    const surface = [...owned.agent.session.surface.nodes]
+    const compact = ctx.compaction.compactNow(owned.agent, signal)
+    if (staleAfterFirst) {
+      await expect(compact).rejects.toMatchObject({ code: 'summary', cause: { code: 'RESIDENT_PRECONDITION_STALE' } })
+      expect(qwen.server.paths).toEqual([observationPath, residentPath, residentPath])
+      expect(flash.server.paths).toEqual([observationPath])
+      expectResidentRequests(qwen, local27b, [1, 1])
+    } else {
+      expect(await compact).not.toBeNull()
+      expect(qwen.server.paths).toEqual([observationPath, residentPath, observationPath])
+      expect(flash.server.paths.slice(0, 2)).toEqual([observationPath, observationPath])
+      expectResidentRequests(qwen, local27b, [1])
+      const dispatched = flash.server.paths.slice(2)
+      expect(dispatched.length).toBeGreaterThan(1)
+      expectResidentRequests(flash, localFlash, dispatched.map(() => 2))
+    }
+
+    expect(chat.requests).toHaveLength(6)
+    const { events } = await ctx.sessionQuery.readSession(sessionId)
+    expect(events.slice(0, before.length)).toEqual(before)
+    expect(checkpoints(events)).toHaveLength(staleAfterFirst ? 0 : 1)
+    if (staleAfterFirst) {
+      expect(owned.agent.session.surface.nodes).toEqual(surface)
+      expect(owned.agent.session.requestHeader()).toEqual(header)
+    } else {
+      const record = events.findLast(event => event.type === 'compaction/summary')
+      const dispatched = flash.server.paths.filter(path => path === residentPath).length
+      expect(record?.data.residentSelection).toMatchObject({ alias: flash.alias, residentGeneration: 'resident-flash-2' })
+      expect(record?.data.chunkCalls).toHaveLength(dispatched)
+      expect(new Set(record?.data.residentSelection?.projectionIds).size).toBe(dispatched)
+    }
+    await owned.dispose()
+    expect((await ctx.sessionQuery.readSession(sessionId)).events).toEqual(events)
+  }, { auto: false })
+})
+
+it.each([
   { name: 'no eligible resident', qwenReplies: ['unloaded'], flashReplies: ['unloaded'], generations: [], code: 'no-eligible' },
   { name: 'a second stale refusal', qwenReplies: ['observe', 'stale', 'observe', 'stale'], flashReplies: ['unloaded', 'unloaded'], generations: [1, 2], code: 'RESIDENT_PRECONDITION_STALE' },
   { name: 'ambiguous acceptance', qwenReplies: ['observe', 'ambiguous'], flashReplies: ['observe'], generations: [1], code: 'RESIDENT_ACCEPTANCE_AMBIGUOUS' },

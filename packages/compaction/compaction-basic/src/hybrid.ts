@@ -409,7 +409,7 @@ export default class HybridCompactionEngine extends BasicCompactionEngine {
     /** Each successful extraction merges at least one validated claim before view construction. */
     let ledger = priorLedger ?? []
     for (const [index, chunk] of chunks.entries()) {
-      const prepared = index === 0 || resident ? first : await prepare()
+      const prepared = index === 0 ? first : await prepare()
       const { call } = prepared
       assertCurrent()
       if (prepared.window !== first.window || call.config.maxTokens !== maxTokens
