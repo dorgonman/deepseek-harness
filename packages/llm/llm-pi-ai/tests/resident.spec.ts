@@ -368,16 +368,29 @@ describe('KINF resident-only transport', () => {
     expect(result.chunks).toEqual([])
   })
 
-  it('aborts a request the adapter dispatched over the resident transport', async () => {
-    const server = await mockServer([{ events: sse([firstFrame()]), holdOpen: true }])
+  it('forwards caller cancellation while the resident response headers are outstanding', async () => {
+    const dispatched = Promise.withResolvers<'dispatched'>()
+    const fetchMock = vi.fn((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal
+      if (signal === undefined || signal === null) throw new Error('expected a resident cancellation signal')
+      signal.addEventListener('abort', () => { reject(signal.reason) }, { once: true })
+      dispatched.resolve('dispatched')
+    }))
+    vi.stubGlobal('fetch', fetchMock)
     const controller = new AbortController()
-    const pending = drain(adapter(server.url, [RESIDENT_MODEL]).stream({
+    const pending = drain(adapter('https://fixture.invalid/v1', [RESIDENT_MODEL]).stream({
       provider: 'fixture', model: MODEL, messages: [userMessage('hi')], residentBinding: BINDING,
       signal: controller.signal,
     }))
-    await server.requestReceived
-    controller.abort()
-    expect((await pending).error).toMatchObject({ code: 'ABORTED' })
+    try {
+      expect(await Promise.race([dispatched.promise, pending])).toBe('dispatched')
+      controller.abort()
+      expect(await pending).toMatchObject({ chunks: [], error: { code: 'ABORTED' } })
+      expect(fetchMock).toHaveBeenCalledOnce()
+    } finally {
+      controller.abort()
+      await pending
+    }
   })
 
   it('maps an accepted:false refusal to RESIDENT_PRECONDITION_STALE without retrying', async () => {
