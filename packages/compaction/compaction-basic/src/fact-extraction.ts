@@ -138,5 +138,5 @@ export function mergeExtractedFacts(
   options: FactExtractionOptions,
 ): FactRecord[] {
   const parsed = parseFactExtraction(text, allowedSources, options)
-  return mergeFacts(prior, createFacts(parsed, events))
+  return mergeFacts(prior, createFacts(parsed, events), events)
 }

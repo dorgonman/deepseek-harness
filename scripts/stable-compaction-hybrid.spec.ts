@@ -35,7 +35,7 @@ import { expect, it, onTestFinished, vi } from 'vitest'
 import { advanceCoverage, deriveCommittedCoverage, digestCanonical, digestPolicy, digestRange } from '../packages/compaction/compaction-basic/src/incremental.ts'
 import { projectSummaryTranscript } from '../packages/compaction/compaction-basic/src/request-projection.ts'
 import { frameSummary, prepareSummaryCall } from '../packages/compaction/compaction-basic/src/summarizer.ts'
-import { validateLedger } from '../packages/compaction/compaction-basic/src/fact-ledger.ts'
+import { deriveCommittedLedger, validateLedger } from '../packages/compaction/compaction-basic/src/fact-ledger.ts'
 import { createKinfResidentObservationSource } from '../packages/compaction/compaction-basic/src/kinf-resident-observation.ts'
 import type { ResidentObservationRequest, ResidentObservationSource } from '../packages/compaction/compaction-basic/src/resident-observation.ts'
 import {
@@ -1929,7 +1929,7 @@ it('refuses a same-route next turn whose envelope exceeds the window', async () 
   }, { auto: true, thresholdRatio: 0.95, maxTokens: 1_024 })
 }, 60_000)
 
-it('restores a fact-ledger checkpoint in a fresh Basic context (rollback compatibility)', async () => {
+it('restores a merged fact-ledger checkpoint in a fresh Basic context', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-hybrid-cold-'))
   const sessionId = SessionId('hybrid-cold-ledger')
   const mount = async (engine: 'hybrid' | 'basic', config: CompactionOverrides) => {
@@ -1939,8 +1939,7 @@ it('restores a fact-ledger checkpoint in a fresh Basic context (rollback compati
     return ctx
   }
   try {
-    let factCount = 0
-    let coverageRevision = 0
+    let sourceEventIds: readonly SessionSeq[] = []
     {
       const ctx = await mount('hybrid', { incremental: true, factLedger: true })
       try {
@@ -1955,11 +1954,22 @@ it('restores a fact-ledger checkpoint in a fresh Basic context (rollback compati
         })
         await send(owned.agent, 'COLD_LEDGER_HISTORY '.repeat(400))
         expect(await ctx.compaction.compactNow(owned.agent, signal)).not.toBeNull()
+        await send(owned.agent, 'COLD_LEDGER_MORE_HISTORY '.repeat(200))
+        expect(await ctx.compaction.compactNow(owned.agent, signal)).not.toBeNull()
         const events = (await ctx.sessionQuery.readSession(sessionId)).events
-        factCount = events.flatMap(event => event.type === 'compaction/summary' ? event.data.ledger ?? [] : []).length
-        coverageRevision = deriveCommittedCoverage(events)?.revision ?? 0
-        expect(factCount).toBeGreaterThan(0)
-        expect(coverageRevision).toBeGreaterThan(0)
+        const summaries = events.filter((event): event is SessionEvent<'compaction/summary'> =>
+          event.type === 'compaction/summary' && event.data.ledger !== undefined)
+        expect(summaries).toHaveLength(2)
+        const first = summaries[0]!.data.ledger!
+        const merged = summaries[1]!.data.ledger!
+        expect(first).toHaveLength(1)
+        expect(merged).toHaveLength(1)
+        expect(merged[0]!.factId).toBe(first[0]!.factId)
+        sourceEventIds = merged[0]!.sourceEventIds
+        expect(sourceEventIds).toHaveLength(2)
+        expect(sourceEventIds[0]).toBe(first[0]!.sourceEventIds[0])
+        validateLedger(merged, events)
+        expect(deriveCommittedCoverage(events)?.revision).toBe(2)
         await owned.dispose()
       } finally {
         await ctx.fiber.dispose()
@@ -1973,11 +1983,14 @@ it('restores a fact-ledger checkpoint in a fresh Basic context (rollback compati
       chat.windows.set('wide', 4_000_000)
       ctx.llm.registerAdapter([wide.provider], chat)
       const events = (await ctx.sessionQuery.readSession(sessionId)).events
-      const ledger = events.flatMap(event => event.type === 'compaction/summary' ? event.data.ledger ?? [] : [])
-      expect(ledger).toHaveLength(factCount)
-      validateLedger(ledger, events)
-      expect(deriveCommittedCoverage(events)?.revision).toBe(coverageRevision)
-      expect(checkpoints(events)).toHaveLength(1)
+      const summary = events.findLast((event): event is SessionEvent<'compaction/summary'> =>
+        event.type === 'compaction/summary' && event.data.ledger !== undefined)
+      const ledger = summary?.data.ledger
+      expect(ledger).toHaveLength(1)
+      expect(ledger?.[0]?.sourceEventIds).toEqual(sourceEventIds)
+      expect(deriveCommittedLedger(events)).toEqual(ledger)
+      expect(deriveCommittedCoverage(events)?.revision).toBe(2)
+      expect(checkpoints(events)).toHaveLength(2)
 
       const handle = await ctx.agents.resume({
         resumeSessionId: sessionId, agentOptions: { ...wide, maxTokens: 1_024 },
@@ -1986,7 +1999,7 @@ it('restores a fact-ledger checkpoint in a fresh Basic context (rollback compati
       const restored = (await ctx.sessionQuery.readSession(sessionId)).events
       expect(restored.findLast(event => event.type === 'turn/end')?.data.reason.kind).toBe('completed')
       // The restored surface still carries the Hybrid checkpoint text.
-      expect(restored.filter(event => event.type === 'user/message' && isCompactCheckpointSource(event.data.source))).toHaveLength(1)
+      expect(restored.filter(event => event.type === 'user/message' && isCompactCheckpointSource(event.data.source))).toHaveLength(2)
       await handle.dispose()
     } finally {
       await ctx.fiber.dispose()
